@@ -111,17 +111,21 @@ class CathCanonicalAnglesDataset(Dataset):
         zero_center: bool = True,  # Center the features to have 0 mean
         use_cache: bool = True,  # Use/build cached computations of dihedrals and angles
         cache_dir: Path = Path(os.path.dirname(os.path.abspath(__file__))),
+        debug: bool = False
     ) -> None:
         super().__init__()
         assert pad > min_length
         self.trim_strategy = trim_strategy
         self.pad = pad
         self.min_length = min_length
-
+        self.debug = debug
+        
         # gather files
         self.pdbs_src = pdbs
         fnames = self.__get_pdb_fnames(pdbs)
-        self.fnames = fnames
+        if debug:
+            fnames = fnames[:10]        
+        self.fnames = fnames        
 
         # self.structures should be a list of dicts with keys (angles, coords, fname)
         # Define as None by default; allow for easy checking later
@@ -133,7 +137,7 @@ class CathCanonicalAnglesDataset(Dataset):
         codebase_matches_hash = False
         self.use_cache = use_cache
         self.cache_dir = cache_dir
-        # Always compute for toy; do not save
+    # Always compute for toy; do not save
         if toy:
             if isinstance(toy, bool):
                 toy = 150
@@ -316,17 +320,21 @@ class CathCanonicalAnglesDataset(Dataset):
             f"Computing full dataset of {len(fnames)} with {multiprocessing.cpu_count()} threads"
         )
         # Generate dihedral angles
-        pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
-        struct_arrays = list(pool.map(pfunc, fnames, chunksize=250))
-        coord_arrays = list(pool.map(coords_pfunc, fnames, chunksize=250))
-        pool.close()
-        pool.join()
-
+        if not self.debug:
+            pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
+            struct_arrays = list(pool.map(pfunc, fnames, chunksize=250))
+            coord_arrays = list(pool.map(coords_pfunc, fnames, chunksize=250))
+            pool.close()
+            pool.join()            
+        else:
+            struct_arrays = [pfunc(fname) for fname in fnames]        
+            coord_arrays = [coords_pfunc(fname) for fname in fnames]
+        
         # Contains only non-null structures
         structures = []
         for fname, s, c in zip(fnames, struct_arrays, coord_arrays):
             if s is None:
-                continue
+                continue 
             structures.append(
                 {
                     "angles": s,
@@ -496,6 +504,70 @@ class CathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
     ) -> Dict[str, torch.Tensor]:
         return_dict = super().__getitem__(index, ignore_zero_center=ignore_zero_center)
         return_dict.pop("angles", None)
+        return return_dict
+
+
+class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
+    """
+    Building on the CATH dataset, return the XYZ coordaintes of each alpha carbon
+    """
+
+    feature_names = {"coords": list("xyz")}
+    feature_is_angular = {"coords": [False, False, False]}
+
+    def __init__(self, *args, **kwargs) -> None:        
+        super().__init__(*args, **kwargs)
+
+
+    # due to name mangling
+    def _CathCanonicalAnglesDataset__compute_featurization(
+        self, fnames: Sequence[str]
+    ) -> List[Dict[str, np.ndarray]]:
+        """Get the featurization of the given fnames"""
+        pfunc = functools.partial(
+            canonical_distances_and_dihedrals,
+            distances=EXHAUSTIVE_DISTS,
+            angles=EXHAUSTIVE_ANGLES,
+        )
+        coords_pfunc = functools.partial(extract_backbone_coords, atoms=["CA"])
+        full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
+
+        logging.info(
+            f"Computing full dataset of {len(fnames)} with {multiprocessing.cpu_count()} threads"
+        )
+        # Generate dihedral angles
+        if not self.debug:
+            pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
+            struct_arrays = list(pool.map(pfunc, fnames, chunksize=250))
+            coord_arrays = list(pool.map(coords_pfunc, fnames, chunksize=250))
+            full_coord_arrays = list(pool.map(full_coords_pfunc, fnames, chunksize=250))
+            pool.close()
+            pool.join()            
+        else:
+            struct_arrays = [pfunc(fname) for fname in fnames]        
+            coord_arrays = [coords_pfunc(fname) for fname in fnames]
+            full_coord_arrays = [full_coords_pfunc(fname) for fname in fnames]
+        
+        # Contains only non-null structures
+        structures = []
+        for fname, s, c, c_full in zip(fnames, struct_arrays, coord_arrays, full_coord_arrays):
+            if s is None:
+                continue 
+            structures.append(
+                {
+                    "angles": s,
+                    "coords": c,
+                    "full_coords": c_full,
+                    "fname": fname,
+                }
+            )
+        return structures        
+
+    def __getitem__(
+        self, index, ignore_zero_center: bool = True
+    ) -> Dict[str, torch.Tensor]:
+        return_dict = super().__getitem__(index, ignore_zero_center=ignore_zero_center)
+        return_dict["full_coords"] = self.structures[index]['full_coords'] # ignore pad
         return return_dict
 
 

@@ -31,7 +31,7 @@ def canonical_distances_and_dihedrals(
     fname: str,
     distances: List[str] = MINIMAL_DISTS,
     angles: List[str] = MINIMAL_ANGLES,
-) -> Optional[pd.DataFrame]:
+) -> Optional[pd.DataFrame]:    
     """Parse the pdb file for the given values"""
     assert os.path.isfile(fname)
     warnings.filterwarnings("ignore", ".*elements were guessed from atom_.*")
