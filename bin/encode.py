@@ -3,11 +3,15 @@ from pyrosetta import pose_from_pdb
 import nglview as nv
 from ipywidgets import HBox
 from tqdm import tqdm
+import tempfile
+import nglview as nv
+import imageio
 import mdtraj as md
 from Bio.PDB import PDBParser
 import os
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
-from foldingdiff.tokenizer import *
+from foldingdiff.bpe import *
+from foldingdiff.plotting import *
 import scipy.io
 import numpy as np
 import subprocess
@@ -124,19 +128,47 @@ def call_freqgeo(G):
         n = len(nodelabels)
         breakpoint()    
 
-cath_folder = "/n/home02/msun415/foldingdiff/data/cath/dompdb/"  # Change this to your actual file
-all_coords = []
-files = os.listdir(cath_folder)
-files = sorted(files, key=len)
-for f in tqdm(files[:10]):
-    if f:
-        print(f)
-        all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
 
-dataset = FullCathCanonicalCoordsDataset('/n/home02/msun415/foldingdiff/data/cath/dompdb', use_cache=False, debug=True, zero_center=False)
+def main(args):
+    cath_folder = "/n/home02/msun415/foldingdiff/data/cath/dompdb/"  # Change this to your actual file
+    all_coords = []
+    files = os.listdir(cath_folder)
+    files = sorted(files, key=len)
+    for f in tqdm(files[:10]):
+        if f:
+            print(f)
+            all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
 
-vocab = {}
-for i in range(9):
+    dataset = FullCathCanonicalCoordsDataset('/n/home02/msun415/foldingdiff/data/cath/dompdb', use_cache=False, debug=True, zero_center=False)
+    # call_freqgeo(G)    
+    bpe = BPE(dataset.structures, bins=100)
+    # bpe.tokenizers[0].visualize('/n/home02/msun415/foldingdiff/before.png')
+    bpe.initialize()
+    for t in range(1000):
+        for i, tokenizer in enumerate(bpe.tokenizers):
+            if i > 0:
+                continue
+            tokenizer.visualize(f'/n/home02/msun415/foldingdiff/backbone_{i}_iter={t}.png')        
+        bpe.step()
+        # Some visualizations
+        tokens_by_freq = sorted(bpe._geo_dict.items(), key=lambda v: len(v[1]))
+        counts = []
+        for k,v in tokens_by_freq:
+            print(k, len(v))
+            counts.append(len(v))
+        sorted_bar_plot(counts, title=f"Counts by Binned Geometry, iter={t}", ylabel="Count", save_path=f'/n/home02/msun415/foldingdiff/counts_iter={t}.png')
+        # bpe.tokenizers[0].visualize('/n/home02/msun415/foldingdiff/after.png')        
+        key, vals = tokens_by_freq[-1]
+        # vals = [bpe.tokenizers[i].token_geo(j, 2)['CA:C:1N'] for i, j in vals]
+        # fig, ax = save_histogram(vals, None, title=f"CA:C:1N values for {key}", return_ax=True)  
+        # ax.axvline(sum(bpe._thresholds["CA:C:1N"][323])/2, label='binned avg value')
+        # ax.legend()
+        # fig.savefig(f'/n/home02/msun415/foldingdiff/key_val_hist_iter={t}.png')
+        bpe.visualize(key, f'/n/home02/msun415/foldingdiff/key_iter={t}.png')
+        # Visualize backbone
+
+
+
+if __name__ == "__main__":
     breakpoint()
-    tokens = Tokenizer(dataset.structures[i])
-    # call_freqgeo(G)
+    main(args)

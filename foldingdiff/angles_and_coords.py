@@ -10,6 +10,7 @@ from collections import namedtuple, defaultdict
 from itertools import groupby
 from typing import *
 import warnings
+import matplotlib.pyplot as plt
 
 import numpy as np
 import pandas as pd
@@ -184,6 +185,93 @@ def create_new_chain_nerf(
     return write_coords_to_pdb(coords, out_fname)
 
 
+def rotate_vector(v, k, angle):
+    return (v * np.cos(angle) +
+            np.cross(k, v) * np.sin(angle) +
+            k * np.dot(k, v) * (1 - np.cos(angle)))
+
+
+def update_backbone_positions(N_init, CA_init, C_init, L_CA_C, L_N_CA, new_theta):
+    """
+    Update the positions of the backbone atoms (N, CA, C) of the first residue.
+    
+    Procedure:
+      1. C remains fixed.
+      2. CA_new is placed on the original CA→C line at distance L_CA_C from C.
+      3. Compute the original bond vector from the new CA (i.e. use N_init - CA_new)
+         and determine the current N–CA–C angle measured at CA_new.
+      4. Determine the rotation dtheta = new_theta - (current angle) about the axis defined 
+         by the normal to the plane spanned by (N_init - CA_new) and (C_init - CA_new).
+      5. Rotate the N vector accordingly, rescale to L_N_CA, and add to CA_new to get N_new.
+    
+    Parameters:
+      N_init : array-like, shape (3,)
+          Initial coordinates of the N atom.
+      CA_init : array-like, shape (3,)
+          Initial coordinates of the CA atom.
+      C_init : array-like, shape (3,)
+          Initial coordinates of the C atom (remains fixed).
+      L_CA_C : float
+          New CA–C bond length.
+      L_N_CA : float
+          New N–CA bond length.
+      new_theta : float
+          New N–CA–C bond angle in radians.
+    
+    Returns:
+      N_new, CA_new, C_new : tuple of numpy arrays
+          Updated coordinates for the N, CA, and C atoms.
+    """
+    import numpy as np
+
+    # Convert inputs to numpy arrays
+    N_init = np.array(N_init, dtype=float)
+    CA_init = np.array(CA_init, dtype=float)
+    C_init = np.array(C_init, dtype=float)
+    
+    # Step 1: Update CA position: place CA_new on the C->CA_init line at distance L_CA_C from C.
+    v = CA_init - C_init
+    norm_v = np.linalg.norm(v)
+    if norm_v == 0:
+        raise ValueError("C_init and CA_init are identical.")
+    v = v / norm_v
+    CA_new = C_init + L_CA_C * v
+
+    # Step 2: Recenter the N vector with respect to the new CA position.
+    vec_N = N_init - CA_new
+    vec_C = C_init - CA_new
+    norm_N = np.linalg.norm(vec_N)
+    norm_C = np.linalg.norm(vec_C)
+    if norm_N == 0 or norm_C == 0:
+        raise ValueError("Invalid geometry: one of the bond vectors is zero-length.")
+    
+    # Compute the current N–CA–C angle at the updated CA position.
+    cos_theta = np.dot(vec_N, vec_C) / (norm_N * norm_C)
+    cos_theta = np.clip(cos_theta, -1.0, 1.0)
+    current_theta = np.arccos(cos_theta)
+    
+    # Compute the rotation angle needed: dtheta = new_theta - current_theta.
+    dtheta = new_theta - current_theta
+    
+    # Step 3: Define the rotation axis: the normal to the plane defined by vec_N and vec_C.
+    axis = np.cross(vec_N, vec_C)
+    norm_axis = np.linalg.norm(axis)
+    if norm_axis == 0:
+        raise ValueError("The points are collinear; cannot define a unique plane.")
+    axis = axis / norm_axis
+    
+    # Step 4: Rotate vec_N by dtheta around the computed axis using Rodrigues' formula.
+    rotated_vec = rotate_vector(vec_N, axis, -dtheta)
+    
+    # Step 5: Rescale the rotated vector to have length L_N_CA and compute N_new.
+    rotated_vec = rotated_vec / np.linalg.norm(rotated_vec) * L_N_CA
+    N_new = CA_new + rotated_vec
+    
+    # C remains unchanged.
+    C_new = C_init.copy()
+    
+    return N_new, CA_new, C_new
+
 def write_coords_to_pdb(coords: np.ndarray, out_fname: str) -> str:
     """
     Write the coordinates to the given pdb fname
@@ -287,6 +375,25 @@ def extract_backbone_coords(
 SideChainAtomRelative = namedtuple(
     "SideChainAtom", ["name", "element", "bond_dist", "bond_angle", "dihedral_angle"]
 )
+
+def circular_rmse(angles, ref):
+    """
+    Calculate the circular RMSE of a list of angles relative to a given reference angle.
+    
+    Parameters:
+        angles (array-like): List of angles in radians (e.g., in the range [-pi, pi]).
+        ref (float): The reference angle in radians.
+        
+    Returns:
+        float: The circular RMSE.
+    """
+    angles = np.array(angles)
+    # Compute the difference between each angle and the reference angle,
+    # adjusting for circular wrap-around.
+    diff = (angles - ref + np.pi) % (2 * np.pi) - np.pi
+    # Compute RMSE from these circular differences.
+    rmse = np.sqrt(np.mean(diff**2))
+    return rmse   
 
 
 def angle_between(v1: np.ndarray, v2: np.ndarray) -> float:

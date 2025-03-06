@@ -142,7 +142,6 @@ class CathCanonicalAnglesDataset(Dataset):
             if isinstance(toy, bool):
                 toy = 150
             fnames = fnames[:toy]
-
             logging.info(f"Loading toy dataset of {toy} structures")
             self.structures = self.__compute_featurization(fnames)
         elif use_cache and os.path.exists(self.cache_fname):

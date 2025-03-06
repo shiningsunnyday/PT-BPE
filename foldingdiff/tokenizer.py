@@ -1,15 +1,21 @@
 import numpy as np
 from foldingdiff.angles_and_coords import *
 from foldingdiff.nerf import *
+from foldingdiff.plotting import plot_backbone
+from types import SimpleNamespace
 from itertools import starmap
 from copy import deepcopy
+import tempfile
+import nglview as nv
+import imageio
+import time
 
 class Tokenizer:
     BOND_TYPES = ["N:CA","CA:C","0C:1N"]
     ATOM_TYPES = ["N","CA","C"]
     BOND_ANGLES = ["tau","CA:C:1N","C:1N:1CA"]
     DIHEDRAL_ANGLES = ["psi","omega","phi"]
-
+    BOND_LENGTHS = [N_CA_LENGTH, CA_C_LENGTH, C_N_LENGTH]
     def __init__(self, structure):
         self._angles_and_dists = structure['angles'] # controls coords
         self._coords = structure['coords']
@@ -21,7 +27,6 @@ class Tokenizer:
         self.edges = [[j,j+1,0] for j in range(1,3*self.n)]
         # init
         self._init_coords()
-        self._init_tokens()
     
 
     def _init_coords(self):
@@ -33,16 +38,9 @@ class Tokenizer:
     def _add_tokens(self, tokens):        
         for idx, t, l in self._tokens: # TODO: use just the pointers
             if t in tokens: # new token
-                self.reps[t] = self.reps.get(t, []) + [self._token_geo(idx,l)]
+                self.reps[t] = self.reps.get(t, []) + [self.token_geo(idx,l)]
         for t in self.reps:
             self.reps[t] = np.mean(self.reps[t])
-    
-
-    def build_nerf(self):
-        """
-        Here we take...
-        """
-        breakpoint()
 
 
     def _bond_length(self, idx):
@@ -51,7 +49,7 @@ class Tokenizer:
         elif idx == 1:
             return self._init_ca_c            
         else:
-            return self._angles_and_dists[Tokenizer.BOND_TYPES[idx%3]][idx//3]
+            return self._angles_and_dists[Tokenizer.BOND_TYPES[idx%3]][(idx-2)//3]
         
     def _set_bond_length(self, idx, value):
         if idx == 0:
@@ -59,7 +57,8 @@ class Tokenizer:
         elif idx == 1:
             self._init_ca_c = value
         else:
-            self._angles_and_dists[Tokenizer.BOND_TYPES[idx%3]].iloc[idx//3] = value
+            # max is idx=3*n-2, which is .iloc[n-2], idx=3*n-1 would be n-1
+            self._angles_and_dists[Tokenizer.BOND_TYPES[idx%3]].iloc[(idx-2)//3] = value
     
     def _bond_angle(self, idx):
         if idx == 0:
@@ -82,7 +81,7 @@ class Tokenizer:
         # max is idx=3*n-4, which is (3*n-3)//3=n-1
         self._angles_and_dists[Tokenizer.DIHEDRAL_ANGLES[idx%3]].iloc[(idx+1)//3] = value
 
-    def _token_geo(self, idx, l):
+    def token_geo(self, idx, l):
         """
         Here we want the geometry of bonds idx:idx+l
         To standardize, we always use the dists and angles representation
@@ -97,6 +96,8 @@ class Tokenizer:
             b) no tau, CA:C:1N, C:1N:CA for first angles
             c) no bond lengths for first N:CA, CA:C bonds
         """
+        if idx+l-1 > 3*self.n-1: 
+            raise ValueError(f"idx+l cannot exceed {3*self.n-1}")
         ans = {}
         # Bond dists
         for j in range(idx, idx+l):
@@ -113,8 +114,13 @@ class Tokenizer:
             di = Tokenizer.DIHEDRAL_ANGLES[j%3]
             ans[di] = ans.get(di, []) + [self._dihedral_angle(j)]
         return ans
+    
+    def visualize(self, output_path):
+        coords = self.compute_coords()
+        plot_backbone(coords, output_path, atom_types=np.tile(Tokenizer.ATOM_TYPES, len(coords)//3), tokens=self.tokens)
+        
 
-    def _set_token_geo(self, idx, l, vals):
+    def set_token_geo(self, idx, l, vals):
         """
         Here we want the geometry of bonds idx:idx+l
         To standardize, we always use the dists and angles representation
@@ -149,36 +155,80 @@ class Tokenizer:
         for k in rev_vals:
             assert len(rev_vals[k]) == 0      
 
-    
-    def _init_tokens(self):
-        """
-        Here we treat each bond as an inital "bond-type" token, then standardizing the length of the bond to a fixed value
-        """
-        new_tokens = [(i,self.bond_labels[i],1) for i in range(3*self.n-1)]
-        self.res = {0:[],1:[],2:[]}
-        for i,t,l in new_tokens:
-            self.res[t].append(self._token_geo(i, l))
-        for k in self.res:
-            self.res[k] = {
-                key: list(
-                    starmap(lambda *vals: sum(vals) / len(vals), zip(*(d[key] for d in self.res[k])))
-                )
-                for key in self.res[k][0]
-            }
-        # update avg bond lengths
-        for i,t,l in new_tokens:
-            dic = self.res[t]
-            self._set_token_geo(i, l, dic)
+
+    def _standardize_res(self):
+        breakpoint()
+        # self.res = {0:[],1:[],2:[]}
+        # for i,t,l in new_tokens:
+        #     self.res[t].append(self.token_geo(i, l))        
+        # for k in self.res:
+        #     self.res[k] = {
+        #         key: list(
+        #             starmap(lambda *vals: sum(vals) / len(vals), zip(*(d[key] for d in self.res[k])))
+        #         )
+        #         for key in self.res[k][0]
+        #     }        
+
 
 
     @property
     def angles_and_dists(self):
         return self._angles_and_dists
+    # plot_backbone([N_INIT,CA_INIT,C_INIT],'/n/home02/msun415/foldingdiff/test_before.png')
+    # plot_backbone(list(update_backbone_positions(N_INIT, CA_INIT, C_INIT, geo['CA:C'][0], geo['N:CA'][0], 0.0)),'/n/home02/msun415/foldingdiff/test_after_after.png')
+    @staticmethod
+    def geo_nerf(geo):
+        """
+        Given 3n-1 bonds, we use NERFBuilder by fixing the N_INIT-CA_INIT-C_INIT plane
+        We infer the corrected N_INIT, CA_INIT by fixing C_INIT using the first bond angle and two bond dists
+        Then call NERFBuilder with the remaining args
+        """
+        assert len(geo['N:CA']) == len(geo['CA:C'])
+        assert len(geo['CA:C']) == len(geo.get('0C:1N', []))+1
+        num_bonds = (len(geo['N:CA'])+len(geo['CA:C'])+len(geo.get('0C:1N', [])))
+        assert num_bonds%3 == 2
+        n_init, ca_init, c_init = update_backbone_positions(N_INIT, CA_INIT, C_INIT, geo['CA:C'][0], geo['N:CA'][0], geo['tau'][0])
+        if num_bonds == 2:
+            nerf = SimpleNamespace()
+            setattr(nerf, "cartesian_coords", np.array([n_init, ca_init, c_init]))
+        else:        
+            nerf = NERFBuilder(
+                phi_dihedrals=np.array([np.nan]+geo['phi']),
+                psi_dihedrals=np.array(geo['psi']+[np.nan]),
+                omega_dihedrals=np.array(geo['omega']+[np.nan]),
+                bond_len_n_ca=np.array(geo['N:CA'][1:]), 
+                bond_len_ca_c=np.array(geo['CA:C'][1:]), 
+                bond_len_c_n=np.array(geo['0C:1N']),
+                bond_angle_n_ca=np.array(geo['C:1N:1CA']), 
+                bond_angle_ca_c=np.array(geo['tau'][1:]), 
+                bond_angle_c_n=np.array(geo['CA:C:1N']),
+                init_coords=[n_init,ca_init,c_init]
+            )
+        return nerf
     
-    @angles_and_dists.setter
-    def angles_and_dists(self, i, attr, value):
-        breakpoint()
-        self._update_coords()
+
+    def compute_coords(self, index=0, length=float("inf")):
+        """
+        Compute coords for length atoms from position index
+        We call token_geo to get the angular information
+        Round to the nearest residues
+        Then return the coords
+        """
+        length = min(length, 3*self.n-1-index) 
+        start = 3*(index//3)
+        end = 3*(((index+length-1)+1)//3)+1 # end bond id, but we round it up so it's 1 (mod 3)
+        off_start = index-start
+        off_end = end-(index+length-1)
+        geo = self.token_geo(start, end-start+1) # round from nearest residues
+        geo_nerf = Tokenizer.geo_nerf(geo)
+        # assert np.all(nerf.cartesian_coords == geo_nerf)
+        coords = geo_nerf.cartesian_coords
+        return coords[off_start: len(coords)-off_end] # offset
+    
+    # @angles_and_dists.setter
+    # def angles_and_dists(self, i, attr, value): # use this from other classes
+    #     breakpoint()
+    #     self._update_coords()
 
     @property
     def g(self):
