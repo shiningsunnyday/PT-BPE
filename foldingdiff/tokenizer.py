@@ -9,6 +9,8 @@ import tempfile
 import nglview as nv
 import imageio
 import time
+import logging
+logger = logging.getLogger(__name__)
 
 class Tokenizer:
     BOND_TYPES = ["N:CA","CA:C","0C:1N"]
@@ -169,6 +171,9 @@ class Tokenizer:
         #         for key in self.res[k][0]
         #     }        
 
+    @staticmethod
+    def num_bonds(geo):
+        return (len(geo.get('N:CA', []))+len(geo.get('CA:C', []))+len(geo.get('0C:1N', [])))
 
 
     @property
@@ -185,7 +190,7 @@ class Tokenizer:
         """
         assert len(geo['N:CA']) == len(geo['CA:C'])
         assert len(geo['CA:C']) == len(geo.get('0C:1N', []))+1
-        num_bonds = (len(geo['N:CA'])+len(geo['CA:C'])+len(geo.get('0C:1N', [])))
+        num_bonds = Tokenizer.num_bonds(geo)
         assert num_bonds%3 == 2
         n_init, ca_init, c_init = update_backbone_positions(N_INIT, CA_INIT, C_INIT, geo['CA:C'][0], geo['N:CA'][0], geo['tau'][0])
         if num_bonds == 2:

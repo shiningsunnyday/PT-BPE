@@ -269,7 +269,7 @@ def legend_key_to_tuple(label):
     return tuple(tup)
 
 
-def plot_backbone(coords, output_path, atom_types, tokens=None, title=""):
+def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_factor=0.7):
     """
     Plots a protein backbone given an array of coordinates and saves the image as a PNG.
     
@@ -284,14 +284,20 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title=""):
       tokens : list of tuples (int, str, int), optional
           Each tuple (start, bt, length) indicates that the bonds from index start to start+length-1 
           (i.e. atoms start through start+length) belong to the same contiguous token.
-          Each token will be drawn in black (you can change the color scheme as desired)
-          and each individual bond segment is annotated with its token label (bt).
-          If None, the entire backbone is drawn in red.
+          Each token will be drawn in color (using a colormap) and each individual bond segment is
+          annotated with its token label (bt). If None, the entire backbone is drawn in red.
       title : str, optional
           Title for the plot.
     """
     coords = np.asarray(coords)
-    
+    n_atoms = coords.shape[0]
+    # Compute a marker/font scale: if there are many atoms, scale down; if few, scale up.
+    # Here we use the square root of 300/n_atoms, clamped between 0.5 and 1.5.
+    marker_scale = np.clip(np.sqrt(300.0 / n_atoms), 0.1, 10.)
+    atom_marker_size = 20 * marker_scale
+    boundary_marker_size = 50 * marker_scale
+    angle_font_size = 4 * marker_scale
+
     # Create a larger 3D plot for zooming in.
     fig = plt.figure(figsize=(16, 12))
     ax = fig.add_subplot(111, projection='3d')
@@ -305,16 +311,16 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title=""):
     C_coords = coords[atom_types_arr == 'C']
     
     ax.scatter(N_coords[:, 0], N_coords[:, 1], N_coords[:, 2],
-               color='blue', s=20, label='N')
+               color='blue', s=atom_marker_size, label='N')
     ax.scatter(CA_coords[:, 0], CA_coords[:, 1], CA_coords[:, 2],
-               color='orange', s=20, label='CA')
+               color='orange', s=atom_marker_size, label='CA')
     ax.scatter(C_coords[:, 0], C_coords[:, 1], C_coords[:, 2],
-               color='green', s=20, label='C')
+               color='green', s=atom_marker_size, label='C')
     
     # Plot bonds using tokens if provided.
     token_lookup = {}
+    cmap = cm.get_cmap('tab10')
     if tokens is not None:
-        cmap = cm.get_cmap('tab10')
         for token in tokens:
             start, bt, length = token
             token_coords = coords[start: start + length + 1]
@@ -322,27 +328,23 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title=""):
             for i in range(length):
                 segment = token_coords[i:i+2]
                 ax.plot(segment[:, 0], segment[:, 1], segment[:, 2],
-                        color=cmap(bt%10), 
-                        label=f"Token {bt}",
+                        color=cmap(bt % 10), 
+                        label=f"Token {bt}" if i == 0 else None,
                         linewidth=2)
-                # Calculate the midpoint of the segment for annotation.
-                # midpoint = segment.mean(axis=0)
-                # txt = ax.text(midpoint[0], midpoint[1], midpoint[2],
-                #               f'{bt}', color='black', fontweight='bold', fontsize=6)
-                # txt.set_path_effects([PathEffects.withStroke(linewidth=3, foreground='white')])
         # Highlight the boundary atoms between tokens.
-        boundary_marker_size = 50  # adjust as needed
         for token in tokens:
             start, bt, length = token
             if bt not in token_lookup:
-                token_lookup[bt] = [{'N':'blue','CA':'orange','C':'green'}[atom_types[index]] for index in range(start, start+length+1)]
+                # Create a token lookup if needed (this example uses a mapping for colors).
+                token_lookup[bt] = [{'N':'blue','CA':'orange','C':'green'}[atom_types[index]] 
+                                      for index in range(start, start+length+1)]
             # The boundary atoms for the token are at index start and start+length.
             left_atom = coords[start]
             right_atom = coords[start + length]
             ax.scatter(left_atom[0], left_atom[1], left_atom[2],
                        color='black', s=boundary_marker_size, zorder=10)
             ax.scatter(right_atom[0], right_atom[1], right_atom[2],
-                       color='black', s=boundary_marker_size, zorder=10)                
+                       color='black', s=boundary_marker_size, zorder=10)
     else:
         # Plot the entire backbone as one red line.
         ax.plot(coords[:, 0], coords[:, 1], coords[:, 2],
@@ -354,7 +356,6 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title=""):
     r = 0.3 * min_bond_length  # radius for the arc
     
     # Annotate each bond-bond joint with its angle.
-    # For each internal atom (skipping the first and last)
     for i in range(1, coords.shape[0]-1):
         joint = coords[i]
         v1 = coords[i-1] - joint  # direction toward the previous atom
@@ -382,12 +383,12 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title=""):
         ax.plot(arc_points[:, 0], arc_points[:, 1], arc_points[:, 2],
                 color='black', linewidth=2)
         
-        # Compute the midpoint of the arc (at t = angle/2).
+        # Compute the midpoint of the arc.
         mid_point = joint + r*(np.cos(angle/2)*u1 + np.sin(angle/2)*w)
         
-        # Annotate the angle (in radians, formatted to 2 decimals) at the arc midpoint.
+        # Annotate the angle (in radians, formatted to 2 decimals).
         txt = ax.text(mid_point[0], mid_point[1], mid_point[2],
-                      f"{angle:.2f}", color='black', fontweight='bold', fontsize=4)
+                      f"{angle:.2f}", color='black', fontweight='bold', fontsize=angle_font_size)
         txt.set_path_effects([PathEffects.withStroke(linewidth=3, foreground='white')])
     
     # Set axis labels.
@@ -398,26 +399,27 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title=""):
     # Adjust the view angle.
     ax.view_init(elev=30, azim=45)
     
-    # Optionally, set a title.
     if title:
-        ax.set_title(title)
+        ax.set_title(title, fontsize=4*marker_scale)
     
     # Compute coordinate bounds and set tighter limits to "zoom in".
-    x_min, x_max = -10, 20 # coords[:, 0].min(), coords[:, 0].max()
-    y_min, y_max = -15, 20 # coords[:, 1].min(), coords[:, 1].max()
-    z_min, z_max = -20, 15 # coords[:, 2].min(), coords[:, 2].max()
+    x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
+    y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
+    z_min, z_max = coords[:, 2].min(), coords[:, 2].max()    
     x_mid = (x_min + x_max) / 2
     y_mid = (y_min + y_max) / 2
     z_mid = (z_min + z_max) / 2
     max_range = max(x_max - x_min, y_max - y_min, z_max - z_min)
-    zoom_factor = 0.7  # adjust this value as needed; smaller => more zoom
+    if zoom_factor is None:
+        zoom_factor = 0.75  # adjust as needed; smaller => more zoom
     new_range = max_range * zoom_factor
     ax.set_xlim(x_mid - new_range/2, x_mid + new_range/2)
     ax.set_ylim(y_mid - new_range/2, y_mid + new_range/2)
     ax.set_zlim(z_mid - new_range/2, z_mid + new_range/2)
-
+    
     handles, labels = ax.get_legend_handles_labels()
     unique = {}
+    # Sorting legend entries with a helper (legend_key_to_tuple defined elsewhere)
     for handle, label in sorted(zip(handles, labels), key=lambda it: legend_key_to_tuple(it[1])):
         if label not in unique:
             unique[label] = handle
@@ -430,15 +432,17 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title=""):
             if token_id_match is None:
                 continue
             bt = int(token_id_match.groups()[0])
-            color = cmap(bt%10)
+            color = cmap(bt % 10)
             handles[i] = BackboneFragment(bt, token_lookup[bt], color)
         ax.legend(handles, labels,
                   handler_map={BackboneFragment: HandlerBackboneFragment()})
+    else:
+        ax.legend(unique.values(), unique.keys())
+    
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
     plt.close(fig)
     print("Backbone plot saved to:", output_path)
-
 
 
 def save_histogram(values, path, bins=10, title="", return_ax=False):

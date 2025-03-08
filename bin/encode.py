@@ -15,6 +15,29 @@ from foldingdiff.plotting import *
 import scipy.io
 import numpy as np
 import subprocess
+import argparse
+from datetime import datetime
+
+def setup_logger(log_dir):
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = os.path.join(log_dir, f"log_{timestamp}.log")
+    
+    # Configure the root logger
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_filename),
+            logging.StreamHandler()
+        ]
+    )
+    logging.getLogger().info("Logger initialized.")
+
+def get_logger():
+    """Helper to retrieve the global logger."""
+    return LOGGER
 
 def visualize():
     # Initialize PyRosetta
@@ -128,47 +151,60 @@ def call_freqgeo(G):
         n = len(nodelabels)
         breakpoint()    
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
+    parser.add_argument("--save-dir", type=str, default="plots/bpe", 
+                        help="Directory to save output files (images, pdb files, plots, etc.).")
+    parser.add_argument("--log-dir", type=str, default="logs", 
+                        help="Directory where log files will be saved.")
+    return parser.parse_args()
 
-def main(args):
-    cath_folder = "/n/home02/msun415/foldingdiff/data/cath/dompdb/"  # Change this to your actual file
+def main():
+    args = parse_args()
+    setup_logger(args.log_dir)
+    logger = logging.getLogger(__name__)
+    logger.info("Script started.")
+    
+    # Use args.save_dir for saving outputs.
+    # Input folder remains the same for now.
+    cath_folder = "/n/home02/msun415/foldingdiff/data/cath/dompdb/"
     all_coords = []
+    
     files = os.listdir(cath_folder)
     files = sorted(files, key=len)
     for f in tqdm(files[:10]):
         if f:
-            print(f)
+            logger.info("Processing file: %s", f)
             all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
 
-    dataset = FullCathCanonicalCoordsDataset('/n/home02/msun415/foldingdiff/data/cath/dompdb', use_cache=False, debug=True, zero_center=False)
-    # call_freqgeo(G)    
+    dataset = FullCathCanonicalCoordsDataset('/n/home02/msun415/foldingdiff/data/cath/dompdb', 
+                                               use_cache=False, debug=True, zero_center=False)
     bpe = BPE(dataset.structures, bins=100)
-    # bpe.tokenizers[0].visualize('/n/home02/msun415/foldingdiff/before.png')
     bpe.initialize()
     for t in range(1000):
         for i, tokenizer in enumerate(bpe.tokenizers):
             if i > 0:
                 continue
-            tokenizer.visualize(f'/n/home02/msun415/foldingdiff/backbone_{i}_iter={t}.png')        
+            # Save visualization using the output directory provided
+            visual_path = os.path.join(args.save_dir, f"backbone_{i}_iter={t}.png")
+            tokenizer.visualize(visual_path)
         bpe.step()
-        # Some visualizations
         tokens_by_freq = sorted(bpe._geo_dict.items(), key=lambda v: len(v[1]))
         counts = []
-        for k,v in tokens_by_freq:
-            print(k, len(v))
+        for k, v in tokens_by_freq:
+            logger.info("%s: %d occurrences", k, len(v))
             counts.append(len(v))
-        sorted_bar_plot(counts, title=f"Counts by Binned Geometry, iter={t}", ylabel="Count", save_path=f'/n/home02/msun415/foldingdiff/counts_iter={t}.png')
-        # bpe.tokenizers[0].visualize('/n/home02/msun415/foldingdiff/after.png')        
+        plot_path = os.path.join(args.save_dir, f"counts_iter={t}.png")
+        sorted_bar_plot(counts, title=f"Counts by Binned Geometry, iter={t}", 
+                        ylabel="Count", save_path=plot_path)
         key, vals = tokens_by_freq[-1]
-        # vals = [bpe.tokenizers[i].token_geo(j, 2)['CA:C:1N'] for i, j in vals]
-        # fig, ax = save_histogram(vals, None, title=f"CA:C:1N values for {key}", return_ax=True)  
-        # ax.axvline(sum(bpe._thresholds["CA:C:1N"][323])/2, label='binned avg value')
-        # ax.legend()
-        # fig.savefig(f'/n/home02/msun415/foldingdiff/key_val_hist_iter={t}.png')
-        bpe.visualize(key, f'/n/home02/msun415/foldingdiff/key_iter={t}.png')
-        # Visualize backbone
+        key_vis_path = os.path.join(args.save_dir, f"key_iter={t}.png")
+        bpe.visualize(key, key_vis_path)
+    
+    logger.info("Script finished.")
 
 
 
 if __name__ == "__main__":
     breakpoint()
-    main(args)
+    main()
