@@ -122,9 +122,7 @@ class CathCanonicalAnglesDataset(Dataset):
         
         # gather files
         self.pdbs_src = pdbs
-        fnames = self.__get_pdb_fnames(pdbs)
-        if debug:
-            fnames = fnames[:10]        
+        fnames = self.__get_pdb_fnames(pdbs)       
         self.fnames = fnames        
 
         # self.structures should be a list of dicts with keys (angles, coords, fname)

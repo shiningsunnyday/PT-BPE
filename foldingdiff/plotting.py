@@ -57,7 +57,7 @@ class HandlerBackboneFragment(HandlerBase):
 
         # Create lines connecting consecutive circles.
         lines = [Line2D([x_positions[i], x_positions[i + 1]], [y_center, y_center],
-                        color=orig_handle.color, lw=2) for i in range(n - 1)]
+                        color=orig_handle.color, lw=r) for i in range(n - 1)]
 
         # Combine all artists.
         artists = circles + lines

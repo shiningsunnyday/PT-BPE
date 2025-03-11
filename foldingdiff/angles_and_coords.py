@@ -44,11 +44,13 @@ def canonical_distances_and_dihedrals(
         return None
     # Pull out the atomarray from atomarraystack
     source_struct = source.get_structure()[0]
-
     # First get the dihedrals
     try:
         phi, psi, omega = struc.dihedral_backbone(source_struct)
         calc_angles = {"phi": phi, "psi": psi, "omega": omega}
+        if (psi==psi).sum() < len(psi)-1:
+            breakpoint()
+            phi, psi, omega = struc.dihedral_backbone(source_struct)
     except struc.BadStructureError:
         logging.debug(f"{fname} contains a malformed structure - skipping")
         return None
