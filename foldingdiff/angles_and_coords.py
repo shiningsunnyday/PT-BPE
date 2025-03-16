@@ -23,7 +23,33 @@ from foldingdiff import nerf
 
 EXHAUSTIVE_ANGLES = ["phi", "psi", "omega", "tau", "CA:C:1N", "C:1N:1CA"]
 EXHAUSTIVE_DISTS = ["0C:1N", "N:CA", "CA:C"]
-
+STANDARD_RESIDUES = {
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", 
+    "HIS", "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER", 
+    "THR", "TRP", "TYR", "VAL"
+}
+STANDARD_SIDECHAIN_ORDER = {
+    "ALA": ["CB"],
+    "ARG": ["CB", "CG", "CD", "NE", "CZ", "NH1", "NH2"],
+    "ASN": ["CB", "CG", "OD1", "ND2"],
+    "ASP": ["CB", "CG", "OD1", "OD2"],
+    "CYS": ["CB", "SG"],
+    "GLN": ["CB", "CG", "CD", "OE1", "NE2"],
+    "GLU": ["CB", "CG", "CD", "OE1", "OE2"],
+    "GLY": [],
+    "HIS": ["CB", "CG", "ND1", "CD2", "CE1", "NE2"],
+    "ILE": ["CB", "CG1", "CG2", "CD1"],
+    "LEU": ["CB", "CG", "CD1", "CD2"],
+    "LYS": ["CB", "CG", "CD", "CE", "NZ"],
+    "MET": ["CB", "CG", "SD", "CE"],
+    "PHE": ["CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ"],
+    "PRO": ["CB", "CG", "CD"],
+    "SER": ["CB", "OG"],
+    "THR": ["CB", "OG1", "CG2"],
+    "TRP": ["CB", "CG", "CD1", "NE1", "CE2", "CZ2", "CH2", "CZ3", "CE3"],
+    "TYR": ["CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ"],
+    "VAL": ["CB", "CG1", "CG2"]
+}
 MINIMAL_ANGLES = ["phi", "psi", "omega"]
 MINIMAL_DISTS = []
 
@@ -49,7 +75,6 @@ def canonical_distances_and_dihedrals(
         phi, psi, omega = struc.dihedral_backbone(source_struct)
         calc_angles = {"phi": phi, "psi": psi, "omega": omega}
         if (psi==psi).sum() < len(psi)-1:
-            breakpoint()
             phi, psi, omega = struc.dihedral_backbone(source_struct)
     except struc.BadStructureError:
         logging.debug(f"{fname} contains a malformed structure - skipping")
@@ -358,6 +383,39 @@ def get_pdb_length(fname: str) -> int:
     return l
 
 
+def is_valid_atom_array(lst):
+    if len(lst) % 3 != 0:
+        return False
+    # if lst[0] < 0: # negative residue idx
+    #     return False
+    for i in range(len(lst) // 3):
+        if not (lst[i*3] == lst[i*3+1] == lst[i*3+2]):
+            return False
+        if not (i == 0 or lst[i*3] > lst[(i-1)*3]):
+            return False
+    return True
+
+
+def extract_backbone_residue_idxes(
+    fname: str, atoms: Collection[Literal["N", "CA", "C"]] = ["CA"]
+) -> Optional[np.ndarray]:
+    """Extract the atom idxes of the alpha carbons"""
+    opener = gzip.open if fname.endswith(".gz") else open
+    with opener(str(fname), "rt") as f:
+        structure = PDBFile.read(f)
+    if structure.get_model_count() > 1:
+        return None
+    chain = structure.get_structure(extra_fields=["atom_id"])[0]
+    backbone = chain[struc.filter_backbone(chain)]
+    ca = [c for c in backbone if c.atom_name in atoms]
+    idxes = [c.res_id for c in backbone if c.atom_name in atoms]
+    # has 3 atoms per residue and residue id is increasing
+    if not is_valid_atom_array(idxes):
+        return None
+    return idxes
+
+
+
 def extract_backbone_coords(
     fname: str, atoms: Collection[Literal["N", "CA", "C"]] = ["CA"]
 ) -> Optional[np.ndarray]:
@@ -372,6 +430,100 @@ def extract_backbone_coords(
     ca = [c for c in backbone if c.atom_name in atoms]
     coords = np.vstack([c.coord for c in ca])
     return coords
+
+
+def extract_side_chain_coords(fname: str) -> Optional[List[Tuple[str, List[Tuple[str, Optional[np.ndarray]]]]]]:
+    """
+    Extract the coordinates of all side chain atoms, grouped by residue,
+    and express them in a canonical local frame defined by the backbone atoms.
+    
+    For each residue:
+      - The canonical frame is defined as:
+          origin = CA coordinate
+          x-axis = normalized vector from CA to C
+          y-axis = normalized cross product of (N - CA) and x-axis
+          z-axis = cross product of x-axis and y-axis
+      - Side-chain atoms are transformed into this frame.
+      - The side-chain atoms are then re-ordered according to a pre-defined 
+        canonical ordering (for that amino acid type). If an expected atom 
+        is missing, None is inserted.
+    
+    Returns:
+      A list of tuples, one per residue, of the form:
+         (res_name, [(atom_name, transformed_coord), ...])
+      where transformed_coord is a 3-element numpy array in the canonical frame,
+      or None if the atom is missing.
+    """
+    opener = gzip.open if fname.endswith(".gz") else open
+    with opener(fname, "rt") as f:
+        structure = PDBFile.read(f)
+    
+    # Only handle single-model structures
+    if structure.get_model_count() > 1:
+        return None
+    
+    # Assuming the domain file represents a single chain structure
+    chain = structure.get_structure()[0]
+    
+    sidechain_by_residue = []
+    
+    # Iterate through residues using your residue iterator
+    for residue in struc.residue_iter(chain):
+        # Assumption: all atoms in residue share the same res_name and res_id.
+        res_name = residue.res_name[0].strip()  # e.g., "ARG", "ALA", etc.
+        if res_name not in STANDARD_RESIDUES:
+            continue  # or handle non-standard residues as needed
+        
+        # Build a dictionary for backbone atoms (N, CA, C)
+        backbone = {atom.atom_name: atom for atom in residue if atom.atom_name in {"N", "CA", "C"}}
+        if not {"N", "CA", "C"}.issubset(backbone):
+            continue  # Skip if any backbone atom is missing
+        
+        N_coord = backbone["N"].coord
+        CA_coord = backbone["CA"].coord
+        C_coord = backbone["C"].coord
+        
+        # Define the canonical frame:
+        # x-axis: from CA to C (normalized)
+        x_axis = C_coord - CA_coord
+        norm_x = np.linalg.norm(x_axis)
+        if norm_x == 0:
+            continue
+        x_axis = x_axis / norm_x
+        
+        # y-axis: normalized cross product of (N - CA) and x_axis
+        y_axis = np.cross((N_coord - CA_coord), x_axis)
+        norm_y = np.linalg.norm(y_axis)
+        if norm_y == 0:
+            continue
+        y_axis = y_axis / norm_y
+        
+        # z-axis: cross product of x_axis and y_axis
+        z_axis = np.cross(x_axis, y_axis)
+        
+        # Build the rotation matrix; columns are the new basis vectors.
+        R = np.column_stack((x_axis, y_axis, z_axis))
+        
+        # For side-chain atoms, re-order them according to canonical ordering.
+        canonical_order = STANDARD_SIDECHAIN_ORDER[res_name]
+        ordered_sidechain_atoms = []
+        for atom_name in canonical_order:
+            found_atom = None
+            for atom in residue:
+                if atom.atom_name == atom_name:
+                    found_atom = atom
+                    break
+            if found_atom is not None:
+                relative = found_atom.coord - CA_coord
+                # Transform to canonical frame: dot product with each basis vector
+                new_coord = np.dot(relative, R)
+                ordered_sidechain_atoms.append((atom_name, new_coord))
+            else:
+                ordered_sidechain_atoms.append((atom_name, None))
+        
+        sidechain_by_residue.append((res_name, ordered_sidechain_atoms))
+    
+    return sidechain_by_residue
 
 
 SideChainAtomRelative = namedtuple(

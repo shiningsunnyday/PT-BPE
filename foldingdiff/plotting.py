@@ -444,6 +444,28 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
     plt.close(fig)
     print("Backbone plot saved to:", output_path)
 
+def plot_times(times):
+    """
+    Plots a list of times (from time.perf_counter()) and returns the matplotlib figure and axes.
+    
+    Parameters:
+      times : list or array-like
+          A list of time stamps (in seconds) logged using time.perf_counter().
+    
+    Returns:
+      fig, ax : matplotlib.figure.Figure, matplotlib.axes.Axes
+          The figure and axes objects for further customization.
+    """
+    # Create a figure and axes.
+    fig, ax = plt.subplots()
+    
+    # Plot the times. x-axis is simply the index.
+    ax.plot(range(len(times)), times, marker='o', linestyle='-')
+    ax.set_yscale('log')
+    # Label the axes
+    
+    return fig, ax
+
 
 def save_histogram(values, path, bins=10, title="", return_ax=False):
     """

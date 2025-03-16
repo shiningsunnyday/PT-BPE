@@ -4,6 +4,7 @@ import heapq
 import json
 import logging
 from collections import defaultdict
+from sortedcontainers import SortedDict
 logger = logging.getLogger(__name__)
 
 class BPE():
@@ -20,6 +21,7 @@ class BPE():
         self.n = len(self.tokenizers)
         self.save_dir = save_dir
         self._step = 0
+        self._times = []
     
     def initialize(self):
         logger.info(f"Initialize start")
@@ -48,6 +50,17 @@ class BPE():
                 t.set_token_geo(i, l, self._bin_val(dic))
             t.token_pos = token_pos
             t.tokens = new_tokens
+
+    
+    def _bin_side_chain(self, key):
+        """
+        We obtain the side chain placement in a data-driven way
+        We iterate through every residue of the same amino acid
+        Where the N-CA-C bond angle is in the same bin
+        Then plot the variation in positions
+        For reference, also plot variation across all bins
+        """      
+        breakpoint()        
 
 
     def _init_thresholds(self):
@@ -108,17 +121,30 @@ class BPE():
         Insert (binned_geometry, count) into pqueue
         """
         self._geo_dict = defaultdict(set)
+        self._priority_dict = SortedDict() # like c++ map, constant largest element, log n arbitrary element insertion/deletion
+        self._key_to_priority = {}
         self._geo_step = {}
         for i in range(self.n):
             for j in range(len(self.tokenizers[i].tokens)-1):
                 token_pair = self.tokenizers[i].tokens[j:j+2]
                 geo_key = self.compute_geo_key(token_pair, i)
-                (i1, _, l1), (i2, _, l2) = token_pair
+                (i1, _, l1), (i2, _, l2) = token_pair                
                 self._geo_dict[geo_key].add((i, i2)) # store the start of the second token
         for key in self._geo_dict:
             self._geo_step[key] = 0
-        self._pqueue = [(-len(self._geo_dict[key]), key, 0) for key in self._geo_dict]
-        heapq.heapify(self._pqueue)
+        # self._pqueue = [(-len(self._geo_dict[key]), key, 0) for key in self._geo_dict]        
+        for key in self._geo_dict:
+            length = Tokenizer.num_bonds(json.loads(key))
+            # priority: (#(secondary membership), #(membership), key)
+            sec_memb = 0
+            for i, i2 in self._geo_dict[key]:
+                t = self.tokenizers[i]
+                i1 = t.token_pos[i2-1]
+                sec_memb += t.is_secondary(i1, length)
+            priority = (sec_memb, len(self._geo_dict[key]), key)
+            self._priority_dict[priority] = None # not useful
+            self._key_to_priority[key] = priority
+        # heapq.heapify(self._pqueue)
 
 
     def old_bin(self):
@@ -149,6 +175,14 @@ class BPE():
         return key_dict_copy
     
 
+    def plot_times(self, output_path):
+        fig, ax = plot_times(self._times)
+        ax.set_xlabel("BPE Step")
+        ax.set_ylabel("Log Seconds")
+        ax.set_title("Time per step")        
+        fig.savefig(output_path)
+    
+
     def visualize(self, key, output_path):
         """
         Visualize a key, take the average of the bin
@@ -158,30 +192,35 @@ class BPE():
         key_dict = self._bin_val(key_dict)
         # since geo_nerf expects 3*n-1 bonds, we do a similar procedure as in Tokenizer.compute_coords, rounding and offsetting
         i, index = next(iter(vals))
-        length = sum([len(key_dict[bt]) for bt in Tokenizer.BOND_TYPES if bt in key_dict])
-        start = 3*(index//3)
-        end = 3*(((index+length-1)+1)//3)+1 # end bond id, but we round it up so it's 1 (mod 3)
-        off_start = index-start
-        off_end = end-(index+length-1)
-        geo = self.tokenizers[i].token_geo(start, end-start+1) # round from nearest residues        
+        t = self.tokenizers[i]
+        # index is the start of second token
+        i1 = t.token_pos[index-1] # start of token pair
+        length = Tokenizer.num_bonds(key_dict)
+        start = 3*(i1//3)
+        end = 3*(((i1+length-1)+1)//3)+1 # end bond id, but we round it up so it's 1 (mod 3)
+        off_start = i1-start
+        off_end = end-(i1+length-1)
+        geo = t.token_geo(start, end-start+1) # round from nearest residues
         for k in geo:
             if k in key_dict:
                 n = len(key_dict[k])
-                if k in Tokenizer.BOND_TYPES:                
-                    bt_index = Tokenizer.BOND_TYPES.index(k)                        
-                    geo[k] = [Tokenizer.BOND_LENGTHS[bt_index] for _ in geo[k]] # default values
-                    if index%3 > bt_index:
-                        assert np.abs(len(geo[k])-n) <= 2.
-                        for j in range(n):
-                            geo[k][1+j] = key_dict[k][j]
-                    else:
-                        assert np.abs(len(geo[k])-n) <= 1.
-                        for j in range(n):
-                            geo[k][j] = key_dict[k][j]
+                if k in Tokenizer.BOND_TYPES:
+                    bt_index = Tokenizer.BOND_TYPES.index(k)           
+                    geo[k] = [Tokenizer.BOND_LENGTHS[bt_index] for _ in geo[k]] 
+                elif k in Tokenizer.BOND_ANGLES:
+                    bt_index = Tokenizer.BOND_ANGLES.index(k)           
                 else:
-                    assert n == len(geo[k])
+                    bt_index = Tokenizer.DIHEDRAL_ANGLES.index(k)                       
+                # what is first idx that key_dict defines
+                first = i1%3
+                if first > bt_index: # off by 1 from start
+                    assert np.abs(len(geo[k])-n) <= 2.
                     for j in range(n):
-                        geo[k][j] = key_dict[k][j] 
+                        geo[k][1+j] = key_dict[k][j]
+                else: # off by 0 from start
+                    assert np.abs(len(geo[k])-n) <= 1.
+                    for j in range(n):
+                        geo[k][j] = key_dict[k][j]
         geo_nerf = Tokenizer.geo_nerf(geo)
         coords = geo_nerf.cartesian_coords
         bts = np.tile(Tokenizer.ATOM_TYPES, (end-start+2)//3)
@@ -304,15 +343,20 @@ class BPE():
         #     logger.info(f"Pop {key} as most frequent key, {-count} times")
         #     if self._geo_step[key] == step:
         #         break
-        key = None
-        count = float("-inf")
-        for k, vals in self._geo_dict.items():
-            if len(vals) > count:
-                key = k
-                count = len(vals)
-        logger.info(f"Pop {key} as most frequent key, {count} times")        
+        # loop to find most frequent token pair
+        # key = None
+        # count = float("-inf")
+        # for k, vals in self._geo_dict.items():
+        #     if len(vals) > count:
+        #         key = k
+        #         count = len(vals)
+        key_tup = self._priority_dict.peekitem(-1)
+        (num_sec, count, key), _ = key_tup
+        assert count == len(self._geo_dict[key])
+        # self._bin_side_chain(key) # later add to _tokens
+        logger.info(f"Pop {key} as most frequent key, {count} times, {num_sec} secondary structures")        
         # visualizations
-        # vis_start_time = time.time()
+        vis_start_time = time.time()
         # tokens_by_freq = sorted(self._geo_dict.items(), key=lambda t: len(t[1]))
         # counts = []
         # for k, vals in tokens_by_freq:
@@ -323,9 +367,9 @@ class BPE():
         # sorted_bar_plot(counts, title=f"Counts by Binned Geometry, iter={self._step}", 
         #                 ylabel="Count", save_path=plot_path)
         # key, _ = tokens_by_freq[-1]
-        # key_vis_path = os.path.join(self.save_dir, f"key_iter={self._step}.png")
-        # self.visualize(key, key_vis_path)    
-        # vis_time = time.perf_counter()- vis_start_time
+        key_vis_path = os.path.join(self.save_dir, f"key_iter={self._step}.png")
+        self.visualize(key, key_vis_path)
+        vis_time = time.perf_counter()- vis_start_time
         # define new token
         key_dict = json.loads(key)
         binned_key_dict = self._bin_val(key_dict)
@@ -338,7 +382,7 @@ class BPE():
         # add_geo_dict = {} # add keys for _geo_dict
         # rem_geo_dict = {} # remove keys for _geo_dict
         inds = [0 for _ in range(self.n)]
-        diff_count = {}
+        diff_count = defaultdict(list)
         # time
         step_times = {
             "sort": 0.0,
@@ -370,7 +414,7 @@ class BPE():
             # --- Step 1: Decrement key ---
             start_time = time.perf_counter()
             self._geo_dict[key].remove((i, index))
-            diff_count[key] = diff_count.get(key, 0) - 1
+            diff_count[key].append((i, i1, length, "remove"))
             step_times["step1"] += time.perf_counter() - start_time
 
             # --- Step 2: Update t.token_pos and t.tokens ---
@@ -403,10 +447,10 @@ class BPE():
 
             if left_key:
                 self._geo_dict[left_key].remove((i, i1))
-                diff_count[left_key] = diff_count.get(left_key, 0) - 1
+                diff_count[left_key].append((i, i0, l0+l1, "remove"))
             if right_key:
                 self._geo_dict[right_key].remove((i, i3))
-                diff_count[right_key] = diff_count.get(right_key, 0) - 1
+                diff_count[right_key].append((i, i2, l2+l3, "remove"))
             step_times["step3_4"] += time.perf_counter() - start_time
 
             # --- Step 5: Increment new pairs ---
@@ -414,11 +458,12 @@ class BPE():
             if left_key:
                 new_left_key = self.compute_geo_key(((i0, None, l0), (i1, None, l1 + l2)), i)
                 self._geo_dict[new_left_key].add((i, i1))
-                diff_count[new_left_key] = diff_count.get(new_left_key, 0) + 1
+                diff_count[new_left_key].append((i, i0, l0+l1+l2, "add"))
             if right_key:
+                assert i1+l1+l2 == i3
                 new_right_key = self.compute_geo_key(((i1, None, l1 + l2), (i3, None, l3)), i)
                 self._geo_dict[new_right_key].add((i, i3))
-                diff_count[new_right_key] = diff_count.get(new_right_key, 0) + 1
+                diff_count[new_right_key].append((i, i1, l1+l2+l3, "add"))
             step_times["step5"] += time.perf_counter() - start_time
 
             # --- Step 6: Standardize occurrence by binning key_dict ---
@@ -446,12 +491,42 @@ class BPE():
                 # logger.info(f"{diff_count[k]}={len(self._geo_dict[k])} occurrences of {k}")
                 # heapq.heappush(self._pqueue, (-len(self._geo_dict[k]), k, self._step))
                 # self._geo_step[k] = self._step
-            if len(self._geo_dict[k]) == 0:
-                self._geo_dict.pop(k)
+            if k in self._key_to_priority:
+                priority = self._key_to_priority[k]
+                self._key_to_priority.pop(k)
+                sec_memb, count, kk = priority 
+                self._priority_dict.pop(priority)   
+                assert k == kk
+            else:
+                priority = (0, 0, k)
+                sec_memb, count = 0, 0
+            length = Tokenizer.num_bonds(json.loads(k))
+            for (i, i1, length, action) in diff_count[k]:
+                t = self.tokenizers[i]
+                if action == "add":
+                    count += 1
+                    sec_memb += t.is_secondary(i1, length) # problem
+                else:
+                    count -= 1
+                    sec_memb -= t.is_secondary(i1, length) # problem
+            assert count == len(self._geo_dict[k])            
+            # update priority (or not)
+            if sec_memb > count:
+                breakpoint()
+            if count:
+                new_priority = (sec_memb, count, k)
+                self._key_to_priority[k] = new_priority
+                self._priority_dict[new_priority] = None
+                logger.info(f"{priority}->{new_priority}")
+            else:
+                logger.info(f"remove {priority}")
+            
         step_times["step7"] += time.perf_counter() - start_time
 
         # Log total time spent in each step.
         for step, t_elapsed in step_times.items():
             logger.info(f"Total time for {step}: {t_elapsed:.6f} seconds")
-        # logger.info(f"Step {self._step-1} took {time.time()-step_start_time-vis_time}")                     
-        logger.info(f"Step {self._step-1} took {time.time()-step_start_time}")                     
+        time_elapsed = time.perf_counter()-step_start_time-vis_time
+        self._times.append(time_elapsed)
+        logger.info(f"Step {self._step-1} took {time_elapsed}")                     
+        # logger.info(f"Step {self._step-1} took {time_elapsed}")                     

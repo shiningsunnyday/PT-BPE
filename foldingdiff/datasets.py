@@ -35,7 +35,10 @@ from foldingdiff.angles_and_coords import (
     EXHAUSTIVE_ANGLES,
     EXHAUSTIVE_DISTS,
     extract_backbone_coords,
+    extract_side_chain_coords,
+    extract_backbone_residue_idxes
 )
+from foldingdiff.annotations import find_secondary_structures
 from foldingdiff import custom_metrics as cm
 from foldingdiff import utils
 
@@ -258,7 +261,11 @@ class CathCanonicalAnglesDataset(Dataset):
                 assert fnames, f"No files found in {ALPHAFOLD_DIR}"
             else:
                 raise ValueError(f"Unknown pdb set: {pdbs}")
-
+        # for debug
+        demo_pdb = '/n/home02/msun415/foldingdiff/data/cath/dompdb/3w6sC00.pdb'
+        if demo_pdb in fnames:
+            fnames.remove(demo_pdb)
+            fnames = [demo_pdb] + fnames
         return fnames
 
     @property
@@ -527,8 +534,10 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
             angles=EXHAUSTIVE_ANGLES,
         )
         coords_pfunc = functools.partial(extract_backbone_coords, atoms=["CA"])
+        full_atom_idx_map = functools.partial(extract_backbone_residue_idxes, atoms=["N", "CA", "C"])
         full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
-
+        side_chain_coords_pfunc = extract_side_chain_coords
+        secondary_pfunc = find_secondary_structures        
         logging.info(
             f"Computing full dataset of {len(fnames)} with {multiprocessing.cpu_count()} threads"
         )
@@ -538,23 +547,34 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
             struct_arrays = list(pool.map(pfunc, fnames, chunksize=250))
             coord_arrays = list(pool.map(coords_pfunc, fnames, chunksize=250))
             full_coord_arrays = list(pool.map(full_coords_pfunc, fnames, chunksize=250))
+            full_atom_idxes = list(pool.map(full_atom_idx_map, fnames, chunksize=250))
+            secondary_strucs = list(pool.map(secondary_pfunc, fnames, chunksize=250))
+            side_chain_arrays = list(pool.map(extract_side_chain_coords, fnames, chunksize=250))
             pool.close()
             pool.join()            
         else:
             struct_arrays = [pfunc(fname) for fname in fnames]        
             coord_arrays = [coords_pfunc(fname) for fname in fnames]
             full_coord_arrays = [full_coords_pfunc(fname) for fname in fnames]
+            full_atom_idxes = [full_atom_idx_map(fname) for fname in fnames]
+            secondary_strucs = [secondary_pfunc(fname) for fname in fnames]
+            side_chain_arrays = [extract_side_chain_coords(fname) for fname in fnames]
         
         # Contains only non-null structures
         structures = []
-        for fname, s, c, c_full in zip(fnames, struct_arrays, coord_arrays, full_coord_arrays):
+        for fname, s, c, c_full, idxes, sec, sc in zip(fnames, struct_arrays, coord_arrays, full_coord_arrays, full_atom_idxes, secondary_strucs, side_chain_arrays):
             if s is None:
-                continue 
+                continue
+            if idxes is None:
+                continue
             structures.append(
                 {
                     "angles": s,
                     "coords": c,
                     "full_coords": c_full,
+                    "full_idxes": idxes,
+                    "sec": sec,
+                    "side_chain": sc,
                     "fname": fname,
                 }
             )

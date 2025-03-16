@@ -6,7 +6,6 @@ from tqdm import tqdm
 import tempfile
 import nglview as nv
 import imageio
-from Bio.PDB import PDBParser, DSSP
 import os
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
 from foldingdiff.bpe import *
@@ -15,6 +14,7 @@ import scipy.io
 import numpy as np
 import subprocess
 import argparse
+import pickle
 from datetime import datetime
 
 def setup_logger(log_dir):
@@ -172,56 +172,6 @@ def amino_acid_sequence(fname):
     seq = [d3to1[k] for k in struc.get_residues(source_struct)[1]]
     return seq
 
-# Function to group continuous segments with the same secondary structure type
-def group_segments(res_ss_list):
-    segments = []
-    if not res_ss_list:
-        return segments
-    # Sort by residue number
-    res_ss_list.sort(key=lambda x: x[0])
-    current_ss = res_ss_list[0][1]
-    start = res_ss_list[0][0]
-    end = start
-    for res, ss in res_ss_list[1:]:
-        if ss == current_ss and res == end + 1:
-            # Continue the segment
-            end = res
-        else:
-            segments.append((current_ss, start, end))
-            current_ss = ss
-            start = res
-            end = res
-    segments.append((current_ss, start, end))
-    return segments
-
-def find_secondary_structures(fname):
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure(Path(fname).stem, fname)
-    model = structure[0]  # assuming you want the first model
-    dssp = DSSP(model, fname)
-    ss_segments = defaultdict(list)  # key: chain id, value: list of (ss_type, start, end)
-    for key, dssp_data in dssp.property_dict.items():
-        chain_id = key[0]
-        res_id = key[1][1]  # residue number
-        ss = dssp_data[2]  # secondary structure assignment (e.g., H, E, etc.)
-        
-        # For simplicity, treat blank assignments (often loops) as 'C' (coil)
-        if ss == " ":
-            ss = "C"
-        
-        # Append tuple (residue number, ss) for later grouping
-        ss_segments[chain_id].append((res_id, ss))    
-    all_segments = []
-    # Group segments for each chain and print results
-    print("Secondary Structure Segments (from DSSP):")
-    for chain_id, res_ss_list in ss_segments.items():
-        segments = group_segments(res_ss_list)
-        print(f"Chain {chain_id}:")
-        for ss_type, start, end in segments:
-            print(f"  {ss_type}: residues {start} to {end}")        
-        all_segments.append(segments)
-    return all_segments
-
 
 def main():
     args = parse_args()
@@ -242,8 +192,7 @@ def main():
     #         all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
 
     dataset = FullCathCanonicalCoordsDataset(cath_folder, 
-                                               use_cache=False, debug=True, zero_center=False, toy=args.toy)    
-    find_secondary_structures(dataset.fnames[0])
+                                               use_cache=False, debug=True, zero_center=False, toy=args.toy) 
     for i, struc in enumerate(dataset.structures):
         if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
             breakpoint()
@@ -253,14 +202,15 @@ def main():
     # bpe_debug.initialize()
     bpe.bin()
     # bpe_debug.old_bin()
-    for t in range(1000):
-        for i, tokenizer in enumerate(bpe.tokenizers):
-            if i > 0:
-                continue
-            # Save visualization using the output directory provided
-            visual_path = os.path.join(args.save_dir, f"backbone_{i}_iter={t}.png")
-            tokenizer.visualize(visual_path)        
+    for t in range(10000):
+        ## visualization        
+        if t in list(range(0,10))+list(range(10,100,10))+list(range(1000,10000,1000)):
+            visual_path = os.path.join(args.save_dir, f"backbone_0_iter={t}.png")
+            bpe.tokenizers[0].visualize(visual_path)
         bpe.step()
+        if t % 10 == 0:
+            time_path = os.path.join(args.save_dir, f"times_iter={t}.png")
+            bpe.plot_times(time_path)
         # bpe_debug.old_step()
         # for k in bpe._geo_dict:
         #     if k not in bpe_debug._geo_dict:
@@ -278,5 +228,5 @@ def main():
 
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":      
     main()

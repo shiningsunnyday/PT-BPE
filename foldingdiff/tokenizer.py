@@ -21,7 +21,13 @@ class Tokenizer:
     def __init__(self, structure):
         self._angles_and_dists = structure['angles'] # controls coords
         self._coords = structure['coords']
-        self._full_coords = structure['full_coords']   
+        idxes = structure['full_idxes']
+        self._idxes = idxes
+        self._res_idx_map = dict(zip(idxes[0::3], range(0, len(idxes), 3)))
+        self._full_coords = structure['full_coords']
+        self._sec = structure['sec']   
+        self._side_chains = structure['side_chain']
+        self.fname = structure['fname']
         self.n = len(self._angles_and_dists) # fixed
         # fixed
         self.bond_labels = sum([[0,1,2] for _ in range(self.n-1)]+[[0,1]], []) # 0,1,2,...,0,1
@@ -29,12 +35,50 @@ class Tokenizer:
         self.edges = [[j,j+1,0] for j in range(1,3*self.n)]
         # init
         self._init_coords()
+        try:
+            self._init_secondary_pos()
+        except Exception as e:
+            logger.error("%s: _init_secondary_pos", self.fname)
+            logger.error(str(e))
+            raise  # re-raise the caught exception to terminate the program
     
 
     def _init_coords(self):
         self._init_n_ca = np.linalg.norm(N_INIT-CA_INIT)
         self._init_ca_c = np.linalg.norm(CA_INIT-C_INIT)
-        self._init_bond_angle = angle_between(N_INIT-CA_INIT, C_INIT-CA_INIT)        
+        self._init_bond_angle = angle_between(N_INIT-CA_INIT, C_INIT-CA_INIT)
+
+
+    def _init_secondary_pos(self):
+        """
+        Index each unique secondary structure
+        Map each bond position to the index (if part of secondary structure)
+        or -1 if not part of any
+        """
+        self.sec_pos = [-1 for _ in self.bond_labels]
+        self.sec_types = []
+        _rim = self._res_idx_map
+        for sec_type, i, j in self._sec:
+            # map residue k to an atom
+            # alias _rim as self._res_idx_map
+            # residues i,i+1,...,j covers bonds
+            # _rim[ind], _rim[ind]+1, _rim[ind]+2
+            # for ind=i,...j-1
+            # _rim[ind], _rim[ind]+1 for ind=j           
+            sec_id = len(self.sec_types)-1 
+            self.sec_types.append(sec_type)
+            for ind in range(i, j):
+                if ind in _rim:
+                    self.sec_pos[_rim[ind]] = sec_id
+                    self.sec_pos[_rim[ind]+1] = sec_id
+                    self.sec_pos[_rim[ind]+2] = sec_id
+            if j in _rim:
+                self.sec_pos[_rim[j]] = sec_id
+                self.sec_pos[_rim[j]+1] = sec_id        
+
+# [(460, '-'), (461, 'H'), (462, 'H'), (463, 'H'), (464, 'H'), (465, 'H'), (466, 'H'), (467, 'H'), (468, 'H'), (469, 'H'), (470, 'H'), (471, 'H'), (472, 'H'), (473, 'H'), (474, 'H'), (475, 'S'), (476, '-'), (477, '-'), (478, 'S'), (479, 'S'), (480, '-'), (481, 'H'), (482, 'H'), (483, 'H'), (484, 'H'), (485, 'H'), (486, 'H'), (487, 'H'), (488, 'H'), (489, 'H'), (490, 'H'), (491, 'H'), (492, 'H'), (493, 'H'), (494, 'H'), (495, '-'), (496, 'T'), (497, 'T'), (498, '-'), (499, 'S'), (500, '-'), (501, 'H'), (502, 'H'), (503, 'H'), (504, 'H'), (505, 'H'), (506, 'H'), (507, 'H'), (508, 'H'), (509, 'H'), (510, 'H'), (511, 'H'), (512, 'H'), (513, 'H'), (514, 'H'), (515, 'H'), (516, 'H'), (517, 'H'), (518, 'H'), (519, 'T'), (520, 'S'), (521, 'S'), (522, '-'), (523, '-'), (524, 'S'), (525, 'S'), (526, 'S'), (527, '-'), (528, '-'), (529, 'H'), (530, 'H'), (531, 'H'), (532, 'H'), (533, 'H'), (534, 'H'), (535, 'H'), (536, 'H'), (537, 'H'), (538, 'H'), (539, 'H'), (540, 'H'), (541, 'H'), (542, 'H'), (543, 'H'), (544, 'H'), (545, '-'), (546, 'H'), (547, 'H'), (548, 'H'), (549, 'H'), (550, 'H'), (551, 'H'), (552, 'H'), (553, 'H'), (554, 'H'), (555, 'H'), (556, '-')]
+    def is_secondary(self, i1, length):
+        return self.sec_pos[i1] != -1 and self.sec_pos[i1] == self.sec_pos[i1+length-1]
     
     
     def _add_tokens(self, tokens):        
