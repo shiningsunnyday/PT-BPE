@@ -157,7 +157,9 @@ def parse_args():
     parser.add_argument("--log-dir", type=str, default="logs", 
                         help="Directory where log files will be saved.")
     parser.add_argument("--toy", type=int, default=10, 
-                            help="Number of PDB files.")                        
+                            help="Number of PDB files.")
+    parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--vis", action='store_true')
     return parser.parse_args()
 
 def amino_acid_sequence(fname):
@@ -196,37 +198,59 @@ def main():
     for i, struc in enumerate(dataset.structures):
         if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
             breakpoint()
-    bpe = BPE(dataset.structures, bins=100, save_dir=args.save_dir)
-    # bpe_debug = BPE(dataset.structures, bins=100, save_dir=args.save_dir)
+    bpe = BPE(dataset.structures, bins={1: 100, 10: 10}, save_dir=args.save_dir, rmsd_partition_min_size=10, plot_iou_with_sec_structs=True)
+    # use this for sanity check
     bpe.initialize()
-    # bpe_debug.initialize()
-    bpe.bin()
-    # bpe_debug.old_bin()
+    bpe.bin()    
+    if args.debug: 
+        bpe_debug = BPE(dataset.structures, bins={1: 100}, save_dir=args.save_dir)
+        bpe_debug.initialize()
+        bpe_debug.old_bin()
+    vis_paths = []
     for t in range(10000):
         ## visualization        
-        if t in list(range(0,10))+list(range(10,100,10))+list(range(1000,10000,1000)):
+        if args.vis and t in list(range(0,10)) + list(range(10,100,10)) + list(range(1000,10000,1000)):
+            # Save current visualization.
             visual_path = os.path.join(args.save_dir, f"backbone_0_iter={t}.png")
-            bpe.tokenizers[0].visualize(visual_path)
+            bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False)
+            vis_paths.append(visual_path)            
+            # Define the output GIF path.
+            gif_path = os.path.join(args.save_dir, f"backbone_0_iter_up_to={t}.gif")            
+            # Read all PNG images and collect them as frames.
+            frames = [imageio.imread(png_file) for png_file in vis_paths]            
+            # Save the frames as a GIF with a 1 second delay per frame.
+            durations = [1] * len(frames)
+            imageio.mimsave(gif_path, frames, format="GIF", duration=1, loop=0) 
         bpe.step()
         if t % 10 == 0:
             time_path = os.path.join(args.save_dir, f"times_iter={t}.png")
+            iou_path = os.path.join(args.save_dir, f"iou_iter={t}.png")
             bpe.plot_times(time_path)
-        # bpe_debug.old_step()
-        # for k in bpe._geo_dict:
-        #     if k not in bpe_debug._geo_dict:
-        #         breakpoint()
-        #     elif set(bpe._geo_dict[k]) != set(bpe_debug._geo_dict[k]):
-        #         breakpoint()
-        # for k in bpe_debug._geo_dict:
-        #     if k not in bpe._geo_dict:
-        #         breakpoint()
-        #     elif set(bpe_debug._geo_dict[k]) != set(bpe._geo_dict[k]):
-        #         breakpoint()
+            bpe.plot_iou(iou_path)
+        if args.debug: 
+            bpe_debug.old_step()
+            for i in range(bpe.n):
+                t = bpe.tokenizers[i]
+                t_ = bpe_debug.tokenizers[i]
+                if t.bond_to_token != t_.bond_to_token:
+                    breakpoint()
+                if t.token_pos != t_.token_pos:
+                    breakpoint()
+            for k in bpe._geo_dict:
+                if k not in bpe_debug._geo_dict:
+                    breakpoint()
+                elif set(bpe._geo_dict[k]) != set(bpe_debug._geo_dict[k]):
+                    breakpoint()
+            for k in bpe_debug._geo_dict:
+                if k not in bpe._geo_dict:
+                    breakpoint()
+                elif set(bpe_debug._geo_dict[k]) != set(bpe._geo_dict[k]):
+                    breakpoint()
     # save
     pickle.dump(bpe, open('bpe.pkl', 'wb+'))
     logger.info("Script finished.")
 
 
 
-if __name__ == "__main__":      
+if __name__ == "__main__":
     main()

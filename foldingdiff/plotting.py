@@ -268,8 +268,21 @@ def legend_key_to_tuple(label):
             tup.append(sublabel)
     return tuple(tup)
 
+# Helper: Compute dihedral angle from four points.
+def dihedral(p0, p1, p2, p3):
+    b0 = p1 - p0
+    b1 = p2 - p1
+    b2 = p3 - p2
+    b1 = b1 / np.linalg.norm(b1)
+    n0 = np.cross(b0, b1)
+    n1 = np.cross(b1, b2)
+    n0 = n0 / np.linalg.norm(n0)
+    n1 = n1 / np.linalg.norm(n1)
+    x = np.dot(n0, n1)
+    y = np.dot(np.cross(n0, n1), b1)
+    return np.arctan2(y, x)
 
-def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_factor=0.7):
+def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_factor=0.7, vis_dihedral=True):
     """
     Plots a protein backbone given an array of coordinates and saves the image as a PNG.
     
@@ -288,24 +301,23 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
           annotated with its token label (bt). If None, the entire backbone is drawn in red.
       title : str, optional
           Title for the plot.
+      zoom_factor : float, optional
+          Factor for zooming in on the coordinate bounds.
+      vis_dihedral : bool, optional
+          Whether to visualize dihedral angles (turn off for readability)
     """
     coords = np.asarray(coords)
     n_atoms = coords.shape[0]
-    # Compute a marker/font scale: if there are many atoms, scale down; if few, scale up.
-    # Here we use the square root of 300/n_atoms, clamped between 0.5 and 1.5.
+    # Compute a marker/font scale: if many atoms, scale down; if few, scale up.
     marker_scale = np.clip(np.sqrt(300.0 / n_atoms), 0.1, 10.)
     atom_marker_size = 20 * marker_scale
     boundary_marker_size = 50 * marker_scale
     angle_font_size = 4 * marker_scale
 
-    # Create a larger 3D plot for zooming in.
     fig = plt.figure(figsize=(16, 12))
     ax = fig.add_subplot(111, projection='3d')
     
-    # Convert atom_types to a numpy array for boolean indexing.
     atom_types_arr = np.array(atom_types)
-    
-    # Scatter plot the atoms by type.
     N_coords = coords[atom_types_arr == 'N']
     CA_coords = coords[atom_types_arr == 'CA']
     C_coords = coords[atom_types_arr == 'C']
@@ -335,10 +347,8 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
         for token in tokens:
             start, bt, length = token
             if bt not in token_lookup:
-                # Create a token lookup if needed (this example uses a mapping for colors).
-                token_lookup[bt] = [{'N':'blue','CA':'orange','C':'green'}[atom_types[index]] 
-                                      for index in range(start, start+length+1)]
-            # The boundary atoms for the token are at index start and start+length.
+                token_lookup[bt] = [{'N': 'blue', 'CA': 'orange', 'C': 'green'}[atom_types[index]]
+                                     for index in range(start, start+length+1)]
             left_atom = coords[start]
             right_atom = coords[start + length]
             ax.scatter(left_atom[0], left_atom[1], left_atom[2],
@@ -346,20 +356,19 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
             ax.scatter(right_atom[0], right_atom[1], right_atom[2],
                        color='black', s=boundary_marker_size, zorder=10)
     else:
-        # Plot the entire backbone as one red line.
         ax.plot(coords[:, 0], coords[:, 1], coords[:, 2],
                 color='red', linewidth=2)
     
-    # Compute the shortest bond length (for all consecutive atoms)
+    # Compute shortest bond length.
     bond_lengths = np.linalg.norm(coords[1:] - coords[:-1], axis=1)
     min_bond_length = bond_lengths.min()
-    r = 0.3 * min_bond_length  # radius for the arc
+    r = 0.3 * min_bond_length  # for bond-bond joint arc
     
     # Annotate each bond-bond joint with its angle.
-    for i in range(1, coords.shape[0]-1):
+    for i in range(1, n_atoms - 1):
         joint = coords[i]
-        v1 = coords[i-1] - joint  # direction toward the previous atom
-        v2 = coords[i+1] - joint  # direction toward the next atom
+        v1 = coords[i-1] - joint
+        v2 = coords[i+1] - joint
         norm1 = np.linalg.norm(v1)
         norm2 = np.linalg.norm(v2)
         if norm1 == 0 or norm2 == 0:
@@ -370,39 +379,70 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
         dot_val = np.clip(dot_val, -1.0, 1.0)
         angle = np.arccos(dot_val)
         
-        # Compute a perpendicular vector in the plane of u1 and u2.
-        w = u2 - np.dot(u1, u2)*u1
+        # Compute perpendicular vector in the plane.
+        w = u2 - np.dot(u1, u2) * u1
         norm_w = np.linalg.norm(w)
         if norm_w == 0:
             continue
         w = w / norm_w
         
-        # Generate arc points along the circle of radius r centered at the joint.
         t_vals = np.linspace(0, angle, 50)
-        arc_points = np.array([joint + r*(np.cos(t)*u1 + np.sin(t)*w) for t in t_vals])
+        arc_points = np.array([joint + r * (np.cos(t) * u1 + np.sin(t) * w)
+                                for t in t_vals])
         ax.plot(arc_points[:, 0], arc_points[:, 1], arc_points[:, 2],
                 color='black', linewidth=2)
-        
-        # Compute the midpoint of the arc.
-        mid_point = joint + r*(np.cos(angle/2)*u1 + np.sin(angle/2)*w)
-        
-        # Annotate the angle (in radians, formatted to 2 decimals).
+        mid_point = joint + r * (np.cos(angle/2) * u1 + np.sin(angle/2) * w)
         txt = ax.text(mid_point[0], mid_point[1], mid_point[2],
                       f"{angle:.2f}", color='black', fontweight='bold', fontsize=angle_font_size)
         txt.set_path_effects([PathEffects.withStroke(linewidth=3, foreground='white')])
     
-    # Set axis labels.
+    # --- Torsion Loop: Draw rotating loop representing the dihedral angle ---
+    # Dihedral angles require 4 consecutive points; use bond between p1 and p2.
+    if vis_dihedral and n_atoms >= 4:
+        for i in range(1, n_atoms - 2):
+            p0 = coords[i-1]
+            p1 = coords[i]
+            p2 = coords[i+1]
+            p3 = coords[i+2]
+            torsion_angle = dihedral(p0, p1, p2, p3)
+            # Use bond between p1 and p2.
+            bond_vec = p2 - p1
+            bond_len = np.linalg.norm(bond_vec)
+            if bond_len == 0:
+                continue
+            v = bond_vec / bond_len
+            midpoint = (p1 + p2) / 2.0
+            
+            # Determine an arbitrary vector perpendicular to v.
+            arbitrary = np.array([1, 0, 0])
+            if np.abs(v[0]) > 0.9:
+                arbitrary = np.array([0, 1, 0])
+            u = np.cross(v, arbitrary)
+            if np.linalg.norm(u) == 0:
+                continue
+            u = u / np.linalg.norm(u)
+            w = np.cross(v, u)
+            
+            arc_radius = 0.2 * bond_len  # radius for torsion loop
+            t_vals = np.linspace(0, torsion_angle, 50)
+            arc_points = np.array([midpoint + arc_radius * (np.cos(t) * u + np.sin(t) * w)
+                                   for t in t_vals])
+            ax.plot(arc_points[:, 0], arc_points[:, 1], arc_points[:, 2],
+                    color='magenta', linewidth=2)
+            arc_mid = midpoint + arc_radius * (np.cos(torsion_angle/2) * u + np.sin(torsion_angle/2) * w)
+            txt = ax.text(arc_mid[0], arc_mid[1], arc_mid[2], f"{torsion_angle:.2f}",
+                          color='magenta', fontweight='bold', fontsize=angle_font_size)
+            txt.set_path_effects([PathEffects.withStroke(linewidth=3, foreground='white')])
+    
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
-    
-    # Adjust the view angle.
     ax.view_init(elev=30, azim=45)
     
     if title:
-        ax.set_title(title, fontsize=4*marker_scale)
+        ax.set_title(title, fontsize=4 * marker_scale)
     
-    # Compute coordinate bounds and set tighter limits to "zoom in".
+    # Zoom in on the coordinates.
     x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
     y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
     z_min, z_max = coords[:, 2].min(), coords[:, 2].max()    
@@ -410,8 +450,6 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
     y_mid = (y_min + y_max) / 2
     z_mid = (z_min + z_max) / 2
     max_range = max(x_max - x_min, y_max - y_min, z_max - z_min)
-    if zoom_factor is None:
-        zoom_factor = 0.75  # adjust as needed; smaller => more zoom
     new_range = max_range * zoom_factor
     ax.set_xlim(x_mid - new_range/2, x_mid + new_range/2)
     ax.set_ylim(y_mid - new_range/2, y_mid + new_range/2)
@@ -419,14 +457,13 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
     
     handles, labels = ax.get_legend_handles_labels()
     unique = {}
-    # Sorting legend entries with a helper (legend_key_to_tuple defined elsewhere)
+    # Sorting legend entries (assumes helper legend_key_to_tuple is defined elsewhere)
     for handle, label in sorted(zip(handles, labels), key=lambda it: legend_key_to_tuple(it[1])):
         if label not in unique:
             unique[label] = handle
     handles = list(unique.values())
     labels = list(unique.keys())
     if tokens is not None:
-        # For each token, create one dummy handle using our BackboneFragment class.
         for i, label in enumerate(labels):
             token_id_match = re.match('Token (\d+)', label)
             if token_id_match is None:

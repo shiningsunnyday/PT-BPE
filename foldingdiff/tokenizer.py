@@ -10,6 +10,7 @@ import nglview as nv
 import imageio
 import time
 import logging
+from pathlib import Path
 logger = logging.getLogger(__name__)
 
 class Tokenizer:
@@ -18,14 +19,23 @@ class Tokenizer:
     BOND_ANGLES = ["tau","CA:C:1N","C:1N:1CA"]
     DIHEDRAL_ANGLES = ["psi","omega","phi"]
     BOND_LENGTHS = [N_CA_LENGTH, CA_C_LENGTH, C_N_LENGTH]
-    def __init__(self, structure):
+    def __init__(self, structure, compute_sec_structs=False):
+        for col in structure['angles'].columns:
+            structure['angles'][col] = pd.Series(
+                [float(x) for x in structure['angles'][col]],
+                index=structure['angles'].index,
+                dtype=object
+            )
         self._angles_and_dists = structure['angles'] # controls coords
         self._coords = structure['coords']
         idxes = structure['full_idxes']
         self._idxes = idxes
         self._res_idx_map = dict(zip(idxes[0::3], range(0, len(idxes), 3)))
         self._full_coords = structure['full_coords']
-        self._sec = structure['sec']   
+        if compute_sec_structs:
+            self._sec = structure['sec']   
+        else:
+            self._sec = None
         self._side_chains = structure['side_chain']
         self.fname = structure['fname']
         self.n = len(self._angles_and_dists) # fixed
@@ -35,12 +45,13 @@ class Tokenizer:
         self.edges = [[j,j+1,0] for j in range(1,3*self.n)]
         # init
         self._init_coords()
-        try:
-            self._init_secondary_pos()
-        except Exception as e:
-            logger.error("%s: _init_secondary_pos", self.fname)
-            logger.error(str(e))
-            raise  # re-raise the caught exception to terminate the program
+        if compute_sec_structs:
+            try:
+                self._init_secondary_pos()
+            except Exception as e:
+                logger.error("%s: _init_secondary_pos", self.fname)
+                logger.error(str(e))
+                raise  # re-raise the caught exception to terminate the program
     
 
     def _init_coords(self):
@@ -57,6 +68,7 @@ class Tokenizer:
         """
         self.sec_pos = [-1 for _ in self.bond_labels]
         self.sec_types = []
+        self.sec_bond_range = {}
         _rim = self._res_idx_map
         for sec_type, i, j in self._sec:
             # map residue k to an atom
@@ -65,19 +77,30 @@ class Tokenizer:
             # _rim[ind], _rim[ind]+1, _rim[ind]+2
             # for ind=i,...j-1
             # _rim[ind], _rim[ind]+1 for ind=j           
-            sec_id = len(self.sec_types)-1 
+            sec_id = len(self.sec_types)
             self.sec_types.append(sec_type)
+            start = None
+            end = None
             for ind in range(i, j):
                 if ind in _rim:
+                    if start is None:
+                       start =  _rim[ind]
                     self.sec_pos[_rim[ind]] = sec_id
                     self.sec_pos[_rim[ind]+1] = sec_id
                     self.sec_pos[_rim[ind]+2] = sec_id
+                    end = _rim[ind]+2
             if j in _rim:
+                if start is None:
+                    start = _rim[j]
                 self.sec_pos[_rim[j]] = sec_id
-                self.sec_pos[_rim[j]+1] = sec_id        
+                self.sec_pos[_rim[j]+1] = sec_id
+                end = _rim[j]+1
+            self.sec_bond_range[sec_id] = (start, end)
+
 
 # [(460, '-'), (461, 'H'), (462, 'H'), (463, 'H'), (464, 'H'), (465, 'H'), (466, 'H'), (467, 'H'), (468, 'H'), (469, 'H'), (470, 'H'), (471, 'H'), (472, 'H'), (473, 'H'), (474, 'H'), (475, 'S'), (476, '-'), (477, '-'), (478, 'S'), (479, 'S'), (480, '-'), (481, 'H'), (482, 'H'), (483, 'H'), (484, 'H'), (485, 'H'), (486, 'H'), (487, 'H'), (488, 'H'), (489, 'H'), (490, 'H'), (491, 'H'), (492, 'H'), (493, 'H'), (494, 'H'), (495, '-'), (496, 'T'), (497, 'T'), (498, '-'), (499, 'S'), (500, '-'), (501, 'H'), (502, 'H'), (503, 'H'), (504, 'H'), (505, 'H'), (506, 'H'), (507, 'H'), (508, 'H'), (509, 'H'), (510, 'H'), (511, 'H'), (512, 'H'), (513, 'H'), (514, 'H'), (515, 'H'), (516, 'H'), (517, 'H'), (518, 'H'), (519, 'T'), (520, 'S'), (521, 'S'), (522, '-'), (523, '-'), (524, 'S'), (525, 'S'), (526, 'S'), (527, '-'), (528, '-'), (529, 'H'), (530, 'H'), (531, 'H'), (532, 'H'), (533, 'H'), (534, 'H'), (535, 'H'), (536, 'H'), (537, 'H'), (538, 'H'), (539, 'H'), (540, 'H'), (541, 'H'), (542, 'H'), (543, 'H'), (544, 'H'), (545, '-'), (546, 'H'), (547, 'H'), (548, 'H'), (549, 'H'), (550, 'H'), (551, 'H'), (552, 'H'), (553, 'H'), (554, 'H'), (555, 'H'), (556, '-')]
     def is_secondary(self, i1, length):
+        assert self.compute_sec_structs
         return self.sec_pos[i1] != -1 and self.sec_pos[i1] == self.sec_pos[i1+length-1]
     
     
@@ -161,9 +184,16 @@ class Tokenizer:
             ans[di] = ans.get(di, []) + [self._dihedral_angle(j)]
         return ans
     
-    def visualize(self, output_path):
+    def visualize_bonds(self, i1, length, output_path):
+        coords = self.compute_coords(i1, length)
+        # ATOM_TYPES[i1%3], ATOM_TYPES[i1%3+1], ..., ATOM_TYPES[i1%3+length]
+        bts = [Tokenizer.ATOM_TYPES[(i1%3+i)%3] for i in range(length+1)]
+        plot_backbone(coords, output_path, bts, title=f"{Path(self.fname).stem} bonds {i1}-{i1+length-1}", zoom_factor=1.0)        
+    
+    def visualize(self, output_path, **kwargs):
         coords = self.compute_coords()
-        plot_backbone(coords, output_path, atom_types=np.tile(Tokenizer.ATOM_TYPES, len(coords)//3), tokens=self.tokens)
+        tokens = [self.bond_to_token[i] for i in sorted(self.bond_to_token)]
+        plot_backbone(coords, output_path, atom_types=np.tile(Tokenizer.ATOM_TYPES, len(coords)//3), tokens=tokens, **kwargs)
         
 
     def set_token_geo(self, idx, l, vals):

@@ -693,6 +693,7 @@ def add_sidechains_to_backbone(
     sink.set_structure(struc.array(full_atoms))
     sink.write(out_fname)
     return out_fname
+    
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
