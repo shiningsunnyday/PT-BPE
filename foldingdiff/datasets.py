@@ -522,8 +522,14 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
 
     feature_names = {"coords": list("xyz")}
     feature_is_angular = {"coords": [False, False, False]}
+    custom_kwargs = ["secondary"]
 
     def __init__(self, *args, **kwargs) -> None:        
+        for kwarg in self.custom_kwargs:
+            if kwarg in kwargs: 
+                print(kwarg, kwargs[kwarg])               
+                setattr(self, kwarg, kwargs[kwarg])
+                kwargs.pop(kwarg)
         super().__init__(*args, **kwargs)
 
 
@@ -541,7 +547,8 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
         full_atom_idx_map = functools.partial(extract_backbone_residue_idxes, atoms=["N", "CA", "C"])
         full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
         side_chain_coords_pfunc = extract_side_chain_coords
-        secondary_pfunc = find_secondary_structures        
+        if hasattr(self, "secondary") and self.secondary:
+            secondary_pfunc = find_secondary_structures        
         logging.info(
             f"Computing full dataset of {len(fnames)} with {multiprocessing.cpu_count()} threads"
         )
@@ -552,7 +559,8 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
             coord_arrays = list(pool.map(coords_pfunc, fnames, chunksize=250))
             full_coord_arrays = list(pool.map(full_coords_pfunc, fnames, chunksize=250))
             full_atom_idxes = list(pool.map(full_atom_idx_map, fnames, chunksize=250))
-            secondary_strucs = list(pool.map(secondary_pfunc, fnames, chunksize=250))
+            if hasattr(self, "secondary") and self.secondary:
+                secondary_strucs = list(pool.map(secondary_pfunc, fnames, chunksize=250))
             side_chain_arrays = list(pool.map(extract_side_chain_coords, fnames, chunksize=250))
             pool.close()
             pool.join()            
@@ -561,27 +569,36 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
             coord_arrays = [coords_pfunc(fname) for fname in fnames]
             full_coord_arrays = [full_coords_pfunc(fname) for fname in fnames]
             full_atom_idxes = [full_atom_idx_map(fname) for fname in fnames]
-            secondary_strucs = [secondary_pfunc(fname) for fname in fnames]
+            if hasattr(self, "secondary") and self.secondary:
+                secondary_strucs = [secondary_pfunc(fname) for fname in fnames]
             side_chain_arrays = [extract_side_chain_coords(fname) for fname in fnames]
         
         # Contains only non-null structures
         structures = []
-        for fname, s, c, c_full, idxes, sec, sc in zip(fnames, struct_arrays, coord_arrays, full_coord_arrays, full_atom_idxes, secondary_strucs, side_chain_arrays):
+        args = [fnames, struct_arrays, coord_arrays, full_coord_arrays, full_atom_idxes, side_chain_arrays]
+        if hasattr(self, "secondary") and self.secondary:
+            args += [secondary_strucs]
+        pargs = zip(*args)
+        for parg in pargs:
+            if hasattr(self, "secondary") and self.secondary:
+                fname, s, c, c_full, idxes, sc, sec = parg
+            else:
+                fname, s, c, c_full, idxes, sc = parg
             if s is None:
                 continue
             if idxes is None:
                 continue
-            structures.append(
-                {
-                    "angles": s,
-                    "coords": c,
-                    "full_coords": c_full,
-                    "full_idxes": idxes,
-                    "sec": sec,
-                    "side_chain": sc,
-                    "fname": fname,
-                }
-            )
+            structure = {
+                "angles": s,
+                "coords": c,
+                "full_coords": c_full,
+                "full_idxes": idxes,                    
+                "side_chain": sc,
+                "fname": fname,
+            }
+            if hasattr(self, "secondary") and self.secondary:
+                structure['sec'] = sec
+            structures.append(structure)
         return structures        
 
     def __getitem__(
