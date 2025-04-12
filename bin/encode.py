@@ -157,7 +157,7 @@ def parse_args():
     parser.add_argument("--log-dir", type=str, default="logs", 
                         help="Directory where log files will be saved.")
     parser.add_argument("--toy", type=int, default=10, 
-                            help="Number of PDB files.")
+                            help="Number of PDB files.")    
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--vis", action='store_true')
     return parser.parse_args()
@@ -194,7 +194,7 @@ def main():
     #         all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
 
     dataset = FullCathCanonicalCoordsDataset(cath_folder, 
-                                               use_cache=False, debug=True, zero_center=False, toy=args.toy) 
+                                               use_cache=False, debug=True, zero_center=False, toy=args.toy, pad=args.pad) 
     for i, struc in enumerate(dataset.structures):
         if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
             breakpoint()

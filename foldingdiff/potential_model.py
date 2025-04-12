@@ -98,7 +98,7 @@ def l1_penalty(self):
 
     
 class AngleTransformer(nn.Module):
-    def __init__(self, input_size=1, d_model=64, nhead=8, num_layers=2, dropout=0.1):
+    def __init__(self, input_size=1, d_model=64, nhead=8, num_layers=2, dropout=0.1, max_len=5000):
         """
         A lightweight Transformer-based model to encode a sequence of dihedral angles
         into a single scalar.
@@ -112,7 +112,7 @@ class AngleTransformer(nn.Module):
         """
         super(AngleTransformer, self).__init__()
         self.input_linear = nn.Linear(input_size, d_model)  # project scalar to d_model
-        self.pos_encoder = PositionalEncoding(d_model, dropout)
+        self.pos_encoder = PositionalEncoding(d_model, dropout, max_len=max_len)
         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dropout=dropout)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         # Final dense layer mapping the pooled representation to a scalar.
@@ -144,14 +144,14 @@ class AngleTransformer(nn.Module):
         # Process through Transformer encoder
         encoded = self.transformer_encoder(x, src_key_padding_mask=mask)  # shape: (seq_len, batch, d_model)
         encoded = encoded.transpose(0, 1)   # shape: (batch, seq_len, d_model)
+        return encoded
+        # # Pooling: Mean over non-padded timesteps for each sequence.
+        # pooled = []
+        # for i, L in enumerate(lengths):
+        #     # Take the mean over the first L timesteps
+        #     pooled.append(encoded[i, :L].mean(dim=0))
+        # pooled = torch.stack(pooled, dim=0)  # shape: (batch, d_model)
         
-        # Pooling: Mean over non-padded timesteps for each sequence.
-        pooled = []
-        for i, L in enumerate(lengths):
-            # Take the mean over the first L timesteps
-            pooled.append(encoded[i, :L].mean(dim=0))
-        pooled = torch.stack(pooled, dim=0)  # shape: (batch, d_model)
-        
-        # Final dense layer to produce a single scalar per sequence.
-        output = self.fc(pooled)            # shape: (batch, 1)
-        return output
+        # # Final dense layer to produce a single scalar per sequence.
+        # output = self.fc(pooled)            # shape: (batch, 1)
+        # return output

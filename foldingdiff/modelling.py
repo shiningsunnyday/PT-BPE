@@ -243,6 +243,7 @@ class BertForDiffusionBase(BertPreTrainedModel):
         ft_names: Optional[List[str]] = None,
         time_encoding: TIME_ENCODING = "gaussian_fourier",
         decoder: DECODER_HEAD = "mlp",
+        scalar_out: bool = False
     ) -> None:
         """
         dim should be the dimension of the inputs
@@ -277,6 +278,9 @@ class BertForDiffusionBase(BertPreTrainedModel):
             self.token_decoder = AnglesPredictor(config.hidden_size, n_inputs)
         else:
             raise ValueError(f"Unrecognized decoder: {decoder}")
+        
+        if scalar_out:
+            self.fc = nn.Linear(n_inputs, 1)
 
         # Set up the time embedder
         if time_encoding == "gaussian_fourier":
@@ -459,7 +463,6 @@ class BertForDiffusionBase(BertPreTrainedModel):
         # msk = torch.ones(size=(self.config.num_attention_heads,))
         # msk = msk.type_as(inputs)
         # head_mask = self.get_head_mask(msk, self.config.num_hidden_layers)
-
         assert len(inputs.shape) == 3  # batch_size, seq_length, features
         inputs_upscaled = self.inputs_to_hidden_dim(inputs)  # Batch * seq_len * dim
 
@@ -479,7 +482,7 @@ class BertForDiffusionBase(BertPreTrainedModel):
             return_dict=return_dict,
         )
 
-        sequence_output = encoder_outputs[0]
+        sequence_output = encoder_outputs[0]        
         per_token_decoded = self.token_decoder(sequence_output)
         return per_token_decoded
 
