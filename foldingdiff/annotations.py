@@ -28,7 +28,11 @@ def find_secondary_structures(fname):
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure(Path(fname).stem, fname)
     model = structure[0]  # assuming you want the first model
-    dssp = DSSP(model, fname)
+    try:
+        dssp = DSSP(model, fname)
+    except:
+        print(fname, "failed")
+        raise        
     ss_segments = defaultdict(list)  # key: chain id, value: list of (ss_type, start, end)
     standard_residues = set()
     for chain in model:

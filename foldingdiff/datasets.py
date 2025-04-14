@@ -27,7 +27,7 @@ LOCAL_DATA_DIR = Path(
 
 CATH_DIR = LOCAL_DATA_DIR / "cath"
 ALPHAFOLD_DIR = LOCAL_DATA_DIR / "alphafold"
-
+HOMO_DIR = LOCAL_DATA_DIR / "remote_homology"
 
 from foldingdiff import beta_schedules
 from foldingdiff.angles_and_coords import (
@@ -74,6 +74,18 @@ FEATURE_SET_NAMES_TO_FEATURE_NAMES = {
     "cart-coords": ["x", "y", "z"],
 }
 
+def extract_pdb_code_and_chain(dataset_id):
+    """
+    Given an id like b'd1v4wb_', extract the PDB code and chain.
+    Assumes the format is: b'd' + 4-character PDB code + chain + optional trailing characters.
+    For example, 'd1v4wb_' -> PDB code '1V4W' (uppercase) and chain 'B'.
+    """
+    if isinstance(dataset_id, bytes):
+        dataset_id = dataset_id.decode('utf-8')
+    pdb_code = dataset_id[1:5].upper()  # characters 1-4 form the PDB code
+    chain = dataset_id[5].upper()       # the 5th character is the chain identifier
+    return pdb_code, chain
+    
 
 class CathCanonicalAnglesDataset(Dataset):
     """
@@ -104,7 +116,7 @@ class CathCanonicalAnglesDataset(Dataset):
     def __init__(
         self,
         pdbs: Union[
-            Literal["cath", "alphafold"], str
+            Literal["cath", "alphafold", "homo"], str
         ] = "cath",  # Keyword or a directory
         split: Optional[Literal["train", "test", "validation"]] = None,
         pad: int = 512,
@@ -241,7 +253,7 @@ class CathCanonicalAnglesDataset(Dataset):
         #     logging.info(f"Feature {ft} mean, var: {m}, {v}")
 
     def __get_pdb_fnames(
-        self, pdbs: Union[Literal["cath", "alphafold"], str, List[str], Tuple[str]]
+        self, pdbs: Union[Literal["cath", "alphafold", "homo"], str, List[str], Tuple[str]]
     ) -> List[str]:
         """Return a list of filenames for PDB structures making up this dataset"""
         if isinstance(pdbs, (list, tuple)):
@@ -263,10 +275,13 @@ class CathCanonicalAnglesDataset(Dataset):
             elif pdbs == "alphafold":
                 fnames = glob.glob(os.path.join(ALPHAFOLD_DIR, "*.pdb.gz"))
                 assert fnames, f"No files found in {ALPHAFOLD_DIR}"
+            elif pdbs == "homo":
+                fnames = glob.glob(os.path.join(HOMO_DIR, "*/*.pdb"))
             else:
                 raise ValueError(f"Unknown pdb set: {pdbs}")
         # for debug
         demo_pdb = '/n/home02/msun415/foldingdiff/data/cath/dompdb/3w6sC00.pdb'
+        # demo_pdb = '/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/data/remote_homology/test_superfamily_holdout_pdbs/1QCR_D.pdb'
         if demo_pdb in fnames:
             fnames.remove(demo_pdb)
             fnames = [demo_pdb] + fnames
@@ -565,7 +580,14 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
             pool.close()
             pool.join()            
         else:
-            struct_arrays = [pfunc(fname) for fname in fnames]        
+            struct_arrays = []
+            for fname in fnames:
+                try:
+                    r = pfunc(fname)
+                except:
+                    print(fname)
+                    raise
+                struct_arrays.append(r)
             coord_arrays = [coords_pfunc(fname) for fname in fnames]
             full_coord_arrays = [full_coords_pfunc(fname) for fname in fnames]
             full_atom_idxes = [full_atom_idx_map(fname) for fname in fnames]
@@ -585,8 +607,10 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
             else:
                 fname, s, c, c_full, idxes, sc = parg
             if s is None:
+                print("s is None", fname)
                 continue
             if idxes is None:
+                print("idxes is None", fname)
                 continue
             structure = {
                 "angles": s,

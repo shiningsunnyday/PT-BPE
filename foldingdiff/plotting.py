@@ -282,7 +282,7 @@ def dihedral(p0, p1, p2, p3):
     y = np.dot(np.cross(n0, n1), b1)
     return np.arctan2(y, x)
 
-def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_factor=0.7, vis_dihedral=True):
+def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_factor=0.7, vis_dihedral=True, xlim=None, ylim=None, zlim=None):
     """
     Plots a protein backbone given an array of coordinates and saves the image as a PNG.
     
@@ -305,6 +305,8 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
           Factor for zooming in on the coordinate bounds.
       vis_dihedral : bool, optional
           Whether to visualize dihedral angles (turn off for readability)
+      xlim : (xmin, xmax) figure ranges, e.g. for consistency with previous iterations
+      ylim, zlim : similar as xlim
     """
     coords = np.asarray(coords)
     n_atoms = coords.shape[0]
@@ -451,10 +453,21 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
     z_mid = (z_min + z_max) / 2
     max_range = max(x_max - x_min, y_max - y_min, z_max - z_min)
     new_range = max_range * zoom_factor
-    ax.set_xlim(x_mid - new_range/2, x_mid + new_range/2)
-    ax.set_ylim(y_mid - new_range/2, y_mid + new_range/2)
-    ax.set_zlim(z_mid - new_range/2, z_mid + new_range/2)
-    
+    if xlim:
+        ax.set_xlim(*xlim)
+    else:
+        xlim = (x_mid - new_range/2, x_mid + new_range/2)        
+    if ylim:
+        ax.set_ylim(*ylim)
+    else:
+        ylim = (y_mid - new_range/2, y_mid + new_range/2)
+    if zlim:
+        ax.set_zlim(*zlim)
+    else:
+        zlim = (z_mid - new_range/2, z_mid + new_range/2)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.set_zlim(*zlim)    
     handles, labels = ax.get_legend_handles_labels()
     unique = {}
     # Sorting legend entries (assumes helper legend_key_to_tuple is defined elsewhere)
@@ -480,6 +493,7 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
     plt.savefig(output_path, dpi=300)
     plt.close(fig)
     print("Backbone plot saved to:", output_path)
+    return xlim, ylim, zlim
 
 def plot_times(times):
     """

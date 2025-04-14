@@ -14,13 +14,23 @@ import time
 import argparse
 import os
 import logging
+import inspect
+
 # Configure logging (you can customize format and level here)
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-def parse_args():
+def get_default_args(func):
+    signature = inspect.signature(func)
+    return {
+        k: v.default
+        for k, v in signature.parameters.items()
+        if v.default is not inspect.Parameter.empty
+    }
+
+def parse_args():    
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
-    parser.add_argument("--cath_folder", default="/n/home02/msun415/foldingdiff/data/cath/dompdb/")
+    parser.add_argument("--cath_folder", default="./data/cath/dompdb/")
     parser.add_argument("--toy", type=int, default=10, 
                             help="Number of PDB files.")
     parser.add_argument("--pad", type=int, default=512, help="Max protein size")
@@ -28,16 +38,18 @@ def parse_args():
     parser.add_argument("--visualize", action='store_true')    
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--cuda", default="cpu")
-    parser.add_argument("--save_dir", default="/n/home02/msun415/foldingdiff/ckpts")
-    parser.add_argument("--plot_dir", default="/n/home02/msun415/foldingdiff/plots/learn")
+    # run artifacts
+    parser.add_argument("--auto", action='store_true', help='auto set folders')
+    parser.add_argument("--save_dir", default="./ckpts")
+    parser.add_argument("--plot_dir", default="./plots/learn")
     # model params
     parser.add_argument("--model", default="bert")
     # hparams
-    parser.add_argument("--gamma", type=float, default=0.8)
+    parser.add_argument("--gamma", type=float, default=0.)
     return parser.parse_args()
 
 
-def semi_crf_dp_and_map(out, N, gamma=0.8):
+def semi_crf_dp_and_map(out, N, gamma):
     """
     out[i][l]: the (log-)score for a segment starting at i, of length l
                i.e. from x_{i} to x_{i + l - 1}, inclusive.
@@ -258,6 +270,14 @@ def get_model(args):
 
 def main():
     args = parse_args()
+    logging.info(args)
+    if args.auto:
+        cur_time = time.time()
+        setattr(args, 'plot_dir', f'./plots/learn/{cur_time}')
+        setattr(args, 'save_dir', f'./ckpts/{cur_time}')
+        os.makedirs(args.plot_dir, exist_ok=True)
+        os.makedirs(args.save_dir, exist_ok=True)
+        logging.info(f"{args.plot_dir}")
     logging.info(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
     logging.info(f"Using device: {args.cuda}")    
     dataset = FullCathCanonicalCoordsDataset(args.cath_folder, use_cache=False, debug=args.debug, zero_center=False, toy=args.toy, secondary=False, trim_strategy="discard")
@@ -279,7 +299,7 @@ def main():
             opt.zero_grad()
             loss = 0.         
             N = 3*t.n-1             
-            out = precompute(model, N, t, bert=args.model=="bert")            
+            out = precompute(model, N, t, bert=args.model=="bert")
             log_a, map_a, best_lens = semi_crf_dp_and_map(out, N, gamma=args.gamma)
             best_seg = backtrace_map_segmentation(best_lens, N)            
             t.bond_to_token = {start: (start, idx, end-start) for idx, (start, end) in enumerate(best_seg)}            
@@ -304,7 +324,9 @@ def main():
             cpu_mem = process.memory_info().rss / (1024 ** 2)  # in MB
             logging.info(f"Epoch {epoch}, Iteration {_idx} - CPU memory usage: {cpu_mem:.2f} MB")           
             prob = torch.exp(map_a[N]-log_a[N])
-            probs[_idx] = prob.item()
+            if prob.item() > probs[_idx]:
+                probs[_idx] = prob.item()
+                t.visualize(os.path.join(args.plot_dir, f"epoch={epoch}_{_idx}_{probs[_idx]}.png"), vis_dihedral=False)                        
             # if (map_a[N]-log_a[N]) > best_scores[_idx]:                
             #     # t.visualize(os.path.join(args.plot_dir, f"epoch={epoch}_{_idx}_{prob.item()}.png"), vis_dihedral=False)                
             #     best_scores[_idx] = map_a[N]-log_a[N]
@@ -315,8 +337,7 @@ def main():
             best_loss = total_loss
             logging.info(f"total loss: {total_loss}")
             torch.save(model, os.path.join(args.save_dir, f"{epoch}_loss={best_loss}.pt"))
-            for _idx, t in enumerate(dataset):
-                t.visualize(os.path.join(args.plot_dir, f"epoch={epoch}_{_idx}_{probs[_idx]}.png"), vis_dihedral=False)       
+   
 
 if __name__ == "__main__":
     main()

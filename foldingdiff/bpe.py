@@ -9,6 +9,11 @@ from sortedcontainers import SortedDict
 logger = logging.getLogger(__name__)
 
 class ThresholdDict(dict): # only add, no remove
+    def __new__(cls, *args, **kwargs):
+        instance = super().__new__(cls)
+        instance.max_key = -1
+        return instance
+
     def __init__(self):
         super().__init__()
         self.max_key = -1
@@ -75,7 +80,7 @@ class BPE():
                 t.set_token_geo(i, l, self._bin_val(dic))
             t.token_pos = token_pos
             t.tokens = new_tokens
-            t.bond_to_token = bond_to_token
+            t.bond_to_token = bond_to_token # TODO: make this a property
 
     
     def _bin_side_chain(self, key):
@@ -277,10 +282,10 @@ class BPE():
                 # priority: (#(secondary membership), #(membership), key)
                 sec_memb = 0
                 for i, i2 in self._geo_dict[key]:
-                    t = t
+                    t = self.tokenizers[i]
                     i1 = t.token_pos[i2-1]
                     sec_memb += t.is_secondary(i1, length)
-                priority = (sec_memb, len(self._geo_dict[key]), key)
+                priority = (-sec_memb, -len(self._geo_dict[key]), key)
             else:
                 priority = (-len(self._geo_dict[key]), key)
             self._priority_dict[priority] = None # not useful
@@ -580,7 +585,7 @@ class BPE():
         key_tup = self._priority_dict.peekitem(0)
         if self.compute_sec_structs:
             (num_sec, count, key), _ = key_tup
-            count = -count
+            count = -count       
             assert count == len(self._geo_dict[key])
             # self._bin_side_chain(key) # later add to _tokens
             logger.info(f"Pop {key} as most frequent key, {count} times, {num_sec} secondary structures")        
@@ -846,6 +851,7 @@ class BPE():
         time_elapsed -= vis_time
         self._times.append(time_elapsed)
         # TODO: make more efficient
-        self.compute_iou()
+        if self.plot_iou_with_sec_structs:
+            self.compute_iou()
         logger.info(f"Step {self._step-1} took {time_elapsed}")                     
         # logger.info(f"Step {self._step-1} took {time_elapsed}")                     

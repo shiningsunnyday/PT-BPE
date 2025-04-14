@@ -43,7 +43,7 @@ def visualize():
     pyrosetta.init()
 
     # Load the PDB file
-    pdb_filename = "/n/home02/msun415/foldingdiff/data/cath/dompdb/152lA00.pdb"  # Change this to your actual file
+    pdb_filename = "./data/cath/dompdb/152lA00.pdb"  # Change this to your actual file
     pose = pose_from_pdb(pdb_filename)
 
     # Residue index to modify (change as needed)
@@ -117,13 +117,13 @@ def parse_pdb(pdb_file):
     return backbone_coords
 
 def call_freqgeo(G):
-    scipy.io.savemat('/n/home02/msun415/foldingdiff/data/cath/graphs.mat', {"G": G})
+    scipy.io.savemat('./data/cath/graphs.mat', {"G": G})
 
     breakpoint()
     try:
         result = subprocess.run(
             ["matlab", "-batch", "testmexfreqgeo"],
-            cwd="/n/home02/msun415/foldingdiff/freqgeo-1.0/src",
+            cwd="./freqgeo-1.0/src",
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -139,7 +139,7 @@ def call_freqgeo(G):
         print("STDERR:")
         print(e.stderr)
         
-    res = scipy.io.loadmat("/n/home02/msun415/foldingdiff/freqgeo-1.0/src/mexfreqgeo_output.mat")
+    res = scipy.io.loadmat("./freqgeo-1.0/src/mexfreqgeo_output.mat")
     count = res['count']
     graphs = res['graphs']
     occurence = res['occurence']
@@ -150,16 +150,34 @@ def call_freqgeo(G):
         n = len(nodelabels)
         breakpoint()    
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+        
 def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
+    # folder
+    parser.add_argument("--auto", action='store_true', help='auto set folders')
     parser.add_argument("--save-dir", type=str, default="plots/bpe", 
                         help="Directory to save output files (images, pdb files, plots, etc.).")
     parser.add_argument("--log-dir", type=str, default="logs", 
                         help="Directory where log files will be saved.")
+    parser.add_argument("--data-dir", type=str, default="cath", choices=['cath', 'homo'], help="Which dataset.")    
     parser.add_argument("--toy", type=int, default=10, 
                             help="Number of PDB files.")    
+    parser.add_argument("--pad", type=int, default=512, help="Max protein size")
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--vis", action='store_true')
+    # hparams
+    parser.add_argument("--sec", type=str2bool, default=False, help="whether to compute sec structures to guide token discovery")
+    parser.add_argument("--sec-eval", type=str2bool, default=False, help="whether to evaluate sec structure overlap")
+    parser.add_argument("--p-min-size", default=float("inf"), help="when to start using rmsd binning")
     return parser.parse_args()
 
 def amino_acid_sequence(fname):
@@ -176,14 +194,20 @@ def amino_acid_sequence(fname):
 
 
 def main():
-    args = parse_args()
+    args = parse_args()    
+    if args.auto:
+        cur_time = time.time()
+        setattr(args, 'plot_dir', f'./plots/learn/{cur_time}')
+        setattr(args, 'save_dir', f'./ckpts/{cur_time}')
+        os.makedirs(args.plot_dir, exist_ok=True)
+        os.makedirs(args.save_dir, exist_ok=True)
     setup_logger(args.log_dir)
     logger = logging.getLogger(__name__)
+    logger.info(args)
     logger.info("Script started.")
     
     # Use args.save_dir for saving outputs.
-    # Input folder remains the same for now.
-    cath_folder = "/n/home02/msun415/foldingdiff/data/cath/dompdb/"
+    # Input folder remains the same for now.    
     # all_coords = []
     
     # files = os.listdir(cath_folder)
@@ -193,12 +217,12 @@ def main():
     #         logger.info("Processing file: %s", f)
     #         all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
 
-    dataset = FullCathCanonicalCoordsDataset(cath_folder, 
-                                               use_cache=False, debug=True, zero_center=False, toy=args.toy, pad=args.pad) 
+    dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
+                                            use_cache=False, debug=True, zero_center=False, toy=args.toy, pad=args.pad, secondary=args.sec)     
     for i, struc in enumerate(dataset.structures):
         if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
             breakpoint()
-    bpe = BPE(dataset.structures, bins={1: 100, 10: 10}, save_dir=args.save_dir, rmsd_partition_min_size=10, plot_iou_with_sec_structs=True)
+    bpe = BPE(dataset.structures, bins={1: 100, 10: 10}, save_dir=args.save_dir, rmsd_partition_min_size=args.p_min_size, compute_sec_structs=args.sec, plot_iou_with_sec_structs=args.sec_eval)
     # use this for sanity check
     bpe.initialize()
     bpe.bin()    
@@ -207,12 +231,15 @@ def main():
         bpe_debug.initialize()
         bpe_debug.old_bin()
     vis_paths = []
+    xlim, ylim, zlim = None, None, None
     for t in range(10000):
         ## visualization        
         if args.vis and t in list(range(0,10)) + list(range(10,100,10)) + list(range(1000,10000,1000)):
             # Save current visualization.
             visual_path = os.path.join(args.save_dir, f"backbone_0_iter={t}.png")
-            bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False)
+            res = bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False, xlim=xlim, ylim=ylim, zlim=zlim)
+            if xlim is None:
+                xlim, ylim, zlim = tuple(res) # for later
             vis_paths.append(visual_path)            
             # Define the output GIF path.
             gif_path = os.path.join(args.save_dir, f"backbone_0_iter_up_to={t}.gif")            
@@ -221,12 +248,16 @@ def main():
             # Save the frames as a GIF with a 1 second delay per frame.
             durations = [1] * len(frames)
             imageio.mimsave(gif_path, frames, format="GIF", duration=1, loop=0) 
-        bpe.step()
+        bpe.step()        
+        bpe.tokenizers[0].bond_to_token.tree.visualize(os.path.join(args.save_dir, f'tokens_iter={t}.png'), horizontal_gap=0.5, font_size=6)
         if t % 10 == 0:
-            time_path = os.path.join(args.save_dir, f"times_iter={t}.png")
-            iou_path = os.path.join(args.save_dir, f"iou_iter={t}.png")
+            # save
+            pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_iter={t}.pkl'), 'wb+'))
+            time_path = os.path.join(args.save_dir, f"times_iter={t}.png")            
             bpe.plot_times(time_path)
-            bpe.plot_iou(iou_path)
+            if bpe.plot_iou_with_sec_structs:
+                iou_path = os.path.join(args.save_dir, f"iou_iter={t}.png")
+                bpe.plot_iou(iou_path)
         if args.debug: 
             bpe_debug.old_step()
             for i in range(bpe.n):
@@ -246,8 +277,6 @@ def main():
                     breakpoint()
                 elif set(bpe_debug._geo_dict[k]) != set(bpe._geo_dict[k]):
                     breakpoint()
-    # save
-    pickle.dump(bpe, open('bpe.pkl', 'wb+'))
     logger.info("Script finished.")
 
 
