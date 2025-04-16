@@ -169,8 +169,8 @@ def parse_args():
     parser.add_argument("--log-dir", type=str, default="logs", 
                         help="Directory where log files will be saved.")
     parser.add_argument("--data-dir", type=str, default="cath", choices=['cath', 'homo'], help="Which dataset.")    
-    parser.add_argument("--toy", type=int, default=10, 
-                            help="Number of PDB files.")    
+    parser.add_argument("--toy", type=int, default=0, 
+                            help="Number of PDB files. 0 for all.")    
     parser.add_argument("--pad", type=int, default=512, help="Max protein size")
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--vis", action='store_true')

@@ -13,13 +13,14 @@ pip install -e ./  # make sure ./ is the dir including setup.py
 Set up another conda env to use ESM.
 
 ```bash
-conda env create -f environment.yml
+conda env create -f esm_env.yml
 conda activate foldingdiff
 pip install -e ./  # make sure ./ is the dir including setup.py
 ```
 
 ### Downloading data
 
+#### Original (CATH)
 We require some data files not packaged on Git due to their large size. These are not required for sampling (as long as you are not using the `--testcomparison` option, see below); this is required for training your own model. We provide a script in the `data` dir to download requisite CATH data.
 
 ```bash
@@ -29,7 +30,11 @@ chmod +x download_cath.sh
 ./download_cath.sh
 ```
 
-If the download link in the `.sh` file is not working, the tarball is also mirrored at the following [Dropbox link](https://www.dropbox.com/s/ka5m5lx58477qu6/cath-dataset-nonredundant-S40.pdb.tgz?dl=0).
+#### Remote Homology Detection (Tape)
+
+Get the LMDB data from https://github.com/songlab-cal/tape.
+
+#### ... (...)
 
 ## Training models
 
