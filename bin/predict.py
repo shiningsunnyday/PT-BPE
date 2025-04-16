@@ -116,9 +116,10 @@ class MyDataset(Dataset):
 
     def precompute(self):
         # debug, comment out
-        self.esm_outputs = [torch.rand((sample['protein_length'], 960)).to(torch.float32).to('cpu') for _,_,_,sample in self.data]
-        return
+        # self.esm_outputs = [torch.rand((sample['protein_length'], 960)).to(torch.float32).to('cpu') for _,_,_,sample in self.data]
+        # return
         # end debug
+        breakpoint()
         self.esm_outputs = []
         with ThreadPoolExecutor() as executor:
             results = list(tqdm(
@@ -171,7 +172,7 @@ def parse_args():
     parser.add_argument("--task", choices=["remote-homology-detection", # per-protein
                                             "structural-flexibility-prediction", # per-residue regression
                                             "binding-site-prediction", "catalytic-site-prediction", "conserved-site-prediction", "repeat-motif-prediction", "epitope-region-prediction" # per-residue classification
-    ])
+    ], default="remote-homology-detection")
     # data
     parser.add_argument("--pkl-file", type=str, required=True, 
                         help="Load the BPE results.")    
@@ -466,21 +467,19 @@ def train_probe(args, train_dataset, valid_dataset):
 
         with torch.no_grad():
             for batch in tqdm(valid_loader, desc="validation"):
-                # For validation, assume:
-                #  - batch['output'].embeddings: tensor (B, seq_length, embed_dim)
-                #  - batch['edges']: list (B) of edge lists (each is a list of (parent, left, right))
-                #  - batch['n']: number of residues per protein (B,)
-                #  - batch['fold_label']: protein-level labels (B,)
-                #  - batch['m']: number of valid edges per protein (B,)
-                embeddings = batch['output'].embeddings  # shape: (B, seq_length, embed_dim)
-                # In our training loop we assumed the first and last tokens are special, so we remove them.
-                repr_tensor = embeddings[:, 1:-1, :]      # shape: (B, n_residues, embed_dim)
-                repr_tensor = repr_tensor.to(device)
-                labels = batch['fold_label'].to(device)   # shape: (B,)
-                
+                # Expected in batch:
+                #   'embeddings': (B, n_res_max, embed_dim)
+                #   'edges': list of length B; each element is a list of (parent, left, right)
+                #   'n': number of residues per protein (B,)
+                #   'fold_label': protein-level labels (B,)
+                #   Optionally: 'res_labels': residue-level labels if needed
+                repr_tensor = batch['embeddings'].to(device)  # (B, n_res_max, embed_dim)
+                edges_batch = batch['edges']                  # list (B) of edge-lists
+                n_batch = batch['n']                          # (B,)
+                B = repr_tensor.size(0)
+                labels = batch['fold_label'].to(device)   # shape: (B,)                
                 batch_logits = []
                 # Process each example in the batch.
-                B = repr_tensor.size(0)
                 for i in range(B):
                     n = batch['n'][i].item()
                     # Get residue embeddings for this protein.
@@ -545,6 +544,7 @@ def train_probe(args, train_dataset, valid_dataset):
 
 
 def load_datasets(args):
+    bpe = pickle.load(open(args.pkl_file, 'rb'))       
     if args.task == "remote-homology-detection":
         train = LMDBDataset('data/remote_homology_raw/remote_homology_train.lmdb')
         counts = Counter([x['fold_label'] for x in train])
@@ -556,11 +556,12 @@ def load_datasets(args):
         test_superfamily_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_superfamily_holdout.lmdb')
         train_dataset = MyDataset(bpe.tokenizers, train, label_map)
         valid_dataset = MyDataset(bpe.tokenizers, valid, label_map)
-        test_family_dataset = MyDataset(bpe.tokenizers, test_family_holdout, label_map)
-        test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
-        test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)    
+        # test_family_dataset = MyDataset(bpe.tokenizers, test_family_holdout, label_map)
+        # test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
+        # test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)    
     elif args.task == "binding-site-prediction":
         breakpoint()
+    return train_dataset, valid_dataset, None
 
 
 
@@ -573,8 +574,7 @@ def main(args):
         os.makedirs(args.save_dir, exist_ok=True)    
     setup_logger(args.log_dir)
     logger = logging.getLogger(__name__)
-    logger.info("Script started.")      
-    bpe = pickle.load(open(args.pkl_file, 'rb'))       
+    logger.info("Script started.")          
 
     # train using train_dataset, validate with valid_dataset, ignore test_* datasets for now
     train_dataset, valid_dataset, _ = load_datasets(args)
