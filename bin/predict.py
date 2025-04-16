@@ -167,13 +167,20 @@ def get_logger():
 
 def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
+    # task
+    parser.add_argument("--task", choices=["remote-homology-detection", # per-protein
+                                            "structural-flexibility-prediction", # per-residue regression
+                                            "binding-site-prediction", "catalytic-site-prediction", "conserved-site-prediction", "repeat-motif-prediction", "epitope-region-prediction" # per-residue classification
+    ])
+    # data
     parser.add_argument("--pkl-file", type=str, required=True, 
                         help="Load the BPE results.")    
-    parser.add_argument("--auto", action='store_true', help='auto set folders')
     parser.add_argument("--save-dir", type=str, default="plots/models", 
                         help="Directory to save ckpts.")
     parser.add_argument("--log-dir", type=str, default="logs", 
                         help="Directory where log files will be saved.")
+    parser.add_argument("--auto", action='store_true', help='auto set folders')
+    # training
     parser.add_argument("--cuda", default="cpu")
     # hparams
     parser.add_argument("--p_min_size", default=float("inf"), help="when to start using rmsd binning")
@@ -536,6 +543,27 @@ def train_probe(args, train_dataset, valid_dataset):
             print(f"New best macro F1 achieved: {best_val_macro_f1:.4f}. Saved checkpoint to {checkpoint_path}.")
 
 
+
+def load_datasets(args):
+    if args.task == "remote-homology-detection":
+        train = LMDBDataset('data/remote_homology_raw/remote_homology_train.lmdb')
+        counts = Counter([x['fold_label'] for x in train])
+        class_labels = [c for c in counts if counts[c] > 50]
+        label_map = dict(zip(class_labels, range(len(class_labels))))
+        valid = LMDBDataset('data/remote_homology_raw/remote_homology_valid.lmdb')
+        test_family_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_family_holdout.lmdb')
+        test_fold_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_fold_holdout.lmdb')
+        test_superfamily_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_superfamily_holdout.lmdb')
+        train_dataset = MyDataset(bpe.tokenizers, train, label_map)
+        valid_dataset = MyDataset(bpe.tokenizers, valid, label_map)
+        test_family_dataset = MyDataset(bpe.tokenizers, test_family_holdout, label_map)
+        test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
+        test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)    
+    elif args.task == "binding-site-prediction":
+        breakpoint()
+
+
+
 def main(args):    
     if args.auto:
         cur_time = time.time()
@@ -547,31 +575,14 @@ def main(args):
     logger = logging.getLogger(__name__)
     logger.info("Script started.")      
     bpe = pickle.load(open(args.pkl_file, 'rb'))       
-    train = LMDBDataset('data/remote_homology_raw/remote_homology_train.lmdb')
-    counts = Counter([x['fold_label'] for x in train])
-    class_labels = [c for c in counts if counts[c] > 50]
-    label_map = dict(zip(class_labels, range(len(class_labels))))
-    valid = LMDBDataset('data/remote_homology_raw/remote_homology_valid.lmdb')
-    test_family_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_family_holdout.lmdb')
-    test_fold_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_fold_holdout.lmdb')
-    test_superfamily_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_superfamily_holdout.lmdb')
-    train_dataset = MyDataset(bpe.tokenizers, train, label_map)
-    valid_dataset = MyDataset(bpe.tokenizers, valid, label_map)
-    test_family_dataset = MyDataset(bpe.tokenizers, test_family_holdout, label_map)
-    test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
-    test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)
+
     # train using train_dataset, validate with valid_dataset, ignore test_* datasets for now
-    # below obtains input representation for first sample
-    # sample = train_dataset[0]
-    # output = sample['output']
-    # repr = output.embeddings[0,1:-1]
-    # y = sample['fold_label']
-    # probing layer takes as input repr: (n_residues, embed_dim)
-    # outputs logits over 45 classes possible for y
+    train_dataset, valid_dataset, _ = load_datasets(args)
     train_probe(args, train_dataset, valid_dataset)
     
 
 if __name__ == "__main__":    
     args = parse_args()
     client = ESMC.from_pretrained("esmc_300m").to(args.cuda) # or "cpu"        
+    breakpoint()
     main(args)

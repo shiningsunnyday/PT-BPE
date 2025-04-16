@@ -1,14 +1,16 @@
-# foldingdiff - Diffusion model for protein backbone generation
-
-[![DOI](https://zenodo.org/badge/509133407.svg)](https://zenodo.org/doi/10.5281/zenodo.10365889) [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black) ![PyTorch Lightning](https://img.shields.io/badge/pytorch-lightning-blue.svg?logo=PyTorch%20Lightning)
-
-We present a diffusion model for generating novel protein backbone structures. For more details, see our preprint on [arXiv](https://arxiv.org/abs/2209.15611). We also host a trained version of our model on [HuggingFace spaces](https://huggingface.co/spaces/wukevin/foldingdiff) and at [SuperBio](https://app.superbio.ai/apps/240?id=63dd1aecbd2a3db57fdf1e42) so you can get started with generating protein structures with just your browser!
-
-![Animation of diffusion model protein folds over timesteps](plots/generated_0.gif)
+# Protein Byte Pair Encoding
 
 ## Installation
 
-To install, clone this using `git clone`. This software is written in Python, notably using PyTorch, PyTorch Lightning, and the HuggingFace transformers library. The required conda environment is defined within the `environment.yml` file. To set this up, make sure you have conda (or [mamba](https://mamba.readthedocs.io/en/latest/index.html)) installed, clone this repository, and run:
+To install, clone this using `git clone`. Set up conda env.
+
+```bash
+conda env create -f environment.yml
+conda activate foldingdiff
+pip install -e ./  # make sure ./ is the dir including setup.py
+```
+
+Set up another conda env to use ESM.
 
 ```bash
 conda env create -f environment.yml
