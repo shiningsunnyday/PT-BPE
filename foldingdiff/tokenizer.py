@@ -37,7 +37,7 @@ class BinaryTreeBuilder:
         if key in self.nodes:
             raise ValueError(f"Key '{key}' already exists.")
         self.nodes[key[0]] = Node(key)
-        print(f"Added leaf with key '{key}'.")
+        # print(f"Added leaf with key '{key}'.")
 
     def combine(self, left_key, right_key, parent_key):
         """
@@ -53,7 +53,7 @@ class BinaryTreeBuilder:
         if left_key[0] not in self.nodes or right_key[0] not in self.nodes:
             raise ValueError("Both keys must exist in the nodes dictionary.")
         if parent_key in self.nodes:
-            print(f"Popping Parent key '{parent_key}'.")
+            # print(f"Popping Parent key '{parent_key}'.")
             self.nodes.pop(parent_key)
 
         left_node = self.nodes[left_key[0]]
@@ -67,7 +67,7 @@ class BinaryTreeBuilder:
         del self.nodes[right_key[0]]
         # Insert the new parent node.
         self.nodes[parent_key[0]] = parent
-        print(f"Combined nodes '{left_key}' and '{right_key}' into new parent with key '{parent_key}'.")
+        # print(f"Combined nodes '{left_key}' and '{right_key}' into new parent with key '{parent_key}'.")
 
     def get_tree(self):
         """

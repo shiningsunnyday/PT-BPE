@@ -159,6 +159,17 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError("Boolean value expected.")
+
+def str2dict(v):
+    m = re.match('\d+-\d+(?::\d+-\d+)*$', v)
+    if not m:
+        raise argparse.ArgumentTypeError("Wrong format, see help.")
+    pairs = re.findall(r'(\d+)-(\d+)', v)        
+    bins = {}
+    for (a, b) in pairs:
+        bins[int(a)] = int(b)
+    return bins
+    
         
 def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
@@ -169,12 +180,16 @@ def parse_args():
     parser.add_argument("--log-dir", type=str, default="logs", 
                         help="Directory where log files will be saved.")
     parser.add_argument("--data-dir", type=str, default="cath", choices=['cath', 'homo'], help="Which dataset.")    
+    parser.add_argument("--ckpt-dir", type=str, help="continue from bpe.pkl")
     parser.add_argument("--toy", type=int, default=0, 
                             help="Number of PDB files. 0 for all.")    
     parser.add_argument("--pad", type=int, default=512, help="Max protein size")
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--vis", action='store_true')
     # hparams
+    parser.add_argument("--res-init", type=str2bool, default=False, help="base token type, residue vs bond (default bond)")
+    parser.add_argument("--bin-strategy", help="how to bin values", default="histogram", choices=["histogram", "uniform"])
+    parser.add_argument("--bins", type=str2dict, help=":-separated number of bins per size step, example: 1-100:10-10 means 100 bins from token size 1 to 9, 10 bins from 10 onwards", default="1-10")
     parser.add_argument("--sec", type=str2bool, default=False, help="whether to compute sec structures to guide token discovery")
     parser.add_argument("--sec-eval", type=str2bool, default=False, help="whether to evaluate sec structure overlap")
     parser.add_argument("--p-min-size", default=float("inf"), help="when to start using rmsd binning")
@@ -194,18 +209,38 @@ def amino_acid_sequence(fname):
 
 
 def main():
-    args = parse_args()    
-    if args.auto:
+    args = parse_args()  
+    if args.ckpt_dir:
+        ckpt_dir = Path(args.ckpt_dir)
+        _dir = ckpt_dir
+        name = _dir.name
+        plot_dir = f'./plots/learn/{name}'        
+        assert os.path.exists(plot_dir)
+        assert os.path.exists(_dir)
+        setattr(args, 'plot_dir', plot_dir)
+        setattr(args, 'save_dir', _dir)            
+    elif args.auto:
         cur_time = time.time()
         setattr(args, 'plot_dir', f'./plots/learn/{cur_time}')
         setattr(args, 'save_dir', f'./ckpts/{cur_time}')
         os.makedirs(args.plot_dir, exist_ok=True)
         os.makedirs(args.save_dir, exist_ok=True)
+    args_path = os.path.join(args.save_dir, "args.txt")
+    if os.path.exists(args_path):
+        with open(args_path) as f:
+            lines = f.readlines()
+            for line in lines:
+                n, v = line.rstrip('\n').split(': ')
+                cur = getattr(args, n)
+                assert cur == v, f"args.{n} == {cur} is different than ckpt value: {v}"
+    else:
+        with open(args_path, "w") as f:
+            for arg_name, arg_value in sorted(args.__dict__.items()):
+                f.write(f"{arg_name}: {arg_value}\n")
     setup_logger(args.log_dir)
     logger = logging.getLogger(__name__)
     logger.info(args)
-    logger.info("Script started.")
-    
+    logger.info("Script started.")    
     # Use args.save_dir for saving outputs.
     # Input folder remains the same for now.    
     # all_coords = []
@@ -216,23 +251,32 @@ def main():
     #     if f:
     #         logger.info("Processing file: %s", f)
     #         all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
-
     dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
-                                            use_cache=False, debug=True, zero_center=False, toy=args.toy, pad=args.pad, secondary=args.sec)     
+                                            use_cache=False, debug=False, zero_center=False, toy=args.toy, pad=args.pad, secondary=args.sec)     
     for i, struc in enumerate(dataset.structures):
         if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
             breakpoint()
-    bpe = BPE(dataset.structures, bins={1: 100, 10: 10}, save_dir=args.save_dir, rmsd_partition_min_size=args.p_min_size, compute_sec_structs=args.sec, plot_iou_with_sec_structs=args.sec_eval)
-    # use this for sanity check
-    bpe.initialize()
-    bpe.bin()    
-    if args.debug: 
-        bpe_debug = BPE(dataset.structures, bins={1: 100}, save_dir=args.save_dir)
-        bpe_debug.initialize()
-        bpe_debug.old_bin()
+    _iter, ckpt = -1, ""
+    for f in glob.glob(f"{args.save_dir}/bpe_iter=*.pkl"):
+        m = re.match(f, f"bpe_iter=(\d+).pkl")
+        _iter = max(_iter, m.groups()[0])
+        ckpt = f"{args.save_dir}/{f}"    
+    if _iter > -1:
+        logger.info(f"loading {ckpt} at iter={_iter}")
+        bpe = pickle.load(open(ckpt, 'rb'))
+    else:
+        bpe = BPE(dataset.structures, bins=args.bins, bin_strategy=args.bin_strategy, save_dir=args.save_dir, rmsd_partition_min_size=args.p_min_size, compute_sec_structs=args.sec, plot_iou_with_sec_structs=args.sec_eval,
+        res_init=args.res_init)
+        # use this for sanity check
+        bpe.initialize()
+        bpe.bin()    
+        if args.debug: 
+            bpe_debug = BPE(dataset.structures, bins=args.bins, save_dir=args.save_dir)
+            bpe_debug.initialize()
+            bpe_debug.old_bin()
     vis_paths = []
     xlim, ylim, zlim = None, None, None
-    for t in range(10000):
+    for t in range(_iter+1, 10000):
         ## visualization        
         if args.vis and t in list(range(0,10)) + list(range(10,100,10)) + list(range(1000,10000,1000)):
             # Save current visualization.
@@ -247,7 +291,10 @@ def main():
             frames = [imageio.imread(png_file) for png_file in vis_paths]            
             # Save the frames as a GIF with a 1 second delay per frame.
             durations = [1] * len(frames)
-            imageio.mimsave(gif_path, frames, format="GIF", duration=1, loop=0) 
+            try:
+                imageio.mimsave(gif_path, frames, format="GIF", duration=1, loop=0) 
+            except ValueError:
+                print(f"frames have different sizes")
         bpe.step()        
         bpe.tokenizers[0].bond_to_token.tree.visualize(os.path.join(args.save_dir, f'tokens_iter={t}.png'), horizontal_gap=0.5, font_size=6)
         if t % 10 == 0:

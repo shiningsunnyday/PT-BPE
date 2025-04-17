@@ -226,6 +226,50 @@ def plot_consecutive_heatmap(
         fig.savefig(fname, bbox_inches="tight")
     return fig
 
+def equal_count_bin_edges(values, n_bins):
+    """
+    Compute bin edges so that `values` are equally partitioned into `n_bins` bins.
+    The first edge is min(values), the last is max(values), and widths can vary.
+
+    Parameters
+    ----------
+    values : array‑like
+        1D array of data points.
+    n_bins : int
+        Number of bins to create.
+
+    Returns
+    -------
+    edges : ndarray, shape (n_bins+1,)
+        The bin edges from min to max.
+    """
+    values = np.sort(np.asarray(values))
+    # Quantiles from 0 to 1 in n_bins steps → edges at those quantiles
+    quantiles = np.linspace(0, 1, n_bins + 1)
+    edges = np.quantile(values, quantiles) 
+    return edges
+
+
+def save_circular_histogram_equal_counts(angles, path=None, bins=10, title=None):
+    angles = np.asarray(angles)
+    # map from [-π,π] → [0,2π)
+    angles = (angles + 2*np.pi) % (2*np.pi)
+
+    # get variable-width edges so each bin has ~equal count
+    edges = equal_count_bin_edges(angles, bins)
+    counts, _   = np.histogram(angles, bins=edges)
+    widths      = np.diff(edges)
+    centers     = edges[:-1] + widths/2
+
+    if path is None:
+        return edges[:-1], edges[1:], widths, counts
+
+    fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
+    ax.bar(centers, counts, width=widths, bottom=0.0, edgecolor='black', align='center')
+    ax.set_title(title or "Circular Histogram (Equal‑Count Bins)")
+    plt.savefig(path, bbox_inches='tight')
+    plt.close()
+
 
 def save_circular_histogram(angles, path=None, bins=10, title=None):
     """
@@ -235,18 +279,17 @@ def save_circular_histogram(angles, path=None, bins=10, title=None):
     Parameters:
         angles (list or array-like): Angle values in radians, expected in the range [-pi, pi].
         path (str): The file path where the figure will be saved.
-        bins (int, optional): Number of bins for the histogram. Defaults to 10.
+        bins (int or str, optional): See numpy.histogram 'bins' parameter
     """
     # Convert angles from [-pi, pi] to [0, 2*pi]
     angles = np.array(angles)
     angles = (angles + 2*np.pi) % (2*np.pi)
     
-    # Compute histogram data: counts and bin edges over [0, 2pi]
-    counts, bin_edges = np.histogram(angles, bins=bins, range=(0, 2*np.pi))
+    counts, bin_edges = np.histogram(angles, bins=bins)
     widths = np.diff(bin_edges)
     bin_centers = bin_edges[:-1] + widths / 2
     if path is None:
-        return bin_centers, widths, counts
+        return bin_edges[:-1], bin_edges[1:], widths, counts
 
     # Create a polar subplot
     fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
@@ -282,7 +325,33 @@ def dihedral(p0, p1, p2, p3):
     y = np.dot(np.cross(n0, n1), b1)
     return np.arctan2(y, x)
 
-def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_factor=0.7, vis_dihedral=True, xlim=None, ylim=None, zlim=None):
+def column_fill(handles, labels, ncol):
+    """
+    Reorder (handles, labels) so that legend(..., ncol=ncol) will fill
+    full first column before moving on to the next.
+    """
+    N = len(handles)
+    nrows = int(np.ceil(N / ncol))
+    pad   = nrows * ncol - N
+
+    # pad out so we have a full rectangle
+    h_pad = handles + [None]*pad
+    l_pad = labels  + ['']*pad
+
+    # build it row‑wise
+    rows_h = [ h_pad[i*ncol:(i+1)*ncol] for i in range(nrows) ]
+    rows_l = [ l_pad[i*ncol:(i+1)*ncol] for i in range(nrows) ]
+
+    # now pull out column‑by‑column
+    new_h, new_l = [], []
+    for c in range(ncol):
+        for r in range(nrows):
+            if rows_l[r][c]:
+                new_h.append(rows_h[r][c])
+                new_l.append(rows_l[r][c])
+    return new_h, new_l
+
+def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_factor=0.7, vis_dihedral=True, xlim=None, ylim=None, zlim=None, n_per_row=50):
     """
     Plots a protein backbone given an array of coordinates and saves the image as a PNG.
     
@@ -484,11 +553,25 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
             bt = int(token_id_match.groups()[0])
             color = cmap(bt % 10)
             handles[i] = BackboneFragment(bt, token_lookup[bt], color)
+        ncol = (len(handles)+n_per_row-1)//n_per_row
+        handles, labels = column_fill(handles, labels, ncol)
         ax.legend(handles, labels,
-                  handler_map={BackboneFragment: HandlerBackboneFragment()})
+                  handler_map={BackboneFragment: HandlerBackboneFragment()}, 
+                  ncols=ncol, 
+                  bbox_to_anchor=(1.02, 1.0),
+                  borderaxespad=0.,
+                  loc='upper left')
     else:
-        ax.legend(unique.values(), unique.keys())
-    
+        handles = list(unique.values())
+        labels = list(unique.keys())
+        ncol = (len(handles)+n_per_row-1)//n_per_row
+        handles, labels = column_fill(handles, labels, ncol)
+        ax.legend(unique.values(), unique.keys(), 
+        ncols=ncol, 
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.,
+        loc='upper left')
+    plt.subplots_adjust(right=0.50)
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
     plt.close(fig)

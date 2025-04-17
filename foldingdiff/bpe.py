@@ -29,10 +29,19 @@ class ThresholdDict(dict): # only add, no remove
         return super().__getitem__(key)
 
 class BPE():
-    def __init__(self, structures, bins, save_dir="./plots/bpe", compute_sec_structs=False, plot_iou_with_sec_structs=False, rmsd_partition_min_size=4, num_partitions=3):
+    def __init__(self, structures, bins, 
+        bin_strategy="histogram",
+        save_dir="./plots/bpe",
+        compute_sec_structs=False, 
+        plot_iou_with_sec_structs=False,
+        res_init=False,
+        rmsd_partition_min_size=4,
+        num_partitions=3
+    ):
         """
         structures: list of dataset objects
         bins: resolution of discretization, dict from size to num_bins
+        bin_strategy: how to bin values
         compute_sec_structs: whether to use secondary structure count to define token pair priority
         rmsd_packing_min_size: when to start using rmsd partitioning
         num_partitions: how many partitions
@@ -45,7 +54,9 @@ class BPE():
         self.plot_iou_with_sec_structs = plot_iou_with_sec_structs
         self.rmsd_partition_min_size = rmsd_partition_min_size
         self.num_partitions = num_partitions
+        self.res_init = res_init
         self.bins = bins
+        self.bin_strategy = bin_strategy
         self.n = len(self.tokenizers)
         self.save_dir = save_dir
         self._step = 0
@@ -55,32 +66,64 @@ class BPE():
     def initialize(self):
         logger.info(f"Initialize start")
         start_time = time.perf_counter()
-        self._init_thresholds() # call this before _init_bond_tokens
+        self._init_thresholds() # call this before _init_tokens
         logger.info(f"_init_thresholds took {time.perf_counter()-start_time}")
-        start_time = time.perf_counter()
-        self._init_bond_tokens()
-        logger.info(f"_init_bond_tokens took {time.perf_counter()-start_time}")
+        start_time = time.perf_counter()        
+        self._init_tokens()        
+        logger.info(f"_init_tokens took {time.perf_counter()-start_time}")
         logger.info(f"Initialize finish")
     
-    def _init_bond_tokens(self):
+    def _init_tokens(self):
         """
         Here we treat each bond as an inital "bond-type" token, then standardizing the length of the bond to a fixed value
         """
         self._tokens = {}
         for i in range(3):
             self._tokens[i] = {Tokenizer.BOND_TYPES[i]: [0]}
-            self._thresholds[Tokenizer.BOND_TYPES[i]] = [(Tokenizer.BOND_LENGTHS[i], Tokenizer.BOND_LENGTHS[i])]
+            self._thresholds[Tokenizer.BOND_TYPES[i]] = [(Tokenizer.BOND_LENGTHS[i], Tokenizer.BOND_LENGTHS[i])]  
+        label_dict = {}      
         for t in self.tokenizers:
-            new_tokens = [(i,t.bond_labels[i],1) for i in range(3*t.n-1)]
-            bond_to_token = {i: (i,t.bond_labels[i],1) for i in range(3*t.n-1)}
-            token_pos = [i for i in range(3*t.n-1)]
             # update avg bond lengths
-            for i,tt,l in new_tokens:
+            for i in range(3*t.n-1):
+                tt = t.bond_labels[i]
                 dic = self._tokens[tt]                
-                t.set_token_geo(i, l, self._bin_val(dic))
-            t.token_pos = token_pos
-            t.tokens = new_tokens
-            t.bond_to_token = bond_to_token # TODO: make this a property
+                try:
+                    t.set_token_geo(i, 1, self._bin_val(dic))
+                except:
+                    breakpoint()
+            if self.res_init:                
+                # update binned residue geo                
+                labels = []
+                for i in range(t.n):
+                    start = 3*i
+                    length = 3 if i < t.n-1 else 2
+                    geo_dict = t.token_geo(start, length)        
+                    key = self._bin_val(geo_dict)
+                    key_str = BPE.hash_geo(key)
+                    if key_str not in label_dict:
+                        n = len(label_dict)
+                        label_dict[key_str] = n
+                    else:
+                        n = label_dict[key_str]
+                    t.set_token_geo(start, length, key)
+                    labels.append(n)
+                # 3*(t.n-1) + 2 bonds
+                new_tokens = [(3*i, labels[i], 3) for i in range(t.n-1)] + [(3*t.n-3, labels[t.n-1], 2)]
+                bond_to_token = {t[0]: t for t in new_tokens} # start bond : token
+                token_pos = [3*(i//3) for i in range(3*t.n-1)]                
+                t.token_pos = token_pos
+                t.tokens = new_tokens
+                t.bond_to_token = bond_to_token
+            else:
+                new_tokens = [(i,t.bond_labels[i],1) for i in range(3*t.n-1)]
+                bond_to_token = {t[0]: t for t in new_tokens}
+                token_pos = [i for i in range(3*t.n-1)]
+                t.token_pos = token_pos
+                t.tokens = new_tokens
+                t.bond_to_token = bond_to_token
+        if self.res_init:
+            self._tokens = {n: json.dumps(key_str) for key_str, n in label_dict.items()}
+            logger.info(f"initialized {len(self._tokens)} residue-level tokens")
 
     
     def _bin_side_chain(self, key):
@@ -120,10 +163,16 @@ class BPE():
                     t_vals = angles[key][angles[key].fillna(0)!=0.].tolist()
                     vals[key] = vals.get(key, []) + t_vals
             for key in t.BOND_ANGLES+t.DIHEDRAL_ANGLES:
-                bin_centers, widths, counts = save_circular_histogram(vals[key], path=None, bins=self.bins[size])
+                if self.bin_strategy == "histogram":
+                    starts, ends, widths, counts = save_circular_histogram(vals[key], path=None, bins=self.bins[size])
+                elif self.bin_strategy == "uniform":
+                    starts, ends, widths, counts = save_circular_histogram_equal_counts(vals[key], path=None, bins=self.bins[size])
+                else:
+                    raise NotImplementedError
+                logger.info(f"# bins: {len(counts)}, bin starts: {starts}, bin ends: {ends}, counts: {counts}")
                 # save_circular_histogram(vals[key], path=f"/n/home02/msun415/foldingdiff/hist_{key}.png", bins=self.bins, title=f"Histogram {key}")
-                for center, width, count in zip(bin_centers, widths, counts):
-                    _thresholds[key] = _thresholds.get(key, []) + [(float(center-width/2), float(center+width/2))]
+                for start, end, width, count in zip(starts, ends, widths, counts):
+                    _thresholds[key] = _thresholds.get(key, []) + [(float(start), float(end))]
                     _bin_counts[key] = _bin_counts.get(key, []) + [count]                 
             self._thresholds[size] = _thresholds
             self._bin_counts[size] = _bin_counts
@@ -142,7 +191,9 @@ class BPE():
                 ind = l
                 break
         if ind == -1:
-            breakpoint()    
+            if v != end:
+                breakpoint()
+            ind = len(values)-1
         return ind
 
     def compute_geo_key(self, token_pair, i, ignore_left=False, ignore_right=False):

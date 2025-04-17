@@ -9,9 +9,12 @@
 #SBATCH -o slurm/slurm.%N.%j.out # STDOUT
 #SBATCH -e slurm/slurm.%N.%j.err # STDERR
 
-cd
-. .bashrc
-conda deactivate
+# load your bash config and (re)activate the conda env
+source ~/.bashrc
+conda deactivate || true
 conda activate foldingdiff
-cd foldingdiff
+
+# change if needed
+cd "/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff"
+
 python bin/learn.py --cuda cuda:0 --epochs 1000 --auto --toy $1 --pad $2 --gamma $3

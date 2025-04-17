@@ -48,7 +48,6 @@ def traverse(tree):
             edges[level].append((n, n.left, n.right))
             level += 1
         else: # reached leaf
-            assert n.value[-1] == 1
             level = 0
         if level >= len(nodes):
             nodes.append([])
@@ -95,13 +94,16 @@ def compute_embedding(item):
 
 
 class MyDataset(Dataset):
-    def __init__(self, tokenizers, dataset, label_map):
+    def __init__(self, tokenizers, dataset, label_map, debug=False):
+        self.debug = debug
         mapping = {}
         for i, t in enumerate(tokenizers):
             stem = Path(t.fname).stem
             mapping[stem] = i
         my_data = []
         for sample in dataset:
+            if self.debug and len(my_data) == 10:
+                break
             prot, chain = extract_pdb_code_and_chain(sample['id'])
             key = f"{prot}_{chain}"
             if key in mapping:
@@ -118,8 +120,7 @@ class MyDataset(Dataset):
         # debug, comment out
         # self.esm_outputs = [torch.rand((sample['protein_length'], 960)).to(torch.float32).to('cpu') for _,_,_,sample in self.data]
         # return
-        # end debug
-        breakpoint()
+        # end debug        
         self.esm_outputs = []
         with ThreadPoolExecutor() as executor:
             results = list(tqdm(
@@ -169,6 +170,7 @@ def get_logger():
 def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
     # task
+    parser.add_argument("--debug", action='store_true', help='debug or not')
     parser.add_argument("--task", choices=["remote-homology-detection", # per-protein
                                             "structural-flexibility-prediction", # per-residue regression
                                             "binding-site-prediction", "catalytic-site-prediction", "conserved-site-prediction", "repeat-motif-prediction", "epitope-region-prediction" # per-residue classification
@@ -385,8 +387,22 @@ def train_probe(args, train_dataset, valid_dataset):
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(list(probe.parameters()) + list(tree_encoder.parameters()), lr=0.001)
 
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, collate_fn=collate_item, num_workers=8, persistent_workers=True)
-    valid_loader = DataLoader(valid_dataset, batch_size=8, shuffle=False, collate_fn=collate_item, num_workers=8, persistent_workers=True)
+    if args.debug:
+        dataset_kwargs = {
+            'batch_size': 1,
+            'shuffle': False,
+            'collate_fn': collate_item
+        }
+    else:
+        dataset_kwargs = {
+            'batch_size': 8,
+            'shuffle': True,
+            'collate_fn': collate_item,
+            'num_workers': 8,
+            'persistent_workers': True
+        }
+    train_loader = DataLoader(train_dataset, **dataset_kwargs)
+    valid_loader = DataLoader(valid_dataset, **dataset_kwargs)
     num_epochs = 10
 
     best_val_macro_f1 = -1.0
@@ -399,6 +415,8 @@ def train_probe(args, train_dataset, valid_dataset):
         num_train_samples = 0
 
         for batch in tqdm(train_loader, desc="looping over batches"):
+            if args.debug and num_train_samples:
+                break
             optimizer.zero_grad()
             # Expected in batch:
             #   'embeddings': (B, n_res_max, embed_dim)
@@ -467,6 +485,8 @@ def train_probe(args, train_dataset, valid_dataset):
 
         with torch.no_grad():
             for batch in tqdm(valid_loader, desc="validation"):
+                if args.debug and num_valid_samples:
+                    break
                 # Expected in batch:
                 #   'embeddings': (B, n_res_max, embed_dim)
                 #   'edges': list of length B; each element is a list of (parent, left, right)
@@ -554,8 +574,8 @@ def load_datasets(args):
         test_family_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_family_holdout.lmdb')
         test_fold_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_fold_holdout.lmdb')
         test_superfamily_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_superfamily_holdout.lmdb')
-        train_dataset = MyDataset(bpe.tokenizers, train, label_map)
-        valid_dataset = MyDataset(bpe.tokenizers, valid, label_map)
+        train_dataset = MyDataset(bpe.tokenizers, train, label_map, args.debug)
+        valid_dataset = MyDataset(bpe.tokenizers, valid, label_map, args.debug)
         # test_family_dataset = MyDataset(bpe.tokenizers, test_family_holdout, label_map)
         # test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
         # test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)    

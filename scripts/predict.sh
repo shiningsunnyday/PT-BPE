@@ -9,9 +9,12 @@
 #SBATCH -o slurm/slurm.%N.%j.out # STDOUT
 #SBATCH -e slurm/slurm.%N.%j.err # STDERR
 
-cd
-. .bashrc
-conda deactivate
+# load your bash config and (re)activate the conda env
+source ~/.bashrc
+conda deactivate || true
 conda activate esm_env
-cd foldingdiff
-python bin/predict.py --cuda cuda:0 --pkl-file '/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1744613497.675644/bpe_iter=3290.pkl'
+
+# change if needed
+cd "/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff"
+
+python bin/predict.py --cuda cuda:0 --pkl-file '/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1744875790.3072364/bpe_iter=6000.pkl' --auto

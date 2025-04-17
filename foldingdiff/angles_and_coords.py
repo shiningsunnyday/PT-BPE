@@ -67,11 +67,12 @@ def canonical_distances_and_dihedrals(
     with opener(str(fname), "rt") as f:
         source = PDBFile.read(f)
     if source.get_model_count() > 1:
-        return None
+        print(fname, "has multiple models")
+        # return None
     # Pull out the atomarray from atomarraystack
-    source_struct = source.get_structure()[0]
+    source_struct = source.get_structure(model=1)
     # First get the dihedrals
-    try:
+    try:        
         phi, psi, omega = struc.dihedral_backbone(source_struct)
         calc_angles = {"phi": phi, "psi": psi, "omega": omega}
         if (psi==psi).sum() < len(psi)-1:
@@ -403,9 +404,9 @@ def extract_backbone_residue_idxes(
     opener = gzip.open if fname.endswith(".gz") else open
     with opener(str(fname), "rt") as f:
         structure = PDBFile.read(f)
-    if structure.get_model_count() > 1:
-        return None
-    chain = structure.get_structure(extra_fields=["atom_id"])[0]
+    # if structure.get_model_count() > 1:
+    #     return None
+    chain = structure.get_structure(1, extra_fields=["atom_id"])
     backbone = chain[struc.filter_backbone(chain)]
     ca = [c for c in backbone if c.atom_name in atoms]
     idxes = [c.res_id for c in backbone if c.atom_name in atoms]
@@ -423,9 +424,9 @@ def extract_backbone_coords(
     opener = gzip.open if fname.endswith(".gz") else open
     with opener(str(fname), "rt") as f:
         structure = PDBFile.read(f)
-    if structure.get_model_count() > 1:
-        return None
-    chain = structure.get_structure()[0]
+    # if structure.get_model_count() > 1:
+    #     return None
+    chain = structure.get_structure(1)
     backbone = chain[struc.filter_backbone(chain)]
     ca = [c for c in backbone if c.atom_name in atoms]
     coords = np.vstack([c.coord for c in ca])
@@ -459,11 +460,11 @@ def extract_side_chain_coords(fname: str) -> Optional[List[Tuple[str, List[Tuple
         structure = PDBFile.read(f)
     
     # Only handle single-model structures
-    if structure.get_model_count() > 1:
-        return None
+    # if structure.get_model_count() > 1:
+    #     return None
     
     # Assuming the domain file represents a single chain structure
-    chain = structure.get_structure()[0]
+    chain = structure.get_structure(1)
     
     sidechain_by_residue = []
     
