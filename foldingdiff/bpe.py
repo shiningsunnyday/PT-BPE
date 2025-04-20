@@ -6,6 +6,7 @@ import json
 import logging
 from collections import defaultdict
 from sortedcontainers import SortedDict
+from sklearn.metrics import f1_score, accuracy_score
 logger = logging.getLogger(__name__)
 
 class ThresholdDict(dict): # only add, no remove
@@ -906,3 +907,111 @@ class BPE():
             self.compute_iou()
         logger.info(f"Step {self._step-1} took {time_elapsed}")                     
         # logger.info(f"Step {self._step-1} took {time_elapsed}")                     
+
+def traverse(tree):
+    def _postorder(n, nodes, edges):
+        assert (n.left is None) == (n.right is None), f"{n} {n.left} {n.right}"        
+        if n.left:           
+            level = _postorder(n.left, nodes, edges)
+            level = max(level, _postorder(n.right, nodes, edges))            
+            if level >= len(edges):
+                edges.append([])
+            edges[level].append((n, n.left, n.right))
+            level += 1
+        else: # reached leaf
+            level = 0
+        if level >= len(nodes):
+            nodes.append([])
+        nodes[level].append(n)
+        return level
+    all_edges = []
+    all_nodes = []
+    nmap = {}
+    roots = [tree.nodes[k] for k in sorted(tree.nodes)]    
+    for root in roots:
+        nodes, edges = [], []
+        _postorder(root, nodes, edges) # appends [[nodes of level i] for i]
+        all_edges.append(edges)
+        all_nodes.append(nodes[::-1])
+    while True:
+        stop = True
+        for nodes in all_nodes:
+            if len(nodes) == 0:
+                continue
+            stop = False
+            for n in nodes.pop(-1):
+                if n.value[-1] == 1:
+                    assert n.value[0] == len(nmap)
+                nmap[n.value] = len(nmap)
+        if stop:
+            break
+    all_edges = [(nmap[p.value], nmap[l.value], nmap[r.value]) for edges in all_edges for edges_level in edges for p, l, r in edges_level]
+    return nmap, all_edges
+
+
+def compute_embedding(item):
+    _id, chain, _, _ = item
+    protein = ESMProtein.from_protein_chain(ProteinChain.from_rcsb(_id, chain_id=chain))    
+    # Ensure only one thread performs GPU operations at a time.
+    with gpu_lock:
+        protein_tensor = client.encode(protein)
+        output = client.logits(
+            protein_tensor,
+            LogitsConfig(sequence=True, return_embeddings=True)
+        )
+    embed = output.embeddings[0, 1:-1].to(torch.float32).to('cpu')
+    return embed
+
+
+
+
+class MyDataset(Dataset):
+    def __init__(self, tokenizers, dataset, label_map, debug=False):
+        self.debug = debug
+        mapping = {}
+        for i, t in enumerate(tokenizers):
+            stem = Path(t.fname).stem
+            mapping[stem] = i
+        my_data = []
+        for sample in dataset:
+            if self.debug and len(my_data) == 10:
+                break
+            prot, chain = extract_pdb_code_and_chain(sample['id'])
+            key = f"{prot}_{chain}"
+            if key in mapping:
+                i = mapping[key]
+                if sample['fold_label'] not in label_map:
+                    continue
+                sample['fold_label'] = label_map[sample['fold_label']]
+                my_data.append((prot, chain, tokenizers[i], sample))
+        self.data = my_data
+        self.precompute()
+    
+
+    def precompute(self):
+        # debug, comment out
+        # self.esm_outputs = [torch.rand((sample['protein_length'], 960)).to(torch.float32).to('cpu') for _,_,_,sample in self.data]
+        # return
+        # end debug        
+        self.esm_outputs = []
+        with ThreadPoolExecutor() as executor:
+            results = list(tqdm(
+                executor.map(compute_embedding, self.data),
+                total=len(self.data),
+                desc="precomputing esm embeddings"
+            ))
+        self.esm_outputs.extend(results)
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        _, chain, t, sample = self.data[idx]
+        item = sample
+        # item['protein'] = protein
+        # item['coords'] = t.compute_coords()
+        tree = t.bond_to_token.tree
+        nmap, edges = traverse(tree)
+        item['edges'] = edges        
+        item['embeddings'] = self.esm_outputs[idx]
+        return item

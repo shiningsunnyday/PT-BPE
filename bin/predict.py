@@ -37,115 +37,6 @@ torch.autograd.set_detect_anomaly(True)
 gpu_lock = threading.Lock()
 
 
-def traverse(tree):
-    def _postorder(n, nodes, edges):
-        assert (n.left is None) == (n.right is None), f"{n} {n.left} {n.right}"        
-        if n.left:           
-            level = _postorder(n.left, nodes, edges)
-            level = max(level, _postorder(n.right, nodes, edges))            
-            if level >= len(edges):
-                edges.append([])
-            edges[level].append((n, n.left, n.right))
-            level += 1
-        else: # reached leaf
-            level = 0
-        if level >= len(nodes):
-            nodes.append([])
-        nodes[level].append(n)
-        return level
-    all_edges = []
-    all_nodes = []
-    nmap = {}
-    roots = [tree.nodes[k] for k in sorted(tree.nodes)]    
-    for root in roots:
-        nodes, edges = [], []
-        _postorder(root, nodes, edges) # appends [[nodes of level i] for i]
-        all_edges.append(edges)
-        all_nodes.append(nodes[::-1])
-    while True:
-        stop = True
-        for nodes in all_nodes:
-            if len(nodes) == 0:
-                continue
-            stop = False
-            for n in nodes.pop(-1):
-                if n.value[-1] == 1:
-                    assert n.value[0] == len(nmap)
-                nmap[n.value] = len(nmap)
-        if stop:
-            break
-    all_edges = [(nmap[p.value], nmap[l.value], nmap[r.value]) for edges in all_edges for edges_level in edges for p, l, r in edges_level]
-    return nmap, all_edges
-
-
-def compute_embedding(item):
-    _id, chain, _, _ = item
-    protein = ESMProtein.from_protein_chain(ProteinChain.from_rcsb(_id, chain_id=chain))    
-    # Ensure only one thread performs GPU operations at a time.
-    with gpu_lock:
-        protein_tensor = client.encode(protein)
-        output = client.logits(
-            protein_tensor,
-            LogitsConfig(sequence=True, return_embeddings=True)
-        )
-    embed = output.embeddings[0, 1:-1].to(torch.float32).to('cpu')
-    return embed
-
-
-
-class MyDataset(Dataset):
-    def __init__(self, tokenizers, dataset, label_map, debug=False):
-        self.debug = debug
-        mapping = {}
-        for i, t in enumerate(tokenizers):
-            stem = Path(t.fname).stem
-            mapping[stem] = i
-        my_data = []
-        for sample in dataset:
-            if self.debug and len(my_data) == 10:
-                break
-            prot, chain = extract_pdb_code_and_chain(sample['id'])
-            key = f"{prot}_{chain}"
-            if key in mapping:
-                i = mapping[key]
-                if sample['fold_label'] not in label_map:
-                    continue
-                sample['fold_label'] = label_map[sample['fold_label']]
-                my_data.append((prot, chain, tokenizers[i], sample))
-        self.data = my_data
-        self.precompute()
-    
-
-    def precompute(self):
-        # debug, comment out
-        # self.esm_outputs = [torch.rand((sample['protein_length'], 960)).to(torch.float32).to('cpu') for _,_,_,sample in self.data]
-        # return
-        # end debug        
-        self.esm_outputs = []
-        with ThreadPoolExecutor() as executor:
-            results = list(tqdm(
-                executor.map(compute_embedding, self.data),
-                total=len(self.data),
-                desc="precomputing esm embeddings"
-            ))
-        self.esm_outputs.extend(results)
-    
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, idx):
-        _, chain, t, sample = self.data[idx]
-        item = sample
-        # item['protein'] = protein
-        # item['coords'] = t.compute_coords()
-        tree = t.bond_to_token.tree
-        nmap, edges = traverse(tree)
-        item['edges'] = edges        
-        item['embeddings'] = self.esm_outputs[idx]
-        return item
-
-
-
 def setup_logger(log_dir):
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -171,6 +62,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
     # task
     parser.add_argument("--debug", action='store_true', help='debug or not')
+    parser.add_argument("--test", action='store_true', help='test (instead of train)')
     parser.add_argument("--task", choices=["remote-homology-detection", # per-protein
                                             "structural-flexibility-prediction", # per-residue regression
                                             "binding-site-prediction", "catalytic-site-prediction", "conserved-site-prediction", "repeat-motif-prediction", "epitope-region-prediction" # per-residue classification
@@ -178,6 +70,8 @@ def parse_args():
     # data
     parser.add_argument("--pkl-file", type=str, required=True, 
                         help="Load the BPE results.")    
+    parser.add_argument("--pkl-data-file", type=str, 
+                        help="Path to cache the train/valid dataset.")                            
     parser.add_argument("--save-dir", type=str, default="plots/models", 
                         help="Directory to save ckpts.")
     parser.add_argument("--log-dir", type=str, default="logs", 
@@ -185,6 +79,7 @@ def parse_args():
     parser.add_argument("--auto", action='store_true', help='auto set folders')
     # training
     parser.add_argument("--cuda", default="cpu")
+    parser.add_argument("--epochs", default=100, type=int, help="number of epochs")
     # hparams
     parser.add_argument("--p_min_size", default=float("inf"), help="when to start using rmsd binning")
     parser.add_argument("--level", default="protein", help="prediction at protein or residue level", choices=["protein", "residue"])
@@ -395,15 +290,15 @@ def train_probe(args, train_dataset, valid_dataset):
         }
     else:
         dataset_kwargs = {
-            'batch_size': 8,
+            'batch_size': 1,
             'shuffle': True,
             'collate_fn': collate_item,
-            'num_workers': 8,
-            'persistent_workers': True
+            # 'num_workers': 8,
+            # 'persistent_workers': True
         }
     train_loader = DataLoader(train_dataset, **dataset_kwargs)
     valid_loader = DataLoader(valid_dataset, **dataset_kwargs)
-    num_epochs = 10
+    num_epochs = args.epochs
 
     best_val_macro_f1 = -1.0
 
@@ -445,7 +340,10 @@ def train_probe(args, train_dataset, valid_dataset):
                 for (p, l, r) in edges:
                     child_set.add(l)
                     child_set.add(r)
-                forest_roots = [r for r in range(n, max([p for p,_,_ in edges]) + 1) if r not in child_set]
+                if len(edges):
+                    forest_roots = [r for r in range(edges.max() + 1) if r not in child_set]
+                else:
+                    forest_roots = [r for r in range(n)]
                 # If the protein is a single tree, forest_roots will be a singleton.
                 # Use the tree encoder with super-root to get protein- and residue-level encodings.
                 protein_vec, leaves = tree_encoder(leaf_emb, edges, n, forest_roots)
@@ -505,20 +403,18 @@ def train_probe(args, train_dataset, valid_dataset):
                     # Get residue embeddings for this protein.
                     leaf_emb = repr_tensor[i, :n, :]        # (n, embed_dim)
                     # Get the forest edges for this protein.
-                    edges = batch['edges'][i][: batch['m'][i].item()]  # list of (parent, left, right)
-                    
+                    edges = batch['edges'][i][: batch['m'][i].item()]  # list of (parent, left, right)                 
                     # Compute forest roots:
                     child_set = set()
                     for (p, l, r) in edges:
                         child_set.add(l)
                         child_set.add(r)
-                    # All nodes from n to max_edge_parent are potential roots.
-                    potential_roots = list(range(n, max([p for p, _, _ in edges]) + 1))
-                    forest_roots = [r for r in potential_roots if r not in child_set]
-                    
+                    if len(edges):
+                        forest_roots = [r for r in range(edges.max() + 1) if r not in child_set]
+                    else:
+                        forest_roots = [r for r in range(n)]                                            
                     # Use the tree encoder with super-root to get protein- and residue-level embeddings.
-                    protein_vec, leaves = tree_encoder(leaf_emb, edges, n, forest_roots)
-                    
+                    protein_vec, leaves = tree_encoder(leaf_emb, edges, n, forest_roots)                    
                     if args.level == "protein":
                         logit = probe(protein_vec)         # (num_classes,)
                     else:
@@ -555,16 +451,137 @@ def train_probe(args, train_dataset, valid_dataset):
             checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
             torch.save({
                 'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
+                'encoder_state_dict': tree_encoder.state_dict(),
+                'probe_state_dict': probe.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_macro_f1': best_val_macro_f1,
             }, checkpoint_path)
             print(f"New best macro F1 achieved: {best_val_macro_f1:.4f}. Saved checkpoint to {checkpoint_path}.")
 
+def test_probe(args, test_datasets):
+    """
+    Load the best checkpoint from args.save_dir, then for each test dataset
+    in test_datasets (a dict name->dataset or list of (name, dataset)),
+    run evaluation and write metrics to a text file in args.save_dir.
+    """
+    device = torch.device(args.cuda)
 
+    # 1) Find the best checkpoint file
+    ckpt_paths = glob.glob(os.path.join(args.save_dir, "best_checkpoint_epoch_*.pt"))
+    if not ckpt_paths:
+        raise FileNotFoundError(f"No checkpoint found matching best_checkpoint_epoch_*.pt in {args.save_dir}")
+    # pick the most recently modified
+    best_ckpt = max(ckpt_paths, key=os.path.getmtime)
+
+    # 2) Initialize model components
+    embed_dim = 960
+    hidden_dim = 128
+    num_classes = 45
+
+    # probe head
+    if args.level == "protein":
+        probe = ProbingLayer(embed_dim * 2, hidden_dim, num_classes).to(device)
+    else:
+        probe = nn.Linear(embed_dim * 2, num_classes).to(device)
+
+    # tree encoder
+    tree_encoder = UpDownTreeEncoder(embed_dim, concat_updown=True).to(device)
+
+    # 3) Load checkpoint
+    ckpt = torch.load(best_ckpt, map_location=device)
+    tree_encoder.load_state_dict(ckpt["encoder_state_dict"])
+    probe.load_state_dict(ckpt["probe_state_dict"])
+    tree_encoder.eval()
+    probe.eval()
+
+    # 4) Prepare test datasets iteration
+    if isinstance(test_datasets, dict):
+        items = test_datasets.items()
+    else:
+        # assume list of (name, dataset)
+        items = test_datasets
+
+    results = []
+
+    for name, dataset in items:
+        # DataLoader for test
+        test_loader = DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            collate_fn=collate_item
+        )
+
+        all_preds = []
+        all_labels = []
+        all_losses = []
+        criterion = nn.CrossEntropyLoss()
+
+        with torch.no_grad():
+            for batch in tqdm(test_loader, desc=f"Test [{name}]"):
+                # unpack batch
+                repr_tensor = batch['embeddings'].to(device)  # (1, n_res_max, embed_dim)
+                edges_batch  = batch['edges']
+                n_batch      = batch['n']
+                label        = batch['fold_label'].to(device)  # (1,)
+                m            = batch['m'][0].item()
+
+                # single example
+                n = n_batch[0].item()
+                leaf_emb = repr_tensor[0, :n, :]  # (n, embed_dim)
+                edges = edges_batch[0][:m]         # list of (parent,left,right)
+                # compute forest roots
+                child_set = set()
+                for (p, l, r) in edges:
+                    child_set.add(l)
+                    child_set.add(r)
+                if len(edges):
+                    forest_roots = [r for r in range(edges.max() + 1) if r not in child_set]
+                else:
+                    forest_roots = [r for r in range(n)]
+
+                # encode
+                protein_vec, leaves = tree_encoder(leaf_emb, edges, n, forest_roots)
+
+                # predict
+                if args.level == "protein":
+                    logits = probe(protein_vec.unsqueeze(0))  # (1, C)
+                    pred = logits.argmax(dim=1)
+                    loss = criterion(logits, label)
+                else:
+                    logits = probe(leaves)       # (n, C)
+                    avg_logit = logits.mean(dim=0, keepdim=True)  # (1, C)
+                    pred = avg_logit.argmax(dim=1)
+                    loss = criterion(avg_logit, label)
+
+                all_preds.append(pred.item())
+                all_labels.append(label.item())
+                all_losses.append(loss.item())
+
+        # compute metrics
+        acc = accuracy_score(all_labels, all_preds)
+        macro_f1 = f1_score(all_labels, all_preds, average='macro')
+        mean_loss = sum(all_losses) / len(all_losses)
+
+        results.append((name, mean_loss, acc, macro_f1))
+
+    # 5) Write results to file
+    out_path = os.path.join(args.save_dir, "test_results.txt")
+    with open(out_path, "w") as f:
+        for name, loss, acc, f1 in results:
+            f.write(f"Dataset: {name}\n")
+            f.write(f"  Test Loss: {loss:.4f}\n")
+            f.write(f"  Accuracy:  {acc*100:.2f}%\n")
+            f.write(f"  Macro F1:   {f1:.4f}\n\n")
+
+    print(f"Test results written to {out_path}")
 
 def load_datasets(args):
-    bpe = pickle.load(open(args.pkl_file, 'rb'))       
+    bpe = pickle.load(open(args.pkl_file, 'rb'))
+    if args.pkl_data_file:
+        if os.path.exists(args.pkl_data_file):
+            train_dataset, valid_dataset, test_datasets = pickle.load(open(args.pkl_data_file, 'rb'))
+            return train_dataset, valid_dataset, test_datasets
     if args.task == "remote-homology-detection":
         train = LMDBDataset('data/remote_homology_raw/remote_homology_train.lmdb')
         counts = Counter([x['fold_label'] for x in train])
@@ -576,12 +593,15 @@ def load_datasets(args):
         test_superfamily_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_superfamily_holdout.lmdb')
         train_dataset = MyDataset(bpe.tokenizers, train, label_map, args.debug)
         valid_dataset = MyDataset(bpe.tokenizers, valid, label_map, args.debug)
-        # test_family_dataset = MyDataset(bpe.tokenizers, test_family_holdout, label_map)
-        # test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
-        # test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)    
+        test_family_dataset = MyDataset(bpe.tokenizers, test_family_holdout, label_map)
+        test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
+        test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)
+        test_datasets = [test_family_dataset, test_fold_dataset, test_superfamily_dataset]
     elif args.task == "binding-site-prediction":
         breakpoint()
-    return train_dataset, valid_dataset, None
+    if args.pkl_data_file:
+        pickle.dump((train_dataset, valid_dataset, test_datasets), open(args.pkl_data_file, 'wb+'))
+    return train_dataset, valid_dataset, test_datasets
 
 
 
@@ -597,12 +617,14 @@ def main(args):
     logger.info("Script started.")          
 
     # train using train_dataset, validate with valid_dataset, ignore test_* datasets for now
-    train_dataset, valid_dataset, _ = load_datasets(args)
-    train_probe(args, train_dataset, valid_dataset)
+    train_dataset, valid_dataset, test_datasets = load_datasets(args)
+    if args.test:
+        test_probe(args, test_datasets)
+    else:
+        train_probe(args, train_dataset, valid_dataset)
     
 
 if __name__ == "__main__":    
     args = parse_args()
     client = ESMC.from_pretrained("esmc_300m").to(args.cuda) # or "cpu"        
-    breakpoint()
     main(args)

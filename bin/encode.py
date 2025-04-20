@@ -227,11 +227,27 @@ def main():
         os.makedirs(args.save_dir, exist_ok=True)
     args_path = os.path.join(args.save_dir, "args.txt")
     if os.path.exists(args_path):
+        print(f"loading args from {args_path}")
         with open(args_path) as f:
             lines = f.readlines()
             for line in lines:
-                n, v = line.rstrip('\n').split(': ')
+                line = line.rstrip('\n')
+                i = line.index(': ')
+                n, v = line[:i], line[i+2:]
                 cur = getattr(args, n)
+                if n == "ckpt_dir":
+                    continue
+                if "_dir" in n: # some path
+                    v = os.path.abspath(v)
+                    cur = os.path.abspath(cur)                         
+                if isinstance(cur, dict):
+                    v = eval(v)       
+                elif isinstance(cur, float):
+                    v = float(v)
+                elif isinstance(cur, bool):
+                    v = eval(v)
+                elif isinstance(cur, int):
+                    v = int(v)
                 assert cur == v, f"args.{n} == {cur} is different than ckpt value: {v}"
     else:
         with open(args_path, "w") as f:
@@ -258,9 +274,15 @@ def main():
             breakpoint()
     _iter, ckpt = -1, ""
     for f in glob.glob(f"{args.save_dir}/bpe_iter=*.pkl"):
-        m = re.match(f, f"bpe_iter=(\d+).pkl")
-        _iter = max(_iter, m.groups()[0])
-        ckpt = f"{args.save_dir}/{f}"    
+        f = Path(f).name
+        m = re.match("bpe_iter=(\d+)", f)
+        if m is None:
+            print(f)
+            raise
+        cur_iter = int(m.groups()[0])
+        if cur_iter > _iter:
+            _iter = cur_iter
+            ckpt = f"{args.save_dir}/{f}"    
     if _iter > -1:
         logger.info(f"loading {ckpt} at iter={_iter}")
         bpe = pickle.load(open(ckpt, 'rb'))

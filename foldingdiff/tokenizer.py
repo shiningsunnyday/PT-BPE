@@ -439,6 +439,7 @@ class Tokenizer:
         coords = self.compute_coords(i1, length)
         # ATOM_TYPES[i1%3], ATOM_TYPES[i1%3+1], ..., ATOM_TYPES[i1%3+length]
         bts = [Tokenizer.ATOM_TYPES[(i1%3+i)%3] for i in range(length+1)]
+        tokens = [self.bond_to_token[i] for i in sorted(self.bond_to_token) if i >= i1 and i < i1+length]
         plot_backbone(coords, output_path, bts, title=f"{Path(self.fname).stem} bonds {i1}-{i1+length-1}", zoom_factor=1.0)        
     
     def visualize(self, output_path, **kwargs):
