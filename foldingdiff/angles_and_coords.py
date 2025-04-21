@@ -444,6 +444,30 @@ def extract_backbone_coords(
     return coords
 
 
+def aa_seq_from_backbone(backbone_atoms):
+    """
+    Extract a 1‑letter amino‑acid sequence from a backbone‑only AtomArray.
+    Works for single‑model PDB domain files such as those in CATH.
+    """
+    # If the PDB lacks insertion codes Biotite leaves out the annotation.
+    has_ic = "ins_code" in backbone_atoms.get_annotation_categories()
+    ins_codes = backbone_atoms.ins_code if has_ic else [""] * backbone_atoms.array_length()
+
+    seq_by_res = OrderedDict()  # preserves residue order
+    for ch_id, res_id, ic, res_name in zip(
+            backbone_atoms.chain_id,
+            backbone_atoms.res_id,
+            ins_codes,
+            backbone_atoms.res_name):
+
+        key = (ch_id, int(res_id), ic)
+        if key in seq_by_res:
+            continue                           # already stored this residue
+        seq_by_res[key] = _AA3_TO_AA1.get(res_name.strip().upper(), "X")
+
+    return "".join(seq_by_res.values())
+    
+
 
 def extract_aa_seq(fname):
     """
@@ -467,38 +491,15 @@ def extract_aa_seq(fname):
     """
     opener = gzip.open if fname.endswith(".gz") else open
     with opener(str(fname), "rt") as f:
-        structure = PDBFile.read(f)
+        source = PDBFile.read(f)
+    if source.get_model_count() > 1:
+        print(fname, "has multiple models")
+        # return None
+    # Pull out the atomarray from atomarraystack
+    source_struct = source.get_structure(model=1)
     # keep caller’s line intact – grab first model as an AtomArray
-    chain = structure.get_structure(1)
-
-    # ---------------------------------------------------------------------
-    # `chain` is a biotite.structure.AtomArray representing one model that
-    # may contain several chains.  Each atom carries annotations:
-    #   chain.chain_id   – single char string
-    #   chain.res_id     – residue number (int)
-    #   chain.res_name   – three‑letter string
-    #   chain.ins_code   – insertion code ('' for none)
-    #
-    # We traverse the atoms in file order and record the first appearance
-    # of every (chain_id, res_id, ins_code) triple to avoid duplicates.
-    # ---------------------------------------------------------------------
-    seq = []
-    seen = set()                                     # unique residue keys
-    ins_codes = (chain.ins_code if "ins_code" in chain.get_annotation_categories()
-                 else [""] * chain.array_length())
-
-    for ch_id, res_id, ins_code, res_name in zip(
-            chain.chain_id, chain.res_id, ins_codes, chain.res_name):
-
-        key = (ch_id, int(res_id), ins_code)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        aa = _AA3_TO_AA1.get(res_name.strip().upper(), "X")
-        seq.append(aa)
-
-    return "".join(seq)
+    backbone_atoms = source_struct[struc.filter_backbone(source_struct)]
+    return aa_seq_from_backbone(backbone_atoms)
 
 
 
