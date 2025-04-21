@@ -1,6 +1,6 @@
 from foldingdiff.tokenizer import *
 from foldingdiff.plotting import *
-from foldingdiff.algo import *
+# from foldingdiff.algo import *
 import heapq
 import json
 import logging

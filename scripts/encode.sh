@@ -8,37 +8,30 @@
 #SBATCH -e slurm/slurm.%N.%j.err # STDERR
 
 # load your bash config and (re)activate the conda env
-source ~/.bashrc
-conda deactivate || true
-conda activate foldingdiff
+# source ~/.bashrc
+# conda deactivate || true
+# conda activate /n/netscratch/mzitnik_lab/Lab/afang/envs/ptbpe
 
 # change if needed
-cd "/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff"
+cd "/n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE"
 
 toy=$1
-pad=$2
-bins=$3
-bin_strat=$4
-sec=$5
-res_init=$6
-ckpt_dir=$7
+pad="512"
+bins="1-10"
+bin_strat="histogram"
+sec="False"
+res_init="residue"
+# ckpt_dir=$7
 
 # base command
-cmd=( python bin/encode.py
-      --toy     "$toy"
-      --pad     "$pad"
-      --bins    "$bins"
-      --bin-strategy     "$bin_strat"
-      --vis
-      --sec     "$sec"
-      --res-init "$res_init"
-      --data-dir homo
-      --auto
-)
-
-# only append --ckpt-dir if $5 is non‑empty
-if [ -n "$ckpt_dir" ]; then
-  cmd+=( --ckpt-dir "$ckpt_dir" )
-fi
-
-"${cmd[@]}"
+PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE \
+  /n/netscratch/mzitnik_lab/Lab/afang/envs/ptbpe/bin/python -m bin.encode \
+  --auto \
+  --bin-strategy histogram \
+  --bins 1-20 \
+  --data-dir homo \
+  --log-dir /n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE/logs \
+  --pad 512 \
+  --save-dir /n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE/plots \
+  --toy 1000000 \
+  --vis
