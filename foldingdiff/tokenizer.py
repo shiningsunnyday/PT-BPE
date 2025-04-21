@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from itertools import starmap
 from copy import deepcopy
 import tempfile
-import nglview as nv
 import imageio
 import time
 import logging
