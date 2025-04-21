@@ -1,10 +1,5 @@
-import pyrosetta
-from pyrosetta import pose_from_pdb
-import nglview as nv
-from ipywidgets import HBox
 from tqdm import tqdm
 import tempfile
-import nglview as nv
 import imageio
 import os
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
@@ -38,51 +33,6 @@ def get_logger():
     """Helper to retrieve the global logger."""
     return LOGGER
 
-def visualize():
-    # Initialize PyRosetta
-    pyrosetta.init()
-
-    # Load the PDB file
-    pdb_filename = "./data/cath/dompdb/152lA00.pdb"  # Change this to your actual file
-    pose = pose_from_pdb(pdb_filename)
-
-    # Residue index to modify (change as needed)
-    residue_index = 10  # Change to the residue you want to modify
-
-    # Get initial torsion angles
-    initial_phi = pose.phi(residue_index)
-    initial_psi = pose.psi(residue_index)
-
-    print(f"Before modification - Phi: {initial_phi:.2f}, Psi: {initial_psi:.2f}")
-
-    # Save the original structure
-    before_pdb = "before.pdb"
-    pose.dump_pdb(before_pdb)
-
-    # Modify the torsion angle
-    pose.set_phi(residue_index, initial_phi + 50)  # Increase phi by 20 degrees
-    pose.set_psi(residue_index, initial_psi)  # Decrease psi by 15 degrees
-
-    # Get modified torsion angles
-    modified_phi = pose.phi(residue_index)
-    modified_psi = pose.psi(residue_index)
-
-    print(f"After modification - Phi: {modified_phi:.2f}, Psi: {modified_psi:.2f}")
-
-    # Save the modified structure
-    after_pdb = "after.pdb"
-    pose.dump_pdb(after_pdb)
-
-    # Create two separate NGLView widgets
-    view_before = nv.show_structure_file(before_pdb)
-    view_after = nv.show_structure_file(after_pdb)
-
-    # Set titles
-    view_before._set_size('400px', '400px')
-    view_after._set_size('400px', '400px')
-
-    # Display side by side
-    HBox([view_before, view_after])    
 
 def parse_pdb(pdb_file):
     # Create a PDB parser object

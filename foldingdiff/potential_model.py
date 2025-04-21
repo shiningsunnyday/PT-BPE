@@ -1,6 +1,98 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from typing import List, Optional, Tuple
 import math
+import numpy as np
+
+from Bio.SeqUtils.ProtParam import ProteinAnalysis
+
+HYDROPATHY = {
+    # Kyte–Doolittle index
+    "A": 1.8, "C": 2.5, "D":-3.5, "E":-3.5, "F": 2.8, "G":-0.4,
+    "H":-3.2, "I": 4.5, "K":-3.9, "L": 3.8, "M": 1.9, "N":-3.5,
+    "P":-1.6, "Q":-3.5, "R":-4.5, "S":-0.8, "T":-0.7, "V": 4.2,
+    "W":-0.9, "Y":-1.3, "X": 0.0, "-": 0.0,
+}
+
+class BackboneResidueFeaturizer(nn.Module):
+    """
+    Produce a tensor of shape (seq_len, feat_dim) for a single protein chain.
+    """
+    def __init__(self):
+        super().__init__()
+        self.aa_to_idx = {aa:i for i,aa in enumerate("ACDEFGHIKLMNPQRSTVWY")}
+        self.out_dim = 20 + 1 + 1 + 3 + 1          # AA one‑hot + hydropathy + disorder + 3‑state SS + pLDDT
+
+    def forward(self, aa_seq:str,
+                      ss_pred:str=None,          # secondary structure 'H/E/C' string from e.g. PSIPRED
+                      disorder:np.ndarray=None,  # per‑res residue disorder score [0,1]
+                      plddt:np.ndarray=None):    # AlphaFold confidence
+
+        L = len(aa_seq)
+        one_hot = torch.zeros(L, 20)
+        hydro   = torch.zeros(L, 1)
+        for i, aa in enumerate(aa_seq):
+            if aa in self.aa_to_idx:
+                one_hot[i, self.aa_to_idx[aa]] = 1.0
+            hydro[i,0] = HYDROPATHY.get(aa, 0.0)
+
+        # Disorder (fallback 0.0)
+        if disorder is None: disorder = np.zeros(L)
+        disorder = torch.from_numpy(disorder).float().unsqueeze(-1)
+
+        # Secondary structure to one‑hot
+        if ss_pred is None: ss_pred = "C"*L
+        ss_map = {"H":0, "E":1, "C":2}
+        ss_onehot = torch.zeros(L, 3)
+        for i, s in enumerate(ss_pred):
+            ss_onehot[i, ss_map.get(s,"C")] = 1.0
+
+        if plddt is None: plddt = np.zeros(L)
+        plddt = torch.from_numpy(plddt).float().unsqueeze(-1) / 100.0  # scale 0…1
+
+        return torch.cat([one_hot, hydro, disorder, ss_onehot, plddt], dim=-1)
+
+
+class SegmentFeatureAggregator(nn.Module):
+    """
+    Turn a span X[i:j] (tensor (len, feat_dim)) into a fixed vector.
+    We concatenate:
+      – mean of each feature over the span
+      – variance
+      – length (normalised)
+      – log‑length
+    """
+    def __init__(self, per_res_dim:int):
+        super().__init__()
+        self.per_res_dim = per_res_dim
+        self.out_dim = 2*per_res_dim + 2  # mean + var + len + log(len)
+
+    def forward(self, span:torch.Tensor):
+        # span: (L, per_res_dim)
+        mean = span.mean(dim=0)
+        var  = span.var(dim=0, unbiased=False)
+        L = span.size(0)
+        length = torch.tensor([L], dtype=span.dtype, device=span.device)
+        log_length = torch.log(length.float()+1e-6)
+        return torch.cat([mean, var, length/500.0, log_length/6.0], dim=0)
+
+
+class SegmentPotentialMLP(nn.Module):
+    """
+    Small 2‑layer MLP: agg_vec -> hidden -> scalar
+    """
+    def __init__(self, agg_dim:int, hidden:int=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(agg_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+
+    def forward(self, agg_vec:torch.Tensor):
+        return self.net(agg_vec).squeeze(-1)      # scalar
+
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
@@ -80,7 +172,127 @@ class LongSequenceGRU(nn.Module):
         
         # out_all_steps is (batch, max_seq_len, 1)
         return out_all_steps, hidden
-          
+
+
+# ---------------------------------------------------------------------
+# 2.  Semi‑CRF wrapper
+# ---------------------------------------------------------------------
+
+class SemiCRFModel(nn.Module):
+    """
+    Combines:
+      – token‑level encoder  (AngleTransformer or BertForDiffusionBase)
+      – residue‑wise biochemical features  -> pooled segment vector
+      – segment MLP potential
+      – optional length bias γ
+    The `forward()` returns the *segment score table* out[i][l].
+    """
+    def __init__(
+        self,        
+        res_featurizer: BackboneResidueFeaturizer,
+        seg_aggregator: SegmentFeatureAggregator,
+        seg_potential: SegmentPotentialMLP,
+        encoder: Optional[nn.Module] = None,
+        length_bias: float = 0.0,
+        max_seg_len: int = 100,
+        device: Optional[torch.device] = None,
+    ):
+        super().__init__()
+        self.encoder         = encoder
+        self.featurizer      = res_featurizer
+        self.aggregator      = seg_aggregator
+        self.seg_mlp         = seg_potential
+        self.gamma           = length_bias
+        self.max_seg_len     = max_seg_len
+        self.device          = device or torch.device("cpu")
+        
+        if self.encoder:
+            # linear projection from encoder hidden -> scalar
+            self.enc2score = nn.Linear(
+                encoder.config.hidden_size if hasattr(encoder, "config") else encoder.d_model,
+                1,
+            )
+
+    # -----------------------------------------------------------------
+    # main API ---------------------------------------------------------
+    # -----------------------------------------------------------------
+    def forward(
+        self,
+        aa_seq: str,
+        angles_tensor: torch.Tensor,            # (1, L, num_features)
+        timestep: torch.Tensor,                 # (1,) or (1,1)
+        attention_mask: torch.Tensor,           # (1, L)
+        ss_pred: Optional[str] = None,
+        disorder: Optional[torch.Tensor] = None,
+        plddt: Optional[torch.Tensor] = None,
+    ) -> List[List[torch.Tensor]]:
+        """
+        Returns:
+            out[i][l]   scalar (log‑)score for span [i, i+l-1]
+                        i in 0…L-1, l in 1…L-i
+        """
+
+        # 1) token‑level encoder
+        #    -> per‑token hidden (batch, L, hidden)
+        if self.encoder:
+            L = angles_tensor.size(1)
+            assert L == len(aa_seq), "angle tensor and sequence length differ"            
+            enc_hidden = self.encoder(
+                inputs        = angles_tensor.to(self.device),
+                timestep      = timestep.to(self.device),
+                attention_mask= attention_mask.to(self.device),
+            )
+            if isinstance(enc_hidden, tuple) or isinstance(enc_hidden, list):
+                enc_hidden = enc_hidden[0]          # (1, L, hidden)
+            token_repr = enc_hidden.squeeze(0)       # (L, hidden)
+        else:
+            L = len(aa_seq)
+
+        # 2) pre‑compute residue‑level biochemical feature tensor (L, feat_dim)
+        res_feats = self.featurizer(
+            aa_seq, ss_pred=ss_pred,
+            disorder=None if disorder is None else disorder.cpu().numpy(),
+            plddt=None if plddt is None else plddt.cpu().numpy(),
+        ).to(self.device)                        # (L, feat_dim)
+
+        # 3) build out[i][l]
+        out: List[List[torch.Tensor]] = [[None]*(L+1) for _ in range(L)]
+
+        # cumulative sums for O(1) span pooling of token repr & res feats
+        if self.encoder:
+            cumsum_token = torch.cat([torch.zeros(1, token_repr.size(-1), device=self.device),
+                                    token_repr.cumsum(dim=0)], dim=0)
+        cumsum_feat  = torch.cat([torch.zeros(1, res_feats.size(-1), device=self.device),
+                                  res_feats.cumsum(dim=0)], dim=0)
+
+        for i in range(L):
+            max_l = min(self.max_seg_len, L - i)
+            for l in range(1, max_l + 1):
+                j = i + l
+
+                if self.encoder:
+                    # mean token embedding for span
+                    span_token_mean = (cumsum_token[j] - cumsum_token[i]) / l
+                    enc_score = self.enc2score(span_token_mean).squeeze(-1)
+                else:
+                    enc_score = 0.0
+
+                # biochemical segment potential
+                span_feat = res_feats[i:j]                       # (l, feat_dim)
+                agg_vec   = self.aggregator(span_feat)           # (agg_dim,)
+                bio_score = self.seg_mlp(agg_vec)
+
+                # total score + length bias
+                out[i][l] = enc_score + bio_score + self.gamma * l
+
+        return out
+
+    # convenience helper identical to your old precompute signature
+    def precompute(self, aa_seq, angles_tensor=None, timestep=None, attention_mask=None, ss_pred=None, disorder=None, plddt=None):
+        out = self.forward(aa_seq, angles_tensor, timestep, attention_mask,
+                           ss_pred=ss_pred, disorder=disorder, plddt=plddt)
+        return out
+
 
 def zero_initialize(self):
     # Loop over all named parameters and zero them

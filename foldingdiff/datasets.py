@@ -36,7 +36,8 @@ from foldingdiff.angles_and_coords import (
     EXHAUSTIVE_DISTS,
     extract_backbone_coords,
     extract_side_chain_coords,
-    extract_backbone_residue_idxes
+    extract_backbone_residue_idxes,
+    extract_aa_seq
 )
 from foldingdiff.annotations import find_secondary_structures
 from foldingdiff import custom_metrics as cm
@@ -338,7 +339,7 @@ class CathCanonicalAnglesDataset(Dataset):
             angles=EXHAUSTIVE_ANGLES,
         )
         coords_pfunc = functools.partial(extract_backbone_coords, atoms=["CA"])
-
+    
         logging.info(
             f"Computing full dataset of {len(fnames)} with {multiprocessing.cpu_count()} threads"
         )
@@ -562,6 +563,7 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
         full_atom_idx_map = functools.partial(extract_backbone_residue_idxes, atoms=["N", "CA", "C"])
         full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
         side_chain_coords_pfunc = extract_side_chain_coords
+        aa_seq_func = extract_aa_seq
         if hasattr(self, "secondary") and self.secondary:
             secondary_pfunc = find_secondary_structures        
         logging.info(
@@ -577,6 +579,7 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
             if hasattr(self, "secondary") and self.secondary:
                 secondary_strucs = list(pool.map(secondary_pfunc, fnames, chunksize=250))
             side_chain_arrays = list(pool.map(extract_side_chain_coords, fnames, chunksize=250))
+            aa_arrays = list(pool.map(extract_aa_seq, fnames, chunksize=250))
             pool.close()
             pool.join()            
         else:
@@ -594,30 +597,34 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
             if hasattr(self, "secondary") and self.secondary:
                 secondary_strucs = [secondary_pfunc(fname) for fname in fnames]
             side_chain_arrays = [extract_side_chain_coords(fname) for fname in fnames]
+            aa_arrays = [extract_aa_seq(fname) for fname in fnames]
         
         # Contains only non-null structures
         structures = []
-        args = [fnames, struct_arrays, coord_arrays, full_coord_arrays, full_atom_idxes, side_chain_arrays]
+        args = [fnames, struct_arrays, coord_arrays, full_coord_arrays, full_atom_idxes, side_chain_arrays, aa_arrays]
         if hasattr(self, "secondary") and self.secondary:
             args += [secondary_strucs]
         pargs = zip(*args)
         for parg in pargs:
             if hasattr(self, "secondary") and self.secondary:
-                fname, s, c, c_full, idxes, sc, sec = parg
+                fname, s, c, c_full, idxes, sc, aa, sec = parg
             else:
-                fname, s, c, c_full, idxes, sc = parg
+                fname, s, c, c_full, idxes, sc, aa = parg
             if s is None:
                 print("s is None", fname)
                 continue
             if idxes is None:
                 print("idxes is None", fname)
                 continue
+            if len(aa) != len(s):
+                breakpoint()                
             structure = {
                 "angles": s,
                 "coords": c,
                 "full_coords": c_full,
                 "full_idxes": idxes,                    
                 "side_chain": sc,
+                "aa": aa,
                 "fname": fname,
             }
             if hasattr(self, "secondary") and self.secondary:

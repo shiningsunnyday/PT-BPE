@@ -28,6 +28,17 @@ STANDARD_RESIDUES = {
     "HIS", "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER", 
     "THR", "TRP", "TYR", "VAL"
 }
+# --- 3‑letter ➜ 1‑letter lookup table (IUPAC) -------------------------------
+_AA3_TO_AA1 = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D",
+    "CYS": "C", "GLU": "E", "GLN": "Q", "GLY": "G",
+    "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K",
+    "MET": "M", "PHE": "F", "PRO": "P", "SER": "S",
+    "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+    # common “unknown / modified” fall‑backs
+    "SEC": "U", "PYL": "O", "ASX": "B", "GLX": "Z",
+    "XAA": "X", "UNK": "X"
+}
 STANDARD_SIDECHAIN_ORDER = {
     "ALA": ["CB"],
     "ARG": ["CB", "CG", "CD", "NE", "CZ", "NH1", "NH2"],
@@ -431,6 +442,65 @@ def extract_backbone_coords(
     ca = [c for c in backbone if c.atom_name in atoms]
     coords = np.vstack([c.coord for c in ca])
     return coords
+
+
+
+def extract_aa_seq(fname):
+    """
+    Return the amino‑acid sequence (1‑letter string) found in `pdb_file`.
+
+    Parameters
+    ----------
+    pdb_file : str | pathlib.Path | io.TextIOBase
+        Path to a PDB file or an already opened file handle.
+    chain_id : str | None
+        Desired chain ID (e.g. "A").  If None, all chains are concatenated
+        in the order they first appear.
+
+    Notes
+    -----
+    • Only ATOM records are inspected (as required by the PDB format).  
+    • Alternate location identifiers, insertion codes, and multiple models
+      are ignored—the first occurrence of each (chain, residue number)
+      wins.  That behaviour fits most single‑model PDBs such as CATH
+      domain files (e.g. “1opcA00.pdb”).
+    """
+    opener = gzip.open if fname.endswith(".gz") else open
+    with opener(str(fname), "rt") as f:
+        structure = PDBFile.read(f)
+    # keep caller’s line intact – grab first model as an AtomArray
+    chain = structure.get_structure(1)
+
+    # ---------------------------------------------------------------------
+    # `chain` is a biotite.structure.AtomArray representing one model that
+    # may contain several chains.  Each atom carries annotations:
+    #   chain.chain_id   – single char string
+    #   chain.res_id     – residue number (int)
+    #   chain.res_name   – three‑letter string
+    #   chain.ins_code   – insertion code ('' for none)
+    #
+    # We traverse the atoms in file order and record the first appearance
+    # of every (chain_id, res_id, ins_code) triple to avoid duplicates.
+    # ---------------------------------------------------------------------
+    seq = []
+    seen = set()                                     # unique residue keys
+    ins_codes = (chain.ins_code if "ins_code" in chain.get_annotation_categories()
+                 else [""] * chain.array_length())
+
+    for ch_id, res_id, ins_code, res_name in zip(
+            chain.chain_id, chain.res_id, ins_codes, chain.res_name):
+
+        key = (ch_id, int(res_id), ins_code)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        aa = _AA3_TO_AA1.get(res_name.strip().upper(), "X")
+        seq.append(aa)
+
+    return "".join(seq)
+
+
 
 
 def extract_side_chain_coords(fname: str) -> Optional[List[Tuple[str, List[Tuple[str, Optional[np.ndarray]]]]]]:

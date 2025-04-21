@@ -277,6 +277,7 @@ class Tokenizer:
         else:
             self._sec = None
         self._side_chains = structure['side_chain']
+        self.aa = structure['aa']
         self.fname = structure['fname']
         self.n = len(self._angles_and_dists) # fixed
         # fixed
