@@ -622,7 +622,7 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
                 "angles": s,
                 "coords": c,
                 "full_coords": c_full,
-                "full_idxes": idxes,                    
+                "full_idxes": idxes,
                 "side_chain": sc,
                 "aa": aa,
                 "fname": fname,
