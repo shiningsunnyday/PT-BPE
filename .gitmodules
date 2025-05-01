@@ -1,3 +1,6 @@
 [submodule "tape"]
 	path = tape
 	url = https://github.com/songlab-cal/tape.git
+[submodule "StructTokenBench"]
+	path = StructTokenBench
+	url = https://github.com/KatarinaYuan/StructTokenBench.git
