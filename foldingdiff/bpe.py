@@ -6,8 +6,19 @@ import json
 import logging
 from collections import defaultdict
 from sortedcontainers import SortedDict
-from sklearn.metrics import f1_score, accuracy_score
+from foldingdiff.datasets import extract_pdb_code_and_chain
+from esm.models.esmc import ESMC
+from esm.sdk.api import ESMProtein, LogitsConfig
+from esm.utils.structure.protein_chain import ProteinChain
+from torch.utils.data import Dataset
+import torch
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from tqdm import tqdm
 logger = logging.getLogger(__name__)
+
+gpu_lock = threading.Lock()
+client = ESMC.from_pretrained("esmc_300m").to("cuda") # or "cpu"
 
 class ThresholdDict(dict): # only add, no remove
     def __new__(cls, *args, **kwargs):
@@ -963,6 +974,19 @@ def compute_embedding(item):
     return embed
 
 
+def compute_embedding_from_pdb(item):
+    _id, chain, _, _, prot_fname = item
+    protein = ESMProtein.from_protein_chain(ProteinChain.from_pdb(prot_fname, chain_id=chain, is_predicted=True))    
+    # Ensure only one thread performs GPU operations at a time.
+    with gpu_lock:
+        protein_tensor = client.encode(protein)
+        output = client.logits(
+            protein_tensor,
+            LogitsConfig(sequence=True, return_embeddings=True)
+        )
+    embed = output.embeddings[0, 1:-1].to(torch.float32).to('cpu')
+    return embed
+
 
 
 class MyDataset(Dataset):
@@ -1015,3 +1039,24 @@ class MyDataset(Dataset):
         item['edges'] = edges        
         item['embeddings'] = self.esm_outputs[idx]
         return item
+
+
+class ResidueDataset(MyDataset):
+    def __init__(self, tokenizers, dataset, debug=False):
+        self.num_classes = 2 # binary classification
+        self.debug = debug
+        mapping = {}
+        for i, t in enumerate(tokenizers):
+            stem = Path(t.fname).stem
+            mapping[stem] = i
+        my_data = []
+        for sample in dataset:
+            if self.debug and len(my_data) == 10:
+                break
+            prot, chain = sample['pdb_id'], sample['chain_id']
+            key = f"{prot}_{chain}"
+            if key in mapping:
+                i = mapping[key]
+                my_data.append((prot, chain, tokenizers[i], sample))
+        self.data = my_data
+        self.precompute()

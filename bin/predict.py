@@ -1,10 +1,7 @@
 import pyrosetta
 from pyrosetta import pose_from_pdb
-import nglview as nv
-from ipywidgets import HBox
 from tqdm import tqdm
 import tempfile
-import nglview as nv
 import imageio
 import os
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset, extract_pdb_code_and_chain
@@ -17,7 +14,7 @@ import argparse
 import pickle
 from datetime import datetime
 import sys
-from tape.datasets import LMDBDataset
+from tape.tape.datasets import LMDBDataset
 from esm.models.esmc import ESMC
 from esm.sdk.api import ESMProtein, LogitsConfig
 from esm.utils.structure.protein_chain import ProteinChain
@@ -65,7 +62,13 @@ def parse_args():
     parser.add_argument("--test", action='store_true', help='test (instead of train)')
     parser.add_argument("--task", choices=["remote-homology-detection", # per-protein
                                             "structural-flexibility-prediction", # per-residue regression
-                                            "binding-site-prediction", "catalytic-site-prediction", "conserved-site-prediction", "repeat-motif-prediction", "epitope-region-prediction" # per-residue classification
+                                            "BindInt",
+                                            "BindBio",
+                                            "CatInt",
+                                            "CatBio",
+                                            "conserved-site-prediction",
+                                            "repeat-motif-prediction",
+                                            "epitope-region-prediction", # per-residue classification
     ], default="remote-homology-detection")
     # data
     parser.add_argument("--pkl-file", type=str, required=True, 
@@ -264,11 +267,11 @@ def collate_item(batch):
 
 
 
-def train_probe(args, train_dataset, valid_dataset):
+def train_probe(args, train_dataset, valid_dataset, num_classes):
     # Hyperparameters (adjust as needed)
     embed_dim = 960       # pretrained embedding dimension (for residues)
     hidden_dim = 128      # hidden dimension for probe
-    num_classes = 45      # number of classes for fold classification
+    # number of classes for fold classification
 
     device = torch.device(args.cuda)
     if args.level == "protein":
@@ -458,7 +461,7 @@ def train_probe(args, train_dataset, valid_dataset):
             }, checkpoint_path)
             print(f"New best macro F1 achieved: {best_val_macro_f1:.4f}. Saved checkpoint to {checkpoint_path}.")
 
-def test_probe(args, test_datasets):
+def test_probe(args, test_datasets, num_classes):
     """
     Load the best checkpoint from args.save_dir, then for each test dataset
     in test_datasets (a dict name->dataset or list of (name, dataset)),
@@ -476,7 +479,6 @@ def test_probe(args, test_datasets):
     # 2) Initialize model components
     embed_dim = 960
     hidden_dim = 128
-    num_classes = 45
 
     # probe head
     if args.level == "protein":
@@ -597,8 +599,47 @@ def load_datasets(args):
         test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
         test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)
         test_datasets = [test_family_dataset, test_fold_dataset, test_superfamily_dataset]
-    elif args.task == "binding-site-prediction":
-        breakpoint()
+    elif args.task in ["BindInt", "BindBio", "repeat-motif-prediction", "CatInt", "CatBio", "conserved-site-prediction"]:
+        if args.task == "BindInt":
+            train_path = 'data/struct_token_bench/interpro/binding_label_train_processed.jsonl'
+            valid_path = 'data/struct_token_bench/interpro/binding_label_validation_processed.jsonl'
+            test_fold_path = 'data/struct_token_bench/interpro/binding_label_fold_test_processed.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/interpro/binding_label_superfamily_test_processed.jsonl'
+        elif args.task == "BindBio":
+            train_path = 'data/struct_token_bench/biolip2/binding_label_train_processed.jsonl'
+            valid_path = 'data/struct_token_bench/biolip2/binding_label_validation_processed.jsonl'
+            test_fold_path = 'data/struct_token_bench/biolip2/binding_label_fold_test_processed.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/biolip2/binding_label_superfamily_test_processed.jsonl'
+        elif args.task == "repeat-motif-prediction":
+            train_path = 'data/struct_token_bench/interpro/repeat_label_train_processed.jsonl'
+            valid_path = 'data/struct_token_bench/interpro/repeat_label_validation_processed.jsonl'
+            test_fold_path = 'data/struct_token_bench/interpro/repeat_label_fold_test_processed.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/interpro/repeat_label_superfamily_test_processed.jsonl'
+        elif args.task == "CatInt":
+            train_path = 'data/struct_token_bench/interpro/activesite_label_train_processed.jsonl'
+            valid_path = 'data/struct_token_bench/interpro/activesite_label_validation_processed.jsonl'
+            test_fold_path = 'data/struct_token_bench/interpro/activesite_label_fold_test_processed.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/interpro/activesite_label_superfamily_test_processed.jsonl'
+        elif args.task == "CatBio":
+            train_path = 'data/struct_token_bench/biolip2/catalytic_label_train_processed.jsonl'
+            valid_path = 'data/struct_token_bench/biolip2/catalytic_label_validation_processed.jsonl'
+            test_fold_path = 'data/struct_token_bench/biolip2/catalytic_label_fold_test_processed.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/biolip2/catalytic_label_superfamily_test_processed.jsonl'
+        with open(train_path, 'r') as f:
+            train_dataset = [json.loads(line) for line in f]
+        with open(valid_path, 'r') as f:
+            valid_dataset = [json.loads(line) for line in f]
+        with open(test_fold_path, 'r') as f:
+            test_fold = [json.loads(line) for line in f]
+        with open(test_superfamily_path, 'r') as f:
+            test_superfamily = [json.loads(line) for line in f]
+        train_dataset = ResidueDataset(bpe.tokenizers, train_dataset, args.debug)
+        valid_dataset = ResidueDataset(bpe.tokenizers, valid_dataset, args.debug)
+        test_fold = ResidueDataset(bpe.tokenizers, test_fold, args.debug)
+        test_superfamily = ResidueDataset(bpe.tokenizers, test_superfamily, args.debug)
+        test_datasets = [test_fold, test_superfamily]
+    else:
+        raise NotImplementedError(f"Task {args.task} not implemented.")
     if args.pkl_data_file:
         pickle.dump((train_dataset, valid_dataset, test_datasets), open(args.pkl_data_file, 'wb+'))
     return train_dataset, valid_dataset, test_datasets
@@ -619,9 +660,15 @@ def main(args):
     # train using train_dataset, validate with valid_dataset, ignore test_* datasets for now
     train_dataset, valid_dataset, test_datasets = load_datasets(args)
     if args.test:
-        test_probe(args, test_datasets)
+        if args.task == 'remote-homology-detection':
+            test_probe(args, test_datasets, num_classes=45)
+        else:
+            test_probe(args, test_datasets, num_classes=train_dataset.num_classes)
     else:
-        train_probe(args, train_dataset, valid_dataset)
+        if args.task == 'remote-homology-detection':
+            train_probe(args, train_dataset, valid_dataset, num_classes=45)
+        else:
+            train_probe(args, train_dataset, valid_dataset, num_classes=train_dataset.num_classes)
     
 
 if __name__ == "__main__":    
