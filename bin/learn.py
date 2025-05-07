@@ -1,6 +1,7 @@
 from foldingdiff.potential_model import *
 from foldingdiff.modelling import *
 from foldingdiff.tokenizer import Tokenizer
+from foldingdiff.plotting import plot_feature_importance
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
 import torch
 import gc
@@ -223,7 +224,7 @@ def get_model(args, max_len):
         encoder = None
     # === residue‑feat extractor and segment potential ===
     res_feat = BackboneResidueFeaturizer()
-    agg      = SegmentFeatureAggregator(res_feat.out_dim)
+    agg      = SegmentFeatureAggregator(res_feat.out_dim, res_feat.labels)
     seg_mlp  = SegmentPotentialMLP(agg.out_dim, hidden=64)
     # Wrap everything in a single object (lightweight example)
     model = SemiCRFModel(
@@ -233,7 +234,8 @@ def get_model(args, max_len):
         seg_potential=seg_mlp,
         length_bias=args.gamma,          # γ from your DP
         max_seg_len=args.max_seg_len,
-        device=args.cuda
+        device=args.cuda,
+        num_workers=0 if args.debug else 20
     )
     return model.to(args.cuda)
 
@@ -296,7 +298,7 @@ def main() -> None:
                 coords = t.compute_coords()
                 prot_id = Path(t.fname).stem
                 # --------- call SemiCRFModel.precompute -------------------
-                out = model.precompute(
+                out, attn_scores = model.precompute(
                     prot_id       = prot_id,
                     aa_seq        = t.aa,              # Tokenizer stores AA sequence
                     coords_tensor = coords
@@ -318,7 +320,7 @@ def main() -> None:
                 timestep = torch.ones(1, 1, dtype=torch.long, device=args.cuda)
 
                 # --------- call SemiCRFModel.precompute -------------------
-                out = model.precompute(
+                out, attn_scores = model.precompute(
                     aa_seq        = t.aa,              # Tokenizer stores AA sequence
                     angles_tensor = span_tensor,
                     timestep      = timestep,
@@ -328,6 +330,8 @@ def main() -> None:
             # ---------- forward + Viterbi on semi‑CRF -----------------
             log_a, map_a, best_lens = semi_crf_dp_and_map(out, N, gamma=args.gamma)
             best_seg = backtrace_map_segmentation(best_lens, N)
+            attn_stack = torch.stack([attn_scores[start][end-start] for start, end in best_seg], axis=0)
+            attn_agg = attn_stack.mean(axis=0)            
             
             if args.model == "feats":
                 # store segmentation in Tokenizer (as before)
@@ -358,9 +362,11 @@ def main() -> None:
             # segmentation probability
             prob = torch.exp(map_a[N] - log_a[N]).item()
             if prob > 0.5:   # arbitrary threshold for visualisation
-                t.visualize(os.path.join(args.plot_dir,
-                             f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"),
-                             vis_dihedral=False)
+                path = Path(os.path.join(args.plot_dir, f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"))
+                attn_path = path.with_name(path.stem + "_attn" + path.suffix)
+                t.visualize(path,
+                                vis_dihedral=False)
+                plot_feature_importance(attn_agg.detach().cpu().numpy(), model.aggregator.per_res_labels, attn_path)
 
         # ---------------- checkpoint if improved ---------------------
         if total_loss < best_loss:
@@ -372,4 +378,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    breakpoint()
     main()

@@ -667,5 +667,29 @@ def sorted_bar_plot(values, title="Sorted Bar Plot", ylabel="Value", save_path=N
         plt.show()
 
 
+
+def plot_feature_importance(mean_attn_scores, labels, output_path):
+    # 1) sanity check
+    assert len(mean_attn_scores) == len(labels), "scores and labels must be same length"
+    
+    # 2) create figure
+    fig, ax = plt.subplots(figsize=(8, 12))
+    
+    # 3) horizontal bar plot
+    y_pos = range(len(labels))
+    ax.barh(y_pos, mean_attn_scores, align='center')
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.invert_yaxis()  # highest scores at top
+    ax.set_xlabel("Mean Attention Score")
+    ax.set_title("Feature Importance")
+    
+    # 4) layout, show, and save
+    plt.tight_layout()
+    plt.show()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     plot_losses(sys.argv[1], out_fname=sys.argv[2], simple=True)
