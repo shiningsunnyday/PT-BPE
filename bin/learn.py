@@ -15,6 +15,7 @@ import argparse
 import os
 import logging
 import inspect
+from pathlib import Path
 
 # Configure logging (you can customize format and level here)
 logging.basicConfig(level=logging.INFO,
@@ -278,6 +279,10 @@ def main() -> None:
     best_loss = float("inf")
     model.train()
 
+    # ---------------- precompute if needed ------------------------------------
+    if args.model == "feats":
+        model.compute_feats(dataset)
+
     # -----------------------------------------------------------------
     for epoch in range(args.epochs):
         total_loss = 0.0
@@ -288,13 +293,14 @@ def main() -> None:
             if args.model == "feats": # residue level
                 N = t.n
                 assert t.n == len(t.aa), "number of residues != length of amino acid sequence"
+                coords = t.compute_coords()
+                prot_id = Path(t.fname).stem
                 # --------- call SemiCRFModel.precompute -------------------
                 out = model.precompute(
+                    prot_id       = prot_id,
                     aa_seq        = t.aa,              # Tokenizer stores AA sequence
-                    ss_pred       = getattr(t, "sec_struct", None),
-                    disorder      = getattr(t, "disorder",   None),
-                    plddt         = getattr(t, "plddt",      None),
-                )                                       # out[i][l] ready for DP                
+                    coords_tensor = coords
+                )                                       # out[i][l] ready for DP
             else:
                 N = 3 * t.n - 1 # bond level
         
@@ -316,19 +322,21 @@ def main() -> None:
                     aa_seq        = t.aa,              # Tokenizer stores AA sequence
                     angles_tensor = span_tensor,
                     timestep      = timestep,
-                    attention_mask= attention_mask,
-                    ss_pred       = getattr(t, "sec_struct", None),
-                    disorder      = getattr(t, "disorder",   None),
-                    plddt         = getattr(t, "plddt",      None),
+                    attention_mask= attention_mask
                 )                                       # out[i][l] ready for DP
 
             # ---------- forward + Viterbi on semi‑CRF -----------------
             log_a, map_a, best_lens = semi_crf_dp_and_map(out, N, gamma=args.gamma)
             best_seg = backtrace_map_segmentation(best_lens, N)
-
-            # store segmentation in Tokenizer (as before)
-            t.bond_to_token = {start: (start, seg_idx, end - start)
-                               for seg_idx, (start, end) in enumerate(best_seg)}
+            
+            if args.model == "feats":
+                # store segmentation in Tokenizer (as before)
+                t.bond_to_token = {3*start: (3*start, 3*seg_idx, min(3*(end-start), 3*t.n-1-3*start))
+                                for seg_idx, (start, end) in enumerate(best_seg)}                
+            else:
+                # store segmentation in Tokenizer (as before)
+                t.bond_to_token = {start: (start, seg_idx, end - start)
+                                for seg_idx, (start, end) in enumerate(best_seg)}
 
             # --------------- loss & optimisation ----------------------
             loss   = -log_a[N]                       # negative log‑partition
@@ -364,5 +372,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    breakpoint()
     main()

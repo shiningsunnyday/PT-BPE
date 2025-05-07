@@ -1,10 +1,18 @@
+import os
+import tempfile
+import subprocess
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional, Tuple
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import math
 import numpy as np
-
+from collections import defaultdict
+from tqdm import tqdm
+from pathlib import Path
+from pyzernike import ZernikeDescriptor
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
 
 HYDROPATHY = {
@@ -14,6 +22,42 @@ HYDROPATHY = {
     "P":-1.6, "Q":-3.5, "R":-4.5, "S":-0.8, "T":-0.7, "V": 4.2,
     "W":-0.9, "Y":-1.3, "X": 0.0, "-": 0.0,
 }
+
+def voxelize(coords, grid_size=64, padding=2.0):
+    """
+    Convert 3D points into a binary occupancy grid.
+    - coords: (n_points,3) numpy array
+    - grid_size: number of voxels per axis
+    - padding: extra Ångstroms around the min/max before voxelizing
+    """
+    # Compute bounding box
+    mins = coords.min(axis=0) - padding
+    maxs = coords.max(axis=0) + padding
+    # Voxel spacing
+    spacing = (maxs - mins) / (grid_size - 1)
+    # Initialize grid
+    grid = np.zeros((grid_size, grid_size, grid_size), dtype=np.float32)
+    # Map each atom into voxel coords
+    ijk = ((coords - mins) / spacing).astype(int)
+    # Clip to valid range
+    ijk = np.clip(ijk, 0, grid_size - 1)
+    # Set occupancy
+    for (i, j, k) in ijk:
+        grid[i, j, k] = 1.0
+    return grid
+
+
+def compute_3d_zernike(grid, order=8):
+    """
+    Compute the 3D Zernike descriptor up to a given order.
+    """
+    # Fit descriptor
+    zd = ZernikeDescriptor.fit(data=grid, order=order)
+    # Extract the invariant coefficients
+    coeffs = zd.get_coefficients()
+    return coeffs
+
+    
 
 class BackboneResidueFeaturizer(nn.Module):
     """
@@ -205,26 +249,151 @@ class SemiCRFModel(nn.Module):
         self.gamma           = length_bias
         self.max_seg_len     = max_seg_len
         self.device          = device or torch.device("cpu")
-        
         if self.encoder:
             # linear projection from encoder hidden -> scalar
             self.enc2score = nn.Linear(
                 encoder.config.hidden_size if hasattr(encoder, "config") else encoder.d_model,
                 1,
             )
+        else:
+            self.zernike_projector = nn.Linear(25, 1)
+            self.feats = defaultdict(dict)
+    
+    @staticmethod
+    # Top‐level helper must be importable (no self):
+    def _compute_protein_fps(args):
+        """
+        Compute all (i,j) fingerprints for a single protein t.
+        Returns (prot_id, { (i,j): torch.Tensor(fp) }).
+        """
+        t, grid_size, padding, order, device = args
+        prot_id = Path(t.fname).stem
+        aa_seq  = t.aa
+        coords  = t.compute_coords()
+        # ensure numpy for voxelize / 3DZD
+        coords_np = coords.cpu().numpy() if torch.is_tensor(coords) else coords
+
+        fps_dict = {}
+        for i in range(len(aa_seq)):
+            for j in range(i+1, len(aa_seq)+1):
+                subcoords = coords_np[3*i:3*j]
+                grid      = voxelize(subcoords, grid_size=grid_size, padding=padding)
+                fp        = compute_3d_zernike(grid, order=order)
+                fps_dict[(i, j)] = torch.as_tensor(fp, device=device)
+
+        return prot_id, fps_dict
+
+    @staticmethod
+    # Top‐level helper must be importable (no self):
+    def _compute_protein_plddt(args):
+        """
+        Compute all pLDDT confidences for a batch of proteins.
+        Returns (prot_ids, [torch.Tensor(confidences)])
+        """
+        # 1) Gather IDs (here we assume .aa is the sequence string)
+        prot_ids = [Path(t.fname).stem for t in args]
+        sequences = [t.aa for t in args]  # or [t.sequence for t in args], adjust as needed
+
+        # 2) Create a temp file for input and dump the sequences
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.txt', delete=False) as in_f:
+            for seq in sequences:
+                in_f.write(seq+'\n')
+            in_path = in_f.name
+
+        # 3) Reserve an output path
+        out_fd, out_path = tempfile.mkstemp(suffix='.pt')
+        os.close(out_fd)
+        # locate your script relative to this file
+        python_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "test_esmfold.py")
+        try:
+            # this will invoke the python inside the esmfold env
+            subprocess.run([
+                "conda", "run", "-n", "esmfold",
+                "python", python_path,
+                "--in-file",  in_path,
+                "--out-file", out_path
+            ], check=True)
+            plddts = torch.load(out_path)
+        except subprocess.CalledProcessError as e:
+            print("Command failed with exit code", e.returncode)
+            print("=== STDOUT ===")
+            print(e.stdout)
+            print("=== STDERR ===")
+            print(e.stderr)
+        finally:
+            # 6) Clean up
+            os.remove(in_path)
+            os.remove(out_path)
+        print("done")
+        return prot_ids, plddts
+
+
+    def compute_feats(self, dataset):
+        self.compute_plddt(dataset)
+        self.compute_fps(dataset)
+
+        
+    def compute_fps(self,
+                    dataset,
+                    grid_size=64,
+                    padding=2.0,
+                    order=8,
+                    max_workers=20):
+        """
+        Parallelize at the protein level.  Uses one process per protein
+        and shows a tqdm bar as each finishes.
+        """
+        args_list = [
+            (t, grid_size, padding, order, self.device)
+            for t in dataset
+        ]
+        ctx = mp.get_context('spawn')
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            futures = {
+                executor.submit(SemiCRFModel._compute_protein_fps, args): args[0]
+                for args in args_list
+            }
+
+            for fut in tqdm(as_completed(futures),
+                            total=len(futures),
+                            desc="Proteins"):
+                prot_id, fps_dict = fut.result()
+                self.feats[prot_id]['fp'] = fps_dict
+
+
+    def compute_plddt(self,
+                    dataset,
+                    max_workers=20, batch_size=20):
+        """
+        Parallelize at the protein level.  Uses one process per protein
+        and shows a tqdm bar as each finishes.
+        """
+        args_list = [dataset[i*batch_size:(i+1)*(batch_size)] for i in range((len(dataset)+batch_size-1)//batch_size)]
+        ctx = mp.get_context('spawn')
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            futures = {
+                executor.submit(SemiCRFModel._compute_protein_plddt, args): args[0]
+                for args in args_list
+            }
+            for fut in tqdm(as_completed(futures),
+                            total=len(futures),
+                            desc="Proteins"):
+                prot_ids, plddts = fut.result()
+                for i, prot_id in enumerate(prot_ids):
+                    self.feats[prot_id]['plddt'] = plddts[i]
+
 
     # -----------------------------------------------------------------
     # main API ---------------------------------------------------------
     # -----------------------------------------------------------------
     def forward(
         self,
+        prot_id: str,
         aa_seq: str,
         angles_tensor: torch.Tensor,            # (1, L, num_features)
+        coords_tensor: torch.Tensor,            # (3*L, 3)
         timestep: torch.Tensor,                 # (1,) or (1,1)
         attention_mask: torch.Tensor,           # (1, L)
-        ss_pred: Optional[str] = None,
-        disorder: Optional[torch.Tensor] = None,
-        plddt: Optional[torch.Tensor] = None,
     ) -> List[List[torch.Tensor]]:
         """
         Returns:
@@ -247,13 +416,17 @@ class SemiCRFModel(nn.Module):
             token_repr = enc_hidden.squeeze(0)       # (L, hidden)
         else:
             L = len(aa_seq)
-
+        
         # 2) pre‑compute residue‑level biochemical feature tensor (L, feat_dim)
+        breakpoint()
+        plddt = self.feats[prot_id]['plddt'].cpu().numpy()
+        disorder = disorder=None if disorder is None else disorder.cpu().numpy()
         res_feats = self.featurizer(
             aa_seq, ss_pred=ss_pred,
-            disorder=None if disorder is None else disorder.cpu().numpy(),
-            plddt=None if plddt is None else plddt.cpu().numpy(),
+            disorder=disorder,
+            plddt=plddt,
         ).to(self.device)                        # (L, feat_dim)
+
 
         # 3) build out[i][l]
         out: List[List[torch.Tensor]] = [[None]*(L+1) for _ in range(L)]
@@ -264,12 +437,10 @@ class SemiCRFModel(nn.Module):
                                     token_repr.cumsum(dim=0)], dim=0)
         cumsum_feat  = torch.cat([torch.zeros(1, res_feats.size(-1), device=self.device),
                                   res_feats.cumsum(dim=0)], dim=0)
-
         for i in range(L):
             max_l = min(self.max_seg_len, L - i)
             for l in range(1, max_l + 1):
                 j = i + l
-
                 if self.encoder:
                     # mean token embedding for span
                     span_token_mean = (cumsum_token[j] - cumsum_token[i]) / l
@@ -277,20 +448,22 @@ class SemiCRFModel(nn.Module):
                 else:
                     enc_score = 0.0
 
+                fp = self.feats[prot_id]['fp'][(i, j)]
+                descr_score = self.zernike_projector(fp)
+
                 # biochemical segment potential
                 span_feat = res_feats[i:j]                       # (l, feat_dim)
                 agg_vec   = self.aggregator(span_feat)           # (agg_dim,)
                 bio_score = self.seg_mlp(agg_vec)
 
                 # total score + length bias
-                out[i][l] = enc_score + bio_score + self.gamma * l
+                out[i][l] = enc_score + bio_score + descr_score + self.gamma * l
 
         return out
 
     # convenience helper identical to your old precompute signature
-    def precompute(self, aa_seq, angles_tensor=None, timestep=None, attention_mask=None, ss_pred=None, disorder=None, plddt=None):
-        out = self.forward(aa_seq, angles_tensor, timestep, attention_mask,
-                           ss_pred=ss_pred, disorder=disorder, plddt=plddt)
+    def precompute(self, prot_id, aa_seq, angles_tensor=None, coords_tensor=None, timestep=None, attention_mask=None):        
+        out = self.forward(prot_id, aa_seq, angles_tensor, coords_tensor, timestep, attention_mask)
         return out
 
 

@@ -12,7 +12,7 @@
 # load your bash config and (re)activate the conda env
 source ~/.bashrc
 conda deactivate || true
-conda activate foldingdiff
+conda activate esm_env
 
 # change if needed
 cd "/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff"
