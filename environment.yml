@@ -22,3 +22,7 @@ dependencies:
   - conda-forge::scikit-learn=1.2.1
   - bioconda::tmalign
   - conda-forge::requests
+  - pip:
+    - imageio=2.35.1
+    - biopython=1.83
+    - sortedcontainers=2.4.0

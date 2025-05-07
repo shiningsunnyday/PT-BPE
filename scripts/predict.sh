@@ -18,13 +18,26 @@ cd $project_dir
 module load cuda/12.4.1-fasrc01 cudnn/9.5.1.17_cuda12-fasrc01
 
 # train
+# PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE \
+#   /n/netscratch/mzitnik_lab/Lab/afang/envs/stbenv/bin/python -m pdb -m bin.predict \
+#   --cuda cuda:0 \
+#   --pkl-file /n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE/ckpts/1746641431.580507/bpe_iter=0.pkl \
+#   --task repeat-motif-prediction \
+#   --pkl-data-file /n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE/data/struct_token_bench/processed_pickles/repeat-motif-prediction.pkl \
+#   --level residue \
+#   --auto
+
+# test
 PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE \
-  /n/netscratch/mzitnik_lab/Lab/afang/envs/stbenv/bin/python -m bin.predict \
+  /n/netscratch/mzitnik_lab/Lab/afang/envs/stbenv/bin/python -m pdb -m bin.predict \
   --cuda cuda:0 \
-  --pkl-file /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1744875790.3072364/bpe_iter=6000.pkl \
-  --task BindInt \
+  --pkl-file /n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE/ckpts/1746641431.580507/bpe_iter=0.pkl \
+  --task repeat-motif-prediction \
+  --pkl-data-file /n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE/data/struct_token_bench/processed_pickles/repeat-motif-prediction.pkl \
   --level residue \
-  --auto --debug
+  --save-dir /n/holylfs06/LABS/mzitnik_lab/Lab/afang/PT-BPE/ckpts/1746646960.2097185/ \
+  --test
+
 
   # --pkl-data-file ${project_dir}/data/enzyme_commission/EC2_seq30.pkl \
   # ${project_dir}/ckpts/1745337217.4614503/bpe_iter=510.pkl \

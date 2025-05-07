@@ -221,9 +221,14 @@ def main():
     #         all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
     dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
                                             use_cache=args.cache, debug=False, zero_center=False, toy=args.toy, pad=args.pad, secondary=args.sec)     
+    cleaned_structures = []
     for i, struc in enumerate(dataset.structures):
         if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
-            breakpoint()
+            print(f"skipping {i}, {struc['fname']} because of missing dihedrals")
+        else:
+            cleaned_structures.append(struc)
+    logger.info(f"Removed {len(dataset.structures)-len(cleaned_structures)}/{len(dataset.structures)} structures with nan dihedrals.")
+    dataset.structures = cleaned_structures
     _iter, ckpt = -1, ""
     for f in glob.glob(f"{args.save_dir}/bpe_iter=*.pkl"):
         f = Path(f).name

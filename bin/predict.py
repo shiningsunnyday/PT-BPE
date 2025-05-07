@@ -4,6 +4,7 @@ import imageio
 import os
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset, extract_pdb_code_and_chain
 from foldingdiff.bpe import *
+from foldingdiff.bpe_dataset import *
 from foldingdiff.plotting import *
 import scipy.io
 import numpy as np
@@ -21,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, accuracy_score
 import queue
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -330,7 +331,10 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
     # Instantiate the Tree Encoder (for up-down tree-LSTM with super-root)
     tree_encoder = UpDownTreeEncoder(embed_dim, concat_updown=True).to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    if num_classes == 1:
+        criterion = nn.BCEWithLogitsLoss()
+    else:
+        criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(list(probe.parameters()) + list(tree_encoder.parameters()), lr=0.001)
 
     if args.debug:
@@ -376,6 +380,7 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
             B = repr_tensor.size(0)
             batch_logits = []
             all_labels = []
+            batch_loss = [] # for residue level task, loss is calculated for each residue for each protein then averaged over the proteins in the batch
 
             for i in range(B):
                 n = n_batch[i].item()
@@ -403,21 +408,36 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                     batch_logits.append(logit)
                     all_labels.append(batch['fold_label'][i])
                 else:
-                    logits = probe(leaves)               # (n, num_classes)
-                    logit = logits.mean(dim=0)           # aggregate per residue
-                    batch_logits.append(logit)
-                    all_labels.append(batch['residue_label'][i])
-            
-            batch_logits = torch.stack(batch_logits, dim=0)  # (B, num_classes)
-            labels = torch.stack(all_labels).to(device)       # (B,)
-            loss = criterion(batch_logits, labels)
+                    logits = probe(leaves)               # (num_residues, num_classes)
+                    if num_classes == 1:
+                        logits = logits.squeeze(1)  # (num_residues,)
+                        item_loss = criterion(logits, batch['residue_label'][i].float().to(device))
+                    else:
+                        item_loss = criterion(logits, batch['residue_label'][i].to(device))
+                    batch_loss.append(item_loss)
+                    batch_logits.append(logits)
+                    all_labels.append(batch['residue_label'][i].to(device))
+
+            if args.level == "protein":
+                batch_logits = torch.stack(batch_logits, dim=0)  # (B, num_classes)
+                labels = torch.stack(all_labels).to(device)       # (B,)
+                loss = criterion(batch_logits, labels)
+                num_train_samples += B
+            else:
+                batch_logits = torch.concat(batch_logits, dim=0)  # (sum(n_residues), num_classes)
+                labels = torch.concat(all_labels, dim=0)         # (sum(n_residues),)
+                loss = torch.stack(batch_loss).mean()  # average over proteins in batch
+                num_train_samples += batch_logits.size(0)
             loss.backward()
             optimizer.step()
 
             train_loss += loss.item() * B
-            preds = batch_logits.argmax(dim=1)
+            if num_classes == 1:
+                preds = torch.sigmoid(batch_logits)
+                preds = (preds > 0.5).long()
+            else:
+                preds = batch_logits.argmax(dim=1)
             train_correct += (preds == labels).sum().item()
-            num_train_samples += B
 
         avg_train_loss = train_loss / num_train_samples
         train_accuracy = train_correct / num_train_samples
@@ -446,8 +466,12 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                 edges_batch = batch['edges']                  # list (B) of edge-lists
                 n_batch = batch['n']                          # (B,)
                 B = repr_tensor.size(0)
-                labels = batch['fold_label'].to(device)   # shape: (B,)                
+                if args.level == "protein":
+                    labels = batch['fold_label'].to(device)
+                else:
+                    labels = batch['residue_label'].to(device)   # shape: (B,)                
                 batch_logits = []
+                batch_loss = [] # for residue level loss
                 # Process each example in the batch.
                 for i in range(B):
                     n = batch['n'][i].item()
@@ -468,21 +492,36 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                     protein_vec, leaves = tree_encoder(leaf_emb, edges, n, forest_roots)                    
                     if args.level == "protein":
                         logit = probe(protein_vec)         # (num_classes,)
+                        batch_logits.append(logit)
                     else:
-                        # Residue-level: predict per residue then aggregate, e.g. via mean.
-                        logits = probe(leaves)              # (n, num_classes)
-                        logit = logits.mean(dim=0)          # aggregate to one per protein
-                    batch_logits.append(logit)
+                        logits = probe(leaves)               # (num_residues, num_classes)
+                        if num_classes == 1:
+                            logits = logits.squeeze(1)  # (num_residues,)
+                            item_loss = criterion(logits, batch['residue_label'][i].float().to(device))
+                        else:
+                            item_loss = criterion(logits, batch['residue_label'][i].to(device))
+                        valid_loss += item_loss.item()
+                        batch_logits.append(logits)
                 
-                batch_logits = torch.stack(batch_logits, dim=0)  # (B, num_classes)
-                loss = criterion(batch_logits, labels)
-                valid_loss += loss.item() * B
+                if args.level == "protein":
+                    batch_logits = torch.stack(batch_logits, dim=0)  # (B, num_classes)
+                    loss = criterion(batch_logits, labels)
+                    valid_loss += loss.item() * B
+                    num_valid_samples += B
+                else:
+                    batch_logits = torch.concat(batch_logits, dim=0) # (sum(n_residues), num_classes)
+                    num_valid_samples += batch_logits.size(0)
                 
-                preds = batch_logits.argmax(dim=1)
+                if num_classes == 1:
+                    preds = torch.sigmoid(batch_logits)
+                    preds = (preds > 0.5).long()
+                    labels = labels.squeeze(0)
+                else:
+                    preds = batch_logits.argmax(dim=1)
+
                 valid_preds.extend(preds.cpu().tolist())
                 valid_labels.extend(labels.cpu().tolist())
-                num_valid_samples += B
-        
+
         avg_valid_loss = valid_loss / num_valid_samples
         valid_accuracy = sum([1 for p, t in zip(valid_preds, valid_labels) if p == t]) / num_valid_samples
         
@@ -565,7 +604,10 @@ def test_probe(args, test_datasets, num_classes):
         all_preds = []
         all_labels = []
         all_losses = []
-        criterion = nn.CrossEntropyLoss()
+        if num_classes == 1:
+            criterion = nn.BCEWithLogitsLoss()
+        else:
+            criterion = nn.CrossEntropyLoss()
 
         with torch.no_grad():
             for batch in tqdm(test_loader, desc=f"Test [{name}]"):
@@ -573,8 +615,11 @@ def test_probe(args, test_datasets, num_classes):
                 repr_tensor = batch['embeddings'].to(device)  # (1, n_res_max, embed_dim)
                 edges_batch  = batch['edges']
                 n_batch      = batch['n']
-                label        = batch['fold_label'].to(device)  # (1,)
                 m            = batch['m'][0].item()
+                if args.level == "protein":
+                    label = batch['fold_label'].to(device)  # (1,)
+                else:
+                    label = batch['residue_label'].to(device)
 
                 # single example
                 n = n_batch[0].item()
@@ -598,15 +643,23 @@ def test_probe(args, test_datasets, num_classes):
                     logits = probe(protein_vec.unsqueeze(0))  # (1, C)
                     pred = logits.argmax(dim=1)
                     loss = criterion(logits, label)
+                    all_preds.append(pred.item())
+                    all_labels.append(label.item())
+                    all_losses.append(loss.item())
                 else:
-                    logits = probe(leaves)       # (n, C)
-                    avg_logit = logits.mean(dim=0, keepdim=True)  # (1, C)
-                    pred = avg_logit.argmax(dim=1)
-                    loss = criterion(avg_logit, label)
-
-                all_preds.append(pred.item())
-                all_labels.append(label.item())
-                all_losses.append(loss.item())
+                    logits = probe(leaves)       # (num_residues, C)
+                    if num_classes == 1:
+                        logits = logits.squeeze(1)
+                        pred = torch.sigmoid(logits) # (num_residues,)
+                        pred = (pred > 0.5).long()
+                        label = label.squeeze(0)
+                        loss = criterion(logits, label.float())
+                    else:
+                        pred = logits.argmax(dim=1) # (num_residues,)
+                        loss = criterion(logits, label)
+                    all_losses.append(loss.item())
+                    all_preds.extend(pred.cpu().tolist())
+                    all_labels.extend(label.cpu().tolist())
 
         # compute metrics
         acc = accuracy_score(all_labels, all_preds)
@@ -631,6 +684,7 @@ def load_datasets(args):
     if args.pkl_data_file:
         if os.path.exists(args.pkl_data_file):
             train_dataset, valid_dataset, test_datasets = pickle.load(open(args.pkl_data_file, 'rb'))
+            print(f"Train: {len(train_dataset)}, Valid: {len(valid_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
             return train_dataset, valid_dataset, test_datasets
     if args.task == "remote-homology-detection":
         train = LMDBDataset('data/remote_homology_raw/remote_homology_train.lmdb')
@@ -649,35 +703,35 @@ def load_datasets(args):
         test_datasets = [test_family_dataset, test_fold_dataset, test_superfamily_dataset]
     elif args.task in ["BindInt", "BindBio", "repeat-motif-prediction", "CatInt", "CatBio", "conserved-site-prediction"]:
         if args.task == "BindInt":
-            train_path = 'data/struct_token_bench/interpro/binding_label_train_processed.jsonl'
-            valid_path = 'data/struct_token_bench/interpro/binding_label_validation_processed.jsonl'
-            test_fold_path = 'data/struct_token_bench/interpro/binding_label_fold_test_processed.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/interpro/binding_label_superfamily_test_processed.jsonl'
+            train_path = 'data/struct_token_bench/interpro/binding_label_train_deduplicated.jsonl'
+            valid_path = 'data/struct_token_bench/interpro/binding_label_validation_deduplicated.jsonl'
+            test_fold_path = 'data/struct_token_bench/interpro/binding_label_fold_test_deduplicated.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/interpro/binding_label_superfamily_test_deduplicated.jsonl'
         elif args.task == "BindBio":
-            train_path = 'data/struct_token_bench/biolip2/binding_label_train_processed.jsonl'
-            valid_path = 'data/struct_token_bench/biolip2/binding_label_validation_processed.jsonl'
-            test_fold_path = 'data/struct_token_bench/biolip2/binding_label_fold_test_processed.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/biolip2/binding_label_superfamily_test_processed.jsonl'
+            train_path = 'data/struct_token_bench/biolip2/binding_label_train_deduplicated.jsonl'
+            valid_path = 'data/struct_token_bench/biolip2/binding_label_validation_deduplicated.jsonl'
+            test_fold_path = 'data/struct_token_bench/biolip2/binding_label_fold_test_deduplicated.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/biolip2/binding_label_superfamily_test_deduplicated.jsonl'
         elif args.task == "repeat-motif-prediction":
-            train_path = 'data/struct_token_bench/interpro/repeat_label_train_processed.jsonl'
-            valid_path = 'data/struct_token_bench/interpro/repeat_label_validation_processed.jsonl'
-            test_fold_path = 'data/struct_token_bench/interpro/repeat_label_fold_test_processed.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/interpro/repeat_label_superfamily_test_processed.jsonl'
+            train_path = 'data/struct_token_bench/interpro/repeat_label_train_deduplicated.jsonl'
+            valid_path = 'data/struct_token_bench/interpro/repeat_label_validation_deduplicated.jsonl'
+            test_fold_path = 'data/struct_token_bench/interpro/repeat_label_fold_test_deduplicated.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/interpro/repeat_label_superfamily_test_deduplicated.jsonl'
         elif args.task == "CatInt":
-            train_path = 'data/struct_token_bench/interpro/activesite_label_train_processed.jsonl'
-            valid_path = 'data/struct_token_bench/interpro/activesite_label_validation_processed.jsonl'
-            test_fold_path = 'data/struct_token_bench/interpro/activesite_label_fold_test_processed.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/interpro/activesite_label_superfamily_test_processed.jsonl'
+            train_path = 'data/struct_token_bench/interpro/activesite_label_train_deduplicated.jsonl'
+            valid_path = 'data/struct_token_bench/interpro/activesite_label_validation_deduplicated.jsonl'
+            test_fold_path = 'data/struct_token_bench/interpro/activesite_label_fold_test_deduplicated.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/interpro/activesite_label_superfamily_test_deduplicated.jsonl'
         elif args.task == "CatBio":
-            train_path = 'data/struct_token_bench/biolip2/catalytic_label_train_processed.jsonl'
-            valid_path = 'data/struct_token_bench/biolip2/catalytic_label_validation_processed.jsonl'
-            test_fold_path = 'data/struct_token_bench/biolip2/catalytic_label_fold_test_processed.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/biolip2/catalytic_label_superfamily_test_processed.jsonl'
+            train_path = 'data/struct_token_bench/biolip2/catalytic_label_train_deduplicated.jsonl'
+            valid_path = 'data/struct_token_bench/biolip2/catalytic_label_validation_deduplicated.jsonl'
+            test_fold_path = 'data/struct_token_bench/biolip2/catalytic_label_fold_test_deduplicated.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/biolip2/catalytic_label_superfamily_test_deduplicated.jsonl'
         elif args.task == "conserved-site-prediction":
-            train_path = 'data/struct_token_bench/interpro/conservedsite_label_train_processed.jsonl'
-            valid_path = 'data/struct_token_bench/interpro/conservedsite_label_validation_processed.jsonl'
-            test_fold_path = 'data/struct_token_bench/interpro/conservedsite_label_fold_test_processed.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/interpro/conservedsite_label_superfamily_test_processed.jsonl'
+            train_path = 'data/struct_token_bench/interpro/conservedsite_label_train_deduplicated.jsonl'
+            valid_path = 'data/struct_token_bench/interpro/conservedsite_label_validation_deduplicated.jsonl'
+            test_fold_path = 'data/struct_token_bench/interpro/conservedsite_label_fold_test_deduplicated.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/interpro/conservedsite_label_superfamily_test_deduplicated.jsonl'
         with open(train_path, 'r') as f:
             train_dataset = [json.loads(line) for line in f]
         with open(valid_path, 'r') as f:
@@ -690,11 +744,12 @@ def load_datasets(args):
         valid_dataset = ResidueDataset(bpe.tokenizers, valid_dataset, args.debug)
         test_fold = ResidueDataset(bpe.tokenizers, test_fold, args.debug)
         test_superfamily = ResidueDataset(bpe.tokenizers, test_superfamily, args.debug)
-        test_datasets = [test_fold, test_superfamily]
+        test_datasets = [('fold', test_fold), ('superfamily', test_superfamily)]
     else:
         raise NotImplementedError(f"Task {args.task} not implemented.")
     if args.pkl_data_file:
         pickle.dump((train_dataset, valid_dataset, test_datasets), open(args.pkl_data_file, 'wb+'))
+    print(f"Train: {len(train_dataset)}, Valid: {len(valid_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
     return train_dataset, valid_dataset, test_datasets
 
 
