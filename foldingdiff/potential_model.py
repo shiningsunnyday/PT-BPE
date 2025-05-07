@@ -538,20 +538,21 @@ class SemiCRFModel(nn.Module):
             "plddt":      lambda: self.compute_plddt(dataset,      max_workers=self.num_workers),
             "fps":        lambda: self.compute_fps(dataset,        max_workers=self.num_workers),
         }
-
+        for task in task:
+            tasks[task]()
         # spin up one “worker” per compute_*, all running concurrently
-        with ThreadPoolExecutor(max_workers=len(tasks)) as exec:
-            future_to_name = {
-                exec.submit(fn): name
-                for name, fn in tasks.items()
-            }
-            for future in as_completed(future_to_name):
-                name = future_to_name[future]
-                try:
-                    future.result()   # will re-raise if that task errored
-                    print(f"{name} done")
-                except Exception as e:
-                    print(f"⚠️ {name} failed: {e}")
+        # with ThreadPoolExecutor(max_workers=len(tasks)) as exec:
+        #     future_to_name = {
+        #         exec.submit(fn): name
+        #         for name, fn in tasks.items()
+        #     }
+        #     for future in as_completed(future_to_name):
+        #         name = future_to_name[future]
+        #         try:
+        #             future.result()   # will re-raise if that task errored
+        #             print(f"{name} done")
+        #         except Exception as e:
+        #             print(f"⚠️ {name} failed: {e}")
 
         
     def compute_fps(self,
@@ -578,7 +579,7 @@ class SemiCRFModel(nn.Module):
 
                 for fut in tqdm(as_completed(futures),
                                 total=len(futures),
-                                desc="Proteins"):
+                                desc="Computing fps"):
                     prot_id, fps_dict = fut.result()
                     self.feats[prot_id]['fp'] = fps_dict
         else:
@@ -604,7 +605,7 @@ class SemiCRFModel(nn.Module):
                 }
                 for fut in tqdm(as_completed(futures),
                                 total=len(futures),
-                                desc="Proteins"):
+                                desc="Computing plddts"):
                     prot_ids, plddts = fut.result()
                     for i, prot_id in enumerate(prot_ids):
                         plddt = plddts[i]
@@ -635,7 +636,7 @@ class SemiCRFModel(nn.Module):
                 }
                 for fut in tqdm(as_completed(futures),
                                 total=len(futures),
-                                desc="Proteins"):
+                                desc="Computing disorder"):
                     prot_ids, disorders = fut.result()
                     for i, prot_id in enumerate(prot_ids):
                         self.feats[prot_id]['disorder'] = np.array(disorders[i])
@@ -663,7 +664,7 @@ class SemiCRFModel(nn.Module):
                 }
                 for fut in tqdm(as_completed(futures),
                                 total=len(futures),
-                                desc="Proteins"):
+                                desc="Computing embedding"):
                     prot_ids, embeddings = fut.result()
                     for i, prot_id in enumerate(prot_ids):
                         self.feats[prot_id]['embedding'] = embeddings[i].cpu().numpy()
@@ -687,7 +688,7 @@ class SemiCRFModel(nn.Module):
                 }
                 for fut in tqdm(as_completed(futures),
                                 total=len(futures),
-                                desc="Proteins"):
+                                desc="Computing sec"):
                     prot_ids, secs = fut.result()
                     for i, prot_id in enumerate(prot_ids):
                         self.feats[prot_id]['sec'] = secs[i]
