@@ -28,6 +28,12 @@ LOCAL_DATA_DIR = Path(
 CATH_DIR = LOCAL_DATA_DIR / "cath"
 ALPHAFOLD_DIR = LOCAL_DATA_DIR / "alphafold"
 HOMO_DIR = LOCAL_DATA_DIR / "remote_homology"
+BINDINT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/binding"
+BINDBIO_DIR = LOCAL_DATA_DIR / "struct_token_bench/biolip2/binding"
+REPEAT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/repeat"
+CATINT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/activesite"
+CATBIO_DIR = LOCAL_DATA_DIR / "struct_token_bench/biolip2/catalytic"
+CONSERVED_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/conserved"
 
 from foldingdiff import beta_schedules
 from foldingdiff.angles_and_coords import (
@@ -117,7 +123,7 @@ class CathCanonicalAnglesDataset(Dataset):
     def __init__(
         self,
         pdbs: Union[
-            Literal["cath", "alphafold", "homo"], str
+            Literal["cath", "alphafold", "homo", "ec"], str
         ] = "cath",  # Keyword or a directory
         split: Optional[Literal["train", "test", "validation"]] = None,
         pad: int = 512,
@@ -278,6 +284,18 @@ class CathCanonicalAnglesDataset(Dataset):
                 assert fnames, f"No files found in {ALPHAFOLD_DIR}"
             elif pdbs == "homo":
                 fnames = glob.glob(os.path.join(HOMO_DIR, "*/*.pdb"))
+            elif pdbs == "bindint":
+                fnames = glob.glob(os.path.join(BINDINT_DIR, "*.pdb"))
+            elif pdbs == "bindbio":
+                fnames = glob.glob(os.path.join(BINDBIO_DIR, "*.pdb"))
+            elif pdbs == "repeat":
+                fnames = glob.glob(os.path.join(REPEAT_DIR, "*.pdb"))
+            elif pdbs == "catint":
+                fnames = glob.glob(os.path.join(CATINT_DIR, "*.pdb"))
+            elif pdbs == "catbio":
+                fnames = glob.glob(os.path.join(CATBIO_DIR, "*.pdb"))
+            elif pdbs == "conserved":
+                fnames = glob.glob(os.path.join(CONSERVED_DIR, "*.pdb"))
             else:
                 raise ValueError(f"Unknown pdb set: {pdbs}")
         # for debug

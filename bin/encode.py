@@ -120,7 +120,6 @@ def str2dict(v):
         bins[int(a)] = int(b)
     return bins
     
-        
 def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
     # folder
@@ -129,7 +128,9 @@ def parse_args():
                         help="Directory to save output files (images, pdb files, plots, etc.).")
     parser.add_argument("--log-dir", type=str, default="logs", 
                         help="Directory where log files will be saved.")
-    parser.add_argument("--data-dir", type=str, default="cath", choices=['cath', 'homo'], help="Which dataset.")    
+    parser.add_argument("--data-dir", type=str, default="cath", choices=[
+         'cath', 'homo', 'ec', "bindint", "bindbio", "repeat", "catint", "catbio", "conserved",
+         ], help="Which dataset.")    
     parser.add_argument("--ckpt-dir", type=str, help="continue from bpe.pkl")
     parser.add_argument("--toy", type=int, default=0, 
                             help="Number of PDB files. 0 for all.")    
@@ -143,6 +144,7 @@ def parse_args():
     parser.add_argument("--sec", type=str2bool, default=False, help="whether to compute sec structures to guide token discovery")
     parser.add_argument("--sec-eval", type=str2bool, default=False, help="whether to evaluate sec structure overlap")
     parser.add_argument("--p-min-size", default=float("inf"), help="when to start using rmsd binning")
+    parser.add_argument("--cache", action='store_true', help="whether to use cached data")
     return parser.parse_args()
 
 def amino_acid_sequence(fname):
@@ -218,7 +220,7 @@ def main():
     #         logger.info("Processing file: %s", f)
     #         all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
     dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
-                                            use_cache=False, debug=False, zero_center=False, toy=args.toy, pad=args.pad, secondary=args.sec)     
+                                            use_cache=args.cache, debug=False, zero_center=False, toy=args.toy, pad=args.pad, secondary=args.sec)     
     for i, struc in enumerate(dataset.structures):
         if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
             breakpoint()

@@ -1,5 +1,3 @@
-import pyrosetta
-from pyrosetta import pose_from_pdb
 from tqdm import tqdm
 import tempfile
 import imageio
@@ -14,7 +12,7 @@ import argparse
 import pickle
 from datetime import datetime
 import sys
-from tape.tape.datasets import LMDBDataset
+import lmdb
 from esm.models.esmc import ESMC
 from esm.sdk.api import ESMProtein, LogitsConfig
 from esm.utils.structure.protein_chain import ProteinChain
@@ -32,6 +30,54 @@ torch.autograd.set_detect_anomaly(True)
 
 # Create a global lock for GPU operations.
 gpu_lock = threading.Lock()
+
+class LMDBDataset(Dataset):
+    """Creates a dataset from an lmdb file.
+    Args:
+        data_file (Union[str, Path]): Path to lmdb file.
+        in_memory (bool, optional): Whether to load the full dataset into memory.
+            Default: False.
+    """
+
+    def __init__(self,
+                 data_file: Union[str, Path],
+                 in_memory: bool = False):
+
+        data_file = Path(data_file)
+        if not data_file.exists():
+            raise FileNotFoundError(data_file)
+
+        env = lmdb.open(str(data_file), max_readers=1, readonly=True,
+                        lock=False, readahead=False, meminit=False)
+
+        with env.begin(write=False) as txn:
+            num_examples = pickle.loads(txn.get(b'num_examples'))
+
+        if in_memory:
+            cache = [None] * num_examples
+            self._cache = cache
+
+        self._env = env
+        self._in_memory = in_memory
+        self._num_examples = num_examples
+
+    def __len__(self) -> int:
+        return self._num_examples
+
+    def __getitem__(self, index: int):
+        if not 0 <= index < self._num_examples:
+            raise IndexError(index)
+
+        if self._in_memory and self._cache[index] is not None:
+            item = self._cache[index]
+        else:
+            with self._env.begin(write=False) as txn:
+                item = pickle.loads(txn.get(str(index).encode()))
+                if 'id' not in item:
+                    item['id'] = str(index)
+                if self._in_memory:
+                    self._cache[index] = item
+        return item
 
 
 def setup_logger(log_dir):
@@ -246,6 +292,8 @@ class UpDownTreeEncoder(nn.Module):
 
         
 def collate_item(batch):
+    label_key = 'fold_label' if 'fold_label' in batch[0] else 'residue_label'
+
     n, m = 0, 0
     for sample in batch:
         edges = sample['edges']
@@ -262,8 +310,8 @@ def collate_item(batch):
         all_embeds.append(embed)
         edges = edges + [[0, 0, 0] for _ in range(m-len(edges))]
         all_edges.append(edges)   
-        labels.append(sample['fold_label'])
-    return {'edges': torch.tensor(all_edges), 'embeddings': torch.stack(all_embeds, axis=0), 'n': torch.tensor(all_n), 'm': torch.tensor(all_m), 'fold_label': torch.tensor(labels)}
+        labels.append(sample[label_key])
+    return {'edges': torch.tensor(all_edges), 'embeddings': torch.stack(all_embeds, axis=0), 'n': torch.tensor(all_n), 'm': torch.tensor(all_m), label_key: torch.tensor(labels)}
 
 
 
@@ -358,7 +406,7 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                     logits = probe(leaves)               # (n, num_classes)
                     logit = logits.mean(dim=0)           # aggregate per residue
                     batch_logits.append(logit)
-                    all_labels.append(batch['fold_label'][i])
+                    all_labels.append(batch['residue_label'][i])
             
             batch_logits = torch.stack(batch_logits, dim=0)  # (B, num_classes)
             labels = torch.stack(all_labels).to(device)       # (B,)
@@ -625,6 +673,11 @@ def load_datasets(args):
             valid_path = 'data/struct_token_bench/biolip2/catalytic_label_validation_processed.jsonl'
             test_fold_path = 'data/struct_token_bench/biolip2/catalytic_label_fold_test_processed.jsonl'
             test_superfamily_path = 'data/struct_token_bench/biolip2/catalytic_label_superfamily_test_processed.jsonl'
+        elif args.task == "conserved-site-prediction":
+            train_path = 'data/struct_token_bench/interpro/conservedsite_label_train_processed.jsonl'
+            valid_path = 'data/struct_token_bench/interpro/conservedsite_label_validation_processed.jsonl'
+            test_fold_path = 'data/struct_token_bench/interpro/conservedsite_label_fold_test_processed.jsonl'
+            test_superfamily_path = 'data/struct_token_bench/interpro/conservedsite_label_superfamily_test_processed.jsonl'
         with open(train_path, 'r') as f:
             train_dataset = [json.loads(line) for line in f]
         with open(valid_path, 'r') as f:

@@ -95,8 +95,8 @@ def canonical_distances_and_dihedrals(
     # Get any additional angles
     non_dihedral_angles = [a for a in angles if a not in calc_angles]
     # Gets the N - CA - C for each residue
-    # https://www.biotite-python.org/apidoc/biotite.structure.filter_backbone.html
-    backbone_atoms = source_struct[struc.filter_backbone(source_struct)]
+    # https://www.biotite-python.org/apidoc/biotite.structure.filter_peptide_backbone.html
+    backbone_atoms = source_struct[struc.filter_peptide_backbone(source_struct)]
     for a in non_dihedral_angles:
         if a == "tau" or a == "N:CA:C":
             # tau = N - CA - C internal angles
@@ -390,7 +390,7 @@ def get_pdb_length(fname: str) -> int:
     if structure.get_model_count() > 1:
         return -1
     chain = structure.get_structure()[0]
-    backbone = chain[struc.filter_backbone(chain)]
+    backbone = chain[struc.filter_peptide_backbone(chain)]
     l = int(len(backbone) / 3)
     return l
 
@@ -418,7 +418,7 @@ def extract_backbone_residue_idxes(
     # if structure.get_model_count() > 1:
     #     return None
     chain = structure.get_structure(1, extra_fields=["atom_id"])
-    backbone = chain[struc.filter_backbone(chain)]
+    backbone = chain[struc.filter_peptide_backbone(chain)]
     ca = [c for c in backbone if c.atom_name in atoms]
     idxes = [c.res_id for c in backbone if c.atom_name in atoms]
     # has 3 atoms per residue and residue id is increasing
@@ -438,7 +438,7 @@ def extract_backbone_coords(
     # if structure.get_model_count() > 1:
     #     return None
     chain = structure.get_structure(1)
-    backbone = chain[struc.filter_backbone(chain)]
+    backbone = chain[struc.filter_peptide_backbone(chain)]
     ca = [c for c in backbone if c.atom_name in atoms]
     coords = np.vstack([c.coord for c in ca])
     return coords
@@ -498,7 +498,7 @@ def extract_aa_seq(fname):
     # Pull out the atomarray from atomarraystack
     source_struct = source.get_structure(model=1)
     # keep caller’s line intact – grab first model as an AtomArray
-    backbone_atoms = source_struct[struc.filter_backbone(source_struct)]
+    backbone_atoms = source_struct[struc.filter_peptide_backbone(source_struct)]
     return aa_seq_from_backbone(backbone_atoms)
 
 
@@ -661,7 +661,7 @@ def collect_aa_sidechain_angles(
             continue
         if residue in retval:
             continue
-        backbone_mask = struc.filter_backbone(res_atoms)
+        backbone_mask = struc.filter_peptide_backbone(res_atoms)
         a, b, c = res_atoms[backbone_mask].coord  # Backbone
         for sidechain_atom in res_atoms[~backbone_mask]:
             d = sidechain_atom.coord
