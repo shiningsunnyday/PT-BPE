@@ -17,4 +17,4 @@ conda activate esm_env
 # change if needed
 cd "/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff"
 
-python bin/learn.py --cuda cuda:0 --epochs 1000 --auto --toy $1 --pad $2 --gamma $3 --model "feats"
+python bin/learn.py --cuda cuda:0 --epochs 1000 --num-workers 5 --auto --toy $1 --pad $2 --gamma $3 --model "feats"

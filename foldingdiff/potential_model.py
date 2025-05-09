@@ -532,13 +532,13 @@ class SemiCRFModel(nn.Module):
 
     def compute_feats(self, dataset):
         tasks = {
-            "embeddings": lambda: self.compute_embeddings(dataset, max_workers=self.num_workers),
+            "embeddings": lambda: self.compute_embeddings(dataset),
             "disorder":   lambda: self.compute_disorder(dataset,   max_workers=self.num_workers),
             "sec":        lambda: self.compute_sec(dataset,        max_workers=self.num_workers),
-            "plddt":      lambda: self.compute_plddt(dataset,      max_workers=self.num_workers),
+            "plddt":      lambda: self.compute_plddt(dataset),
             "fps":        lambda: self.compute_fps(dataset,        max_workers=self.num_workers),
         }
-        for task in task:
+        for task in tasks:
             tasks[task]()
         # spin up one “worker” per compute_*, all running concurrently
         # with ThreadPoolExecutor(max_workers=len(tasks)) as exec:
@@ -590,7 +590,7 @@ class SemiCRFModel(nn.Module):
 
     def compute_plddt(self,
                     dataset,
-                    max_workers=20, batch_size=20):
+                    max_workers=0, batch_size=1000):
         """
         Parallelize at the protein level.  Uses one process per protein
         and shows a tqdm bar as each finishes.
@@ -621,7 +621,7 @@ class SemiCRFModel(nn.Module):
 
     def compute_disorder(self,
                     dataset,
-                    max_workers=20, batch_size=20):
+                    max_workers=20, batch_size=5):
         """
         Parallelize at the protein level.  Uses one process per protein
         and shows a tqdm bar as each finishes.
@@ -648,7 +648,7 @@ class SemiCRFModel(nn.Module):
 
     def compute_embeddings(self,
                     dataset,
-                    max_workers=20, batch_size=20):
+                    max_workers=0, batch_size=1000):
         """
         Parallelize at the protein level.  Uses one process per protein
         and shows a tqdm bar as each finishes.

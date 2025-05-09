@@ -37,6 +37,7 @@ def parse_args():
                             help="Number of PDB files.")
     parser.add_argument("--pad", type=int, default=512, help="Max protein size")
     parser.add_argument("--debug", action='store_true')    
+    parser.add_argument("--num-workers", type=int, default=5, help="Num workers")
     parser.add_argument("--visualize", action='store_true')    
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--cuda", default="cpu")
@@ -235,7 +236,7 @@ def get_model(args, max_len):
         length_bias=args.gamma,          # γ from your DP
         max_seg_len=args.max_seg_len,
         device=args.cuda,
-        num_workers=0 if args.debug else 20
+        num_workers=0 if args.debug else args.num_workers
     )
     return model.to(args.cuda)
 
@@ -263,7 +264,7 @@ def main() -> None:
     # ---------------- load data --------------------------------------
     raw_ds = FullCathCanonicalCoordsDataset(
         args.cath_folder, use_cache=False, debug=args.debug,
-        zero_center=False, toy=args.toy, secondary=False,
+        zero_center=False, toy=args.toy, pad=args.pad, secondary=False,
         trim_strategy="discard"
     )
     dataset = [Tokenizer(x) for x in raw_ds.structures]
