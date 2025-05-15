@@ -112,7 +112,11 @@ def canonical_distances_and_dihedrals(
             idx = np.hstack([np.vstack([r + 2, r + 3, r + 4]), np.zeros((3, 1))]).T
         else:
             raise ValueError(f"Unrecognized angle: {a}")
-        calc_angles[a] = struc.index_angle(backbone_atoms, indices=idx.astype(int))
+        try:
+            calc_angles[a] = struc.index_angle(backbone_atoms, indices=idx.astype(int))
+        except IndexError:
+            logging.debug(f"index_angle raised IndexError - skipping")
+            return None
 
     # At this point we've only looked at dihedral and angles; check value range
     for k, v in calc_angles.items():
@@ -469,6 +473,57 @@ def aa_seq_from_backbone(backbone_atoms):
     
 
 
+def extract_c_beta_coords(fname):
+    """
+    Return an (N,3) float array of Cβ coordinates—one row per residue—
+    in the same order as extract_aa_seq. Missing Cβs get [nan, nan, nan].
+    """
+    # Open PDB (or .pdb.gz) and read first model
+    opener = gzip.open if str(fname).endswith(".gz") else open
+    with opener(str(fname), "rt") as f:
+        pdb = PDBFile.read(f)
+    if pdb.get_model_count() > 1:
+        print(f"Warning: {fname} has multiple models; using model 1")
+    atom_stack = pdb.get_structure(model=1)
+    # If we got a stack, take the first (only) frame
+    atoms = atom_stack if isinstance(atom_stack, struc.AtomArray) else atom_stack[0]
+
+    # 1) Replicate extract_aa_seq’s residue ordering
+    bb_mask = struc.filter_backbone(atoms)
+    backbone = atoms[bb_mask]
+    has_ic = "ins_code" in backbone.get_annotation_categories()
+    ins_codes = backbone.ins_code if has_ic else [""] * backbone.array_length()
+
+    # Ordered dict to preserve (chain, res_id, ins_code) in appearance order
+    seq_keys = OrderedDict()
+    for ch, res_id, ic in zip(backbone.chain_id, backbone.res_id, ins_codes):
+        key = (ch, int(res_id), ic)
+        if key not in seq_keys:
+            seq_keys[key] = None
+
+    # 2) For each residue key, find its CB atom in the full atom array
+    #    and record coordinates
+    cb_coords = []
+    # categorize quickly
+    cat = atoms.get_annotation_categories()
+    for (ch, res_id, ic) in seq_keys:
+        m = (atoms.chain_id == ch) & (atoms.res_id == res_id)
+        if has_ic:
+            m &= (atoms.ins_code == ic)
+        # select CB only
+        m &= (atoms.atom_name == "CB")
+        if np.any(m):
+            idx = np.argmax(m)  # first occurrence
+            coord = atoms.coord[idx]
+        else:
+            coord = np.array([np.nan, np.nan, np.nan], dtype=float)
+        cb_coords.append(coord)
+
+    return np.vstack(cb_coords)
+
+
+    
+
 def extract_aa_seq(fname):
     """
     Return the amino‑acid sequence (1‑letter string) found in `pdb_file`.
@@ -500,6 +555,8 @@ def extract_aa_seq(fname):
     # keep caller’s line intact – grab first model as an AtomArray
     backbone_atoms = source_struct[struc.filter_backbone(source_struct)]
     return aa_seq_from_backbone(backbone_atoms)
+
+
 
 
 

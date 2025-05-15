@@ -11,6 +11,7 @@ import numpy as np
 import subprocess
 import argparse
 import pickle
+import json
 from datetime import datetime
 import sys
 import lmdb
@@ -22,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from sklearn.metrics import f1_score, accuracy_score
+from sklearn.metrics import f1_score, accuracy_score, roc_auc_score
 import queue
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -316,7 +317,7 @@ def collate_item(batch):
 
 
 
-def train_probe(args, train_dataset, valid_dataset, num_classes):
+def train_probe(args, train_dataset, valid_dataset, num_classes):    
     # Hyperparameters (adjust as needed)
     embed_dim = 960       # pretrained embedding dimension (for residues)
     hidden_dim = 128      # hidden dimension for probe
@@ -351,11 +352,17 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
             # 'num_workers': 8,
             # 'persistent_workers': True
         }
+    
+    json.dump(args.__dict__, open(os.path.join(args.save_dir, 'args.json'), 'w+'))
+
     train_loader = DataLoader(train_dataset, **dataset_kwargs)
     valid_loader = DataLoader(valid_dataset, **dataset_kwargs)
     num_epochs = args.epochs
 
-    best_val_macro_f1 = -1.0
+    if num_classes == 1:
+        best_val_auroc = 0.0
+    else:
+        best_val_macro_f1 = -1.0
 
     for epoch in range(num_epochs):
         probe.train()
@@ -450,6 +457,7 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
         valid_loss = 0.0
         valid_preds = []
         valid_labels = []
+        valid_scores = []
         num_valid_samples = 0
 
         with torch.no_grad():
@@ -513,29 +521,47 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                     num_valid_samples += batch_logits.size(0)
                 
                 if num_classes == 1:
-                    preds = torch.sigmoid(batch_logits)
-                    preds = (preds > 0.5).long()
+                    scores = torch.sigmoid(batch_logits)
+                    preds = (scores > 0.5).long()
                     labels = labels.squeeze(0)
                 else:
                     preds = batch_logits.argmax(dim=1)
 
                 valid_preds.extend(preds.cpu().tolist())
+                valid_scores.extend(scores.cpu().tolist())
                 valid_labels.extend(labels.cpu().tolist())
 
         avg_valid_loss = valid_loss / num_valid_samples
         valid_accuracy = sum([1 for p, t in zip(valid_preds, valid_labels) if p == t]) / num_valid_samples
         
         # Compute macro F1 score on validation set.
-        val_macro_f1 = f1_score(valid_labels, valid_preds, average='macro')
-
-        print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, "
-              f"Train Acc: {train_accuracy*100:.2f}%, Valid Loss: {avg_valid_loss:.4f}, "
-              f"Valid Acc: {valid_accuracy*100:.2f}%, Valid Macro F1: {val_macro_f1:.4f}")
+        if num_classes == 1:
+            val_auroc = roc_auc_score(valid_labels, valid_scores)
+            print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, "
+                f"Train Acc: {train_accuracy*100:.2f}%, Valid Loss: {avg_valid_loss:.4f}, "
+                f"Valid Acc: {valid_accuracy*100:.2f}%, Valid AUROC: {val_auroc:.4f}")            
+        else:
+            val_macro_f1 = f1_score(valid_labels, valid_preds, average='macro')
+            print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, "
+                f"Train Acc: {train_accuracy*100:.2f}%, Valid Loss: {avg_valid_loss:.4f}, "
+                f"Valid Acc: {valid_accuracy*100:.2f}%, Valid Macro F1: {val_macro_f1:.4f}")
 
         # ----------------------
         # Checkpoint saving
         # ----------------------
-        if val_macro_f1 > best_val_macro_f1:
+        if num_classes == 1 and val_auroc > best_val_auroc:
+            best_val_auroc = val_auroc
+            os.makedirs(args.save_dir, exist_ok=True)
+            checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
+            torch.save({
+                'epoch': epoch + 1,
+                'encoder_state_dict': tree_encoder.state_dict(),
+                'probe_state_dict': probe.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_auroc': best_val_auroc,
+            }, checkpoint_path)
+            print(f"New best auroc achieved: {best_val_auroc:.4f}. Saved checkpoint to {checkpoint_path}.")            
+        elif num_classes > 1 and val_macro_f1 > best_val_macro_f1:
             best_val_macro_f1 = val_macro_f1
             os.makedirs(args.save_dir, exist_ok=True)
             checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
@@ -603,6 +629,7 @@ def test_probe(args, test_datasets, num_classes):
 
         all_preds = []
         all_labels = []
+        all_scores = []
         all_losses = []
         if num_classes == 1:
             criterion = nn.BCEWithLogitsLoss()
@@ -650,10 +677,11 @@ def test_probe(args, test_datasets, num_classes):
                     logits = probe(leaves)       # (num_residues, C)
                     if num_classes == 1:
                         logits = logits.squeeze(1)
-                        pred = torch.sigmoid(logits) # (num_residues,)
-                        pred = (pred > 0.5).long()
+                        scores = torch.sigmoid(logits) # (num_residues,)
+                        pred = (scores > 0.5).long()
                         label = label.squeeze(0)
                         loss = criterion(logits, label.float())
+                        all_scores.append(scores.cpu().tolist())
                     else:
                         pred = logits.argmax(dim=1) # (num_residues,)
                         loss = criterion(logits, label)
@@ -663,19 +691,26 @@ def test_probe(args, test_datasets, num_classes):
 
         # compute metrics
         acc = accuracy_score(all_labels, all_preds)
-        macro_f1 = f1_score(all_labels, all_preds, average='macro')
-        mean_loss = sum(all_losses) / len(all_losses)
-
-        results.append((name, mean_loss, acc, macro_f1))
+        if num_classes == 1:
+            auroc = roc_auc_score(all_labels, all_scores)
+            mean_loss = sum(all_losses) / len(all_losses)
+            results.append((name, mean_loss, acc, auroc))
+        else:
+            macro_f1 = f1_score(all_labels, all_preds, average='macro')
+            mean_loss = sum(all_losses) / len(all_losses)
+            results.append((name, mean_loss, acc, macro_f1))
 
     # 5) Write results to file
     out_path = os.path.join(args.save_dir, "test_results.txt")
     with open(out_path, "w") as f:
-        for name, loss, acc, f1 in results:
+        for name, loss, acc, metric in results:
             f.write(f"Dataset: {name}\n")
             f.write(f"  Test Loss: {loss:.4f}\n")
             f.write(f"  Accuracy:  {acc*100:.2f}%\n")
-            f.write(f"  Macro F1:   {f1:.4f}\n\n")
+            if num_classes == 1:
+                f.write(f"  AUROC:   {metric:.4f}\n\n")
+            else:
+                f.write(f"  Macro F1:   {metric:.4f}\n\n")                
 
     print(f"Test results written to {out_path}")
 

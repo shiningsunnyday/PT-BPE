@@ -16,6 +16,7 @@ import argparse
 import os
 import logging
 import inspect
+import pickle
 from pathlib import Path
 
 # Configure logging (you can customize format and level here)
@@ -32,7 +33,9 @@ def get_default_args(func):
 
 def parse_args():    
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
-    parser.add_argument("--cath_folder", default="./data/cath/dompdb/")
+    parser.add_argument("--data-dir", type=str, default="cath", choices=[
+         'cath', 'homo', 'ec', "bindint", "bindbio", "repeat", "catint", "catbio", "conserved",
+         ], help="Which dataset.")    
     parser.add_argument("--toy", type=int, default=10, 
                             help="Number of PDB files.")
     parser.add_argument("--pad", type=int, default=512, help="Max protein size")
@@ -48,8 +51,9 @@ def parse_args():
     # model params
     parser.add_argument("--model", default="bert", choices=["bert", "transformer", "feats"])
     # hparams
+    parser.add_argument("--edge", action='store_true', help="define potential function on edges")
     parser.add_argument("--gamma", type=float, default=0.)
-    parser.add_argument("--max-seg-len", type=int, default=1e10, help="Max length of segment")
+    parser.add_argument("--max-seg-len", type=int, default=50, help="Max length of segment")
     return parser.parse_args()
 
 
@@ -105,6 +109,65 @@ def semi_crf_dp_and_map(out, N, gamma):
 
     return log_a, map_a, best_lens
 
+
+def semi_crf_dp_and_map_2d(
+    unary_scores: torch.Tensor,
+    edge_scores: torch.Tensor,
+    N: int,
+    Lmax: int,
+    gamma: float = 0.0
+):
+    """
+    2D semi-CRF forward: returns
+      - log_alpha[k, l]: log-partition up to position k with last segment length l
+      - map_alpha[k, l]: Viterbi max-score up to k with last segment length l
+      - backpointer[k, l]: the argmax previous length for map_alpha[k, l]
+
+    Args:
+      unary_scores: Tensor[N, Lmax+1]    unary log-potentials φ(x_{i:i+l})
+      edge_scores:  Tensor[N, Lmax+1, Lmax+1]
+                     edge_scores[i, lp, l] = ψ(segment ending at i of length lp,
+                                                  segment starting at i of length l)
+      N:            sequence length
+      Lmax:         maximum segment length
+      gamma:        length bonus per segment (added to unary)
+    """
+    device = unary_scores.device
+    # Initialize DP tables
+    log_alpha = torch.full((N+1, Lmax+1), float('-inf'), device=device)
+    map_alpha = torch.full((N+1, Lmax+1), float('-inf'), device=device)
+    backpointer = torch.zeros((N+1, Lmax+1), dtype=torch.long)
+
+    # Base case: empty prefix → no segments
+    log_alpha[0, 0] = 0.0
+    map_alpha[0, 0] = 0.0
+
+    for k in range(1, N+1):
+        max_l = min(Lmax, k)
+        for l in range(1, max_l+1):
+            i = k - l
+            # unary + length bonus
+            u = unary_scores[i, l] + gamma * l
+
+            # consider all possible previous segment lengths lp
+            prev_max_lp = min(Lmax, i)
+            prev_log = log_alpha[i, :prev_max_lp+1]    # (lp=0..prev_max_lp)
+            prev_map = map_alpha[i, :prev_max_lp+1]
+            e = edge_scores[i, :prev_max_lp+1, l]      # same range for lp
+
+            # log-partition update
+            candidates_log = prev_log + u + e
+            log_alpha[k, l] = torch.logsumexp(candidates_log, dim=0)
+
+            # Viterbi (MAP) update
+            candidates_map = prev_map + u + e
+            best_val, best_lp = torch.max(candidates_map, dim=0)
+            map_alpha[k, l] = best_val
+            backpointer[k, l] = best_lp
+
+    return log_alpha, map_alpha, backpointer
+
+
 def backtrace_map_segmentation(best_lens, N):
     """
     Given backpointer (best_lens), recover the MAP segmentation from k=N down to k=0.
@@ -123,6 +186,38 @@ def backtrace_map_segmentation(best_lens, N):
     # The segments are recovered in reverse order, so reverse them
     segmentation.reverse()
     return segmentation
+
+
+def backtrace_map_segmentation_2d(
+    backpointer: torch.Tensor,
+    map_alpha: torch.Tensor,
+    N: int
+):
+    """
+    Recover MAP segmentation from the 2D Viterbi tables.
+
+    Args:
+      backpointer: LongTensor[N+1, Lmax+1] from semi_crf_dp_and_map_2d
+      map_alpha:   Tensor[N+1, Lmax+1]       from semi_crf_dp_and_map_2d
+      N:           sequence length
+
+    Returns:
+      segmentation: List of (start, end) tuples for the best path.
+    """
+    # 1) pick best final length at position N
+    final_scores = map_alpha[N]                  # shape (Lmax+1)
+    l = torch.argmax(final_scores).item()
+
+    segs = []
+    k = N
+    while k > 0 and l > 0:
+        start = k - l
+        segs.append((start, k))
+        prev_l = backpointer[k, l].item()
+        k = start
+        l = prev_l
+
+    return list(reversed(segs))
 
 
 def obtain_span(t, a, b, bert=False):
@@ -226,18 +321,33 @@ def get_model(args, max_len):
     # === residue‑feat extractor and segment potential ===
     res_feat = BackboneResidueFeaturizer()
     agg      = SegmentFeatureAggregator(res_feat.out_dim, res_feat.labels)
+    agg_pair = SegmentPairFeatureAggregator(10, foldseek_feat_labels)
     seg_mlp  = SegmentPotentialMLP(agg.out_dim, hidden=64)
+    seg_pair_mlp = SegmentPairPotentialMLP(agg_pair.out_dim, hidden=64)
     # Wrap everything in a single object (lightweight example)
-    model = SemiCRFModel(
-        encoder=encoder,
-        res_featurizer=res_feat,
-        seg_aggregator=agg,
-        seg_potential=seg_mlp,
-        length_bias=args.gamma,          # γ from your DP
-        max_seg_len=args.max_seg_len,
-        device=args.cuda,
-        num_workers=0 if args.debug else args.num_workers
-    )
+    if args.edge:
+        model = SemiCRF2DModel(
+            res_featurizer=res_feat,
+            seg_aggregator=agg,
+            seg_pair_aggregator=agg_pair,
+            seg_potential=seg_mlp,
+            seg_pair_potential=seg_pair_mlp,
+            length_bias=args.gamma,          # γ from your DP
+            max_seg_len=args.max_seg_len,
+            device=args.cuda,
+            num_workers=0 if args.debug else args.num_workers            
+        )
+    else:
+        model = SemiCRFModel(
+            encoder=encoder,
+            res_featurizer=res_feat,
+            seg_aggregator=agg,
+            seg_potential=seg_mlp,
+            length_bias=args.gamma,          # γ from your DP
+            max_seg_len=args.max_seg_len,
+            device=args.cuda,
+            num_workers=0 if args.debug else args.num_workers
+        )
     return model.to(args.cuda)
 
 
@@ -263,7 +373,7 @@ def main() -> None:
 
     # ---------------- load data --------------------------------------
     raw_ds = FullCathCanonicalCoordsDataset(
-        args.cath_folder, use_cache=False, debug=args.debug,
+        args.data_dir, use_cache=False, debug=args.debug,
         zero_center=False, toy=args.toy, pad=args.pad, secondary=False,
         trim_strategy="discard"
     )
@@ -284,7 +394,13 @@ def main() -> None:
 
     # ---------------- precompute if needed ------------------------------------
     if args.model == "feats":
-        model.compute_feats(dataset)
+        cache_path = os.path.join(args.save_dir, "feats.pkl")
+        if os.path.exists(cache_path):
+            feats = pickle.load(open(feats.pkl, 'rb'))
+            model.feats = feats
+        else:
+            model.compute_feats(dataset)
+            pickle.dump(model.feats, open(cache_path, "wb+"))
 
     # -----------------------------------------------------------------
     for epoch in range(args.epochs):
@@ -299,11 +415,18 @@ def main() -> None:
                 coords = t.compute_coords()
                 prot_id = Path(t.fname).stem
                 # --------- call SemiCRFModel.precompute -------------------
-                out, attn_scores = model.precompute(
-                    prot_id       = prot_id,
-                    aa_seq        = t.aa,              # Tokenizer stores AA sequence
-                    coords_tensor = coords
-                )                                       # out[i][l] ready for DP
+                if args.edge:
+                    unary_out, unary_attn_scores, edge_out, edge_attn_scores = model.precompute(
+                        prot_id       = prot_id,
+                        aa_seq        = t.aa,              # Tokenizer stores AA sequence
+                        coords_tensor = coords
+                    )  
+                else:
+                    out, attn_scores = model.precompute(
+                        prot_id       = prot_id,
+                        aa_seq        = t.aa,              # Tokenizer stores AA sequence
+                        coords_tensor = coords
+                    )                                       # out[i][l] ready for DP
             else:
                 N = 3 * t.n - 1 # bond level
         
@@ -329,10 +452,16 @@ def main() -> None:
                 )                                       # out[i][l] ready for DP
 
             # ---------- forward + Viterbi on semi‑CRF -----------------
-            log_a, map_a, best_lens = semi_crf_dp_and_map(out, N, gamma=args.gamma)
-            best_seg = backtrace_map_segmentation(best_lens, N)
-            attn_stack = torch.stack([attn_scores[start][end-start] for start, end in best_seg], axis=0)
-            attn_agg = attn_stack.mean(axis=0)            
+            if args.edge:
+                log_alpha, map_alpha, backpointer = semi_crf_dp_and_map_2d(unary_out, edge_out, N, args.max_seg_len, args.gamma)
+                best_seg = backtrace_map_segmentation_2d(backpointer, map_alpha, N)
+                attn_stack = torch.stack([unary_attn_scores[start][end-start] for start, end in best_seg], axis=0)
+                attn_agg = attn_stack.mean(axis=0)                            
+            else:
+                log_a, map_a, best_lens = semi_crf_dp_and_map(out, N, gamma=args.gamma)
+                best_seg = backtrace_map_segmentation(best_lens, N)
+                attn_stack = torch.stack([attn_scores[start][end-start] for start, end in best_seg], axis=0)
+                attn_agg = attn_stack.mean(axis=0)            
             
             if args.model == "feats":
                 # store segmentation in Tokenizer (as before)
@@ -344,7 +473,16 @@ def main() -> None:
                                 for seg_idx, (start, end) in enumerate(best_seg)}
 
             # --------------- loss & optimisation ----------------------
-            loss   = -log_a[N]                       # negative log‑partition
+            if args.edge:
+                # 1) The log‐partition Z(x) = log ∑ₗ exp(log_alpha[N, ℓ])
+                logZ = torch.logsumexp(log_alpha[N], dim=0)          # scalar
+
+                # 2) The best MAP score = maxₗ map_alpha[N, ℓ]
+                best_map, _ = torch.max(map_alpha[N], dim=0)         # scalar
+
+                loss = -logZ
+            else:
+                loss   = -log_a[N]                       # negative log‑partition
             loss   = loss + 0.01 * l1_penalty(model) # optional L1 reg
             loss.backward()
             opt.step()
@@ -361,7 +499,11 @@ def main() -> None:
             logging.info(f"E{epoch} I{idx}  CPU MB {cpu_mem:.1f}")
 
             # segmentation probability
-            prob = torch.exp(map_a[N] - log_a[N]).item()
+            if args.edge:
+                # 3) Probability of that MAP segmentation:
+                prob = torch.exp(best_map - logZ)                # scalar in [0,1]
+            else:                
+                prob = torch.exp(map_a[N] - log_a[N]).item()
             if prob > 0.5:   # arbitrary threshold for visualisation
                 path = Path(os.path.join(args.plot_dir, f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"))
                 attn_path = path.with_name(path.stem + "_attn" + path.suffix)

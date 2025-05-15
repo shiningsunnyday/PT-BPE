@@ -39,7 +39,7 @@ def count_clashes(fname: str, alpha: float = 0.63) -> int:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         atoms = pdb_file.get_structure()[0]
-    atoms = atoms[struct.filter_backbone(atoms)]
+    atoms = atoms[struct.filter_peptide_backbone(atoms)]
 
     # Compute pairwise distances
     pairwise_distances = squareform(pdist(atoms.coord))

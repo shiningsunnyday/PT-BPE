@@ -266,6 +266,7 @@ class Tokenizer:
             )
         self._angles_and_dists = structure['angles'] # controls coords
         self._coords = structure['coords']
+        self.beta_coords = structure['c_beta']
         idxes = structure['full_idxes']
         self._idxes = idxes
         self._res_idx_map = dict(zip(idxes[0::3], range(0, len(idxes), 3)))

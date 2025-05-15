@@ -17,6 +17,8 @@ from Bio.SeqUtils.ProtParam import ProteinAnalysis
 from biotite.structure.io.pdb import PDBFile
 from Bio.PDB import PDBParser, DSSP
 
+from foldingdiff.foldseek import *
+
 HYDROPATHY = {
     # Kyte–Doolittle index
     "A": 1.8, "C": 2.5, "D":-3.5, "E":-3.5, "F": 2.8, "G":-0.4,
@@ -126,7 +128,36 @@ class SegmentFeatureAggregator(nn.Module):
     def __init__(self, per_res_dim:int, per_res_labels: List[str]):
         super().__init__()
         self.per_res_dim = per_res_dim
-        self.per_res_labels = [f"{feat}_{suffix}" for feat in per_res_labels for suffix in ["mean", "std"]] + ["length", "log_length"]
+        self.per_res_labels = [f"{feat}_{suffix}" for feat in per_res_labels \
+            for suffix in ["mean", "std"]] + ["length", "log_length"]
+        self.out_dim = 2*per_res_dim + 2  # mean + var + len + log(len)
+
+    def forward(self, span:torch.Tensor):
+        # span: (L, per_res_dim)
+        mean = span.mean(dim=0)
+        var  = span.var(dim=0, unbiased=False)
+        L = span.size(0)
+        length = torch.tensor([L], dtype=span.dtype, device=span.device)
+        log_length = torch.log(length.float()+1e-6)
+        out = torch.cat([mean, var, length/500.0, log_length/6.0], dim=0)
+        assert out.shape[-1] == self.out_dim
+        return out
+
+
+class SegmentPairFeatureAggregator(nn.Module):
+    """
+    Turn a span X[i:j] (tensor (len, feat_dim)) into a fixed vector.
+    We concatenate:
+      – mean of each feature over the span
+      – variance
+      – length (normalised)
+      – log‑length
+    """
+    def __init__(self, per_res_dim:int, per_res_labels: List[str]):
+        super().__init__()
+        self.per_res_dim = per_res_dim
+        self.per_res_labels = [f"{feat}_{suffix}" for feat in per_res_labels \
+            for suffix in ["mean", "std"]] + ["length", "log_length"]
         self.out_dim = 2*per_res_dim + 2  # mean + var + len + log(len)
 
     def forward(self, span:torch.Tensor):
@@ -142,6 +173,58 @@ class SegmentFeatureAggregator(nn.Module):
 
 
 class SegmentPotentialMLP(nn.Module):
+    """
+    Attention-based potential:
+      - learns a per-feature attention over the agg_vec
+      - computes a context vector and maps it to a scalar potential
+      - returns both the potential and the attention weights
+    """
+    def __init__(self, agg_dim:int, attn_dim:int=32, hidden:int=64):
+        super().__init__()
+        # project each feature scalar → hidden
+        self.feature_proj = nn.Linear(1, attn_dim, bias=False)
+        # a learned query vector for scoring
+        self.query = nn.Parameter(torch.randn(attn_dim))
+        # final MLP on the weighted summary
+        self.mlp = nn.Sequential(
+            nn.Linear(attn_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+    
+    def forward(self, agg_vec: torch.Tensor):
+        """
+        Args:
+          agg_vec: (batch, D)  the D semantic features for each segment
+        Returns:
+          phi    : (batch,)    the scalar log-potential
+          weights: (batch, D)  the attention weight on each feature
+        """
+        B, D = agg_vec.shape
+        # 1) Make it (batch, D, 1) so we can project each feature separately
+        x = agg_vec.unsqueeze(-1)              # (B, D, 1)
+        
+        # 2) Project each feature into attn_dim
+        K = self.feature_proj(x)               # (B, D, attn_dim)
+        # 3) Score each feature against the query vector
+        #    Dot-product: (B, D, attn_dim) · (attn_dim,) → (B, D)
+        scores = K @ self.query                # (B, D)
+        
+        # 4) Normalize into attention weights
+        weights = torch.softmax(scores, dim=-1) # (B, D)
+        
+        # 5) Compute context vector: weighted sum of the projected features
+        #    (B, D, attn_dim) * (B, D, 1) → sum dim=1 → (B, attn_dim)
+        ctx = (K * weights.unsqueeze(-1)).sum(dim=1)  # (B, attn_dim)
+        
+        # 6) Map to scalar potential
+        phi = self.mlp(ctx).squeeze(-1)        # (B,)
+        
+        return phi, weights
+
+
+
+class SegmentPairPotentialMLP(nn.Module):
     """
     Attention-based potential:
       - learns a per-feature attention over the agg_vec
@@ -509,7 +592,12 @@ class SemiCRFModel(nn.Module):
                 res_ids.append(a.res_id)
             assert len(res_ids) == len(t.aa)
             model = structure[0]  # assuming you want the first model            
-            dssp = DSSP(model, fname)
+            try:
+                dssp = DSSP(model, fname)
+                print("dssp good")
+            except:
+                ss_preds.append("".join(["C" for _ in res_ids]))
+                continue
             ss_map = {"H":"H", "G":"H", "I":"H",  # helix types → H
                     "E":"E", "B":"E",           # sheet types → E
                     "T":"C", "S":"C", " ": "C", "-": "C"} # turns/others → C
@@ -532,11 +620,11 @@ class SemiCRFModel(nn.Module):
 
     def compute_feats(self, dataset):
         tasks = {
-            "embeddings": lambda: self.compute_embeddings(dataset),
-            "disorder":   lambda: self.compute_disorder(dataset,   max_workers=self.num_workers),
-            "sec":        lambda: self.compute_sec(dataset,        max_workers=self.num_workers),
-            "plddt":      lambda: self.compute_plddt(dataset),
-            "fps":        lambda: self.compute_fps(dataset,        max_workers=self.num_workers),
+            "embeddings": lambda: self.compute_embeddings(dataset, batch_size=2),
+            "disorder":   lambda: self.compute_disorder(dataset, batch_size=2, max_workers=self.num_workers),
+            "sec":        lambda: self.compute_sec(dataset, batch_size=2, max_workers=self.num_workers),
+            "plddt":      lambda: self.compute_plddt(dataset, batch_size=2),
+            "fps":        lambda: self.compute_fps(dataset, max_workers=self.num_workers),
         }
         for task in tasks:
             tasks[task]()
@@ -811,9 +899,244 @@ class SemiCRFModel(nn.Module):
         return out, attn_out
 
     # convenience helper identical to your old precompute signature
-    def precompute(self, prot_id, aa_seq, angles_tensor=None, coords_tensor=None, timestep=None, attention_mask=None):        
+    def precompute(self, prot_id, aa_seq, angles_tensor=None, coords_tensor=None, timestep=None, attention_mask=None):
         return self.forward(prot_id, aa_seq, angles_tensor, coords_tensor, timestep, attention_mask)        
 
+
+class SemiCRF2DModel(SemiCRFModel):
+    def __init__(
+        self,        
+        res_featurizer: BackboneResidueFeaturizer,
+        seg_aggregator: SegmentFeatureAggregator,
+        seg_pair_aggregator: SegmentPairFeatureAggregator,
+        seg_potential: SegmentPotentialMLP,
+        seg_pair_potential: SegmentPairPotentialMLP,
+        length_bias: float = 0.0,
+        max_seg_len: int = 100,
+        device: Optional[torch.device] = None,
+        num_workers: int = 20
+    ):
+        super().__init__(
+            res_featurizer=res_featurizer, 
+            seg_aggregator=seg_aggregator,
+            seg_potential=seg_potential,
+            length_bias=length_bias,
+            max_seg_len=max_seg_len,
+            device=device,
+            num_workers=num_workers
+        )
+        self.foldseek_projector = nn.Linear(22, 1)
+        self.seg_pair_mlp    = seg_pair_potential        
+        self.seg_pair_aggregator = seg_pair_aggregator
+
+
+    def compute_feats(self, dataset):    
+        self.compute_foldseek(dataset, self.max_seg_len)
+        super(SemiCRF2DModel, self).compute_feats(dataset)
+        # spin up one “worker” per compute_*, all running concurrently
+        # with ThreadPoolExecutor(max_workers=len(tasks)) as exec:
+        #     future_to_name = {
+        #         exec.submit(fn): name
+        #         for name, fn in tasks.items()
+        #     }
+        #     for future in as_completed(future_to_name):
+        #         name = future_to_name[future]
+        #         try:
+        #             future.result()   # will re-raise if that task errored
+        #             print(f"{name} done")
+        #         except Exception as e:
+        #             print(f"⚠️ {name} failed: {e}")
+
+
+
+    @staticmethod
+    # Top‐level helper must be importable (no self):
+    def _compute_protein_foldseeks(args):
+        """
+        Compute all (i, l1, l2) foldseeks for a single protein t.
+        Returns (prot_id, { (i,l1,l2): torch.Tensor(foldseek) }).
+        """
+        t, max_seg_len, device = args
+        prot_id = Path(t.fname).stem
+        aa_seq  = t.aa
+        coords  = t.compute_coords()
+        beta_c  = t.beta_coords
+        coords_np = coords.cpu().numpy() if torch.is_tensor(coords) else coords
+        L = len(aa_seq)
+        foldseeks_dict = {}
+        for i in range(L):
+            max_l2 = min(max_seg_len, L - i)
+            for l2 in range(1, max_l2 + 1):
+                max_l1 = min(max_seg_len, i)
+                for l1 in range(1, max_l1 + 1):                    
+                    c = coords_np[3*(i-l1): 3*(i+l2)]                    
+                    cb = beta_c[i-l1:i+l2]
+                    n, ca, c = c[0::3], c[1::3], c[2::3]
+                    feats, mask, _ = structure2features(ca, n, c, cb)
+                    foldseeks_dict[(i, l1, l2)] = torch.as_tensor(feats, dtype=torch.float32, device=device)
+
+        return prot_id, foldseeks_dict        
+
+
+    def compute_foldseek(self,
+                         dataset,
+                         max_L,
+                         max_workers=20
+    ):
+        """
+        Parallelize at the protein level.  Uses one process per protein
+        and shows a tqdm bar as each finishes.
+        """
+        args_list = [
+            (t, max_L, self.device)
+            for t in dataset
+        ]
+        if False: # max_workers:
+            ctx = mp.get_context('spawn')
+            with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+                futures = {
+                    executor.submit(SemiCRF2DModel._compute_protein_foldseeks, args): args[0]
+                    for args in args_list
+                }
+
+                for fut in tqdm(as_completed(futures),
+                                total=len(futures),
+                                desc="Computing foldseeks"):
+                    prot_id, foldseeks_dict = fut.result()
+                    self.feats[prot_id]['foldseek'] = foldseeks_dict
+        else:
+            res = [SemiCRF2DModel._compute_protein_foldseeks(args) for args in args_list]
+            for prot_id, foldseeks_dict in res:
+                self.feats[prot_id]['foldseek'] = foldseeks_dict     
+    
+    # -----------------------------------------------------------------
+    # main API ---------------------------------------------------------
+    # -----------------------------------------------------------------
+    def forward(
+        self,
+        prot_id: str,
+        aa_seq: str,
+        angles_tensor: torch.Tensor,            # (1, L, num_features)
+        coords_tensor: torch.Tensor,            # (3*L, 3)
+        timestep: torch.Tensor,                 # (1,) or (1,1)
+        attention_mask: torch.Tensor,           # (1, L)
+        batch_size: int = 64
+    ) -> List[List[torch.Tensor]]:
+        """
+        Returns:
+            out[i][l]   scalar (log‑)score for span [i, i+l-1]
+                        i in 0…L-1, l in 1…L-i
+        """
+        # 1) token‑level encoder
+        #    -> per‑token hidden (batch, L, hidden)
+        L = len(aa_seq)
+        
+        # 2) pre‑compute residue‑level biochemical feature tensor (L, feat_dim)        
+        plddt = self.feats[prot_id]['plddt']
+        disorder = self.feats[prot_id]['disorder']
+        ss_pred = self.feats[prot_id]['sec']
+        embedding = self.feats[prot_id]['embedding']        
+        res_feats = self.featurizer(
+            aa_seq, ss_pred=ss_pred,
+            disorder=disorder,
+            plddt=plddt,
+            embedding=embedding
+        ).to(self.device)                        # (L, feat_dim)
+
+        # 3) build unary_out[i][l] and edge_out[i][l1][l2]
+        unary_out: List[List[torch.Tensor]] = torch.tensor([[0.0]*(self.max_seg_len+1) for _ in range(L)], device=self.device)
+        unary_attn_out: List[List[torch.Tensor]] = [[0.0]*(self.max_seg_len+1) for _ in range(L)]
+        edge_out: List[List[List[torch.Tensor]]] = torch.tensor([[[0.0]*(self.max_seg_len+1)]*(self.max_seg_len+1) for _ in range(L)], device=self.device)
+        edge_attn_out: List[List[List[torch.Tensor]]] = [[[0.0]*(self.max_seg_len+1)]*(self.max_seg_len+1) for _ in range(L)]
+        
+        # a) compute bio_scores, in batches
+        agg_vecs: List[torch.Tensor] = []
+        agg_vec_pairs: List[List[torch.Tensor]] = []
+        for i in range(L):
+            max_l = min(self.max_seg_len, L - i)
+            for l in range(1, max_l + 1):
+                j = i + l
+                # biochemical segment potential
+                span_feat = res_feats[i:j]                       # (l, feat_dim)
+                agg_vec   = self.aggregator(span_feat)           # (agg_dim,)                
+                agg_vecs.append(agg_vec)
+        
+        for i in range(L):
+            max_l2 = min(self.max_seg_len, L - i)
+            for l2 in range(1, max_l2 + 1):
+                max_l1 = min(self.max_seg_len, i)
+                for l1 in range(1, max_l1 + 1):
+                    # biochemical segment potential
+                    span_feat1 = self.aggregator(res_feats[i-l1: i])
+                    span_feat2 = self.aggregator(res_feats[i: i+l2])
+                    pair_span_feat = torch.cat((span_feat1, span_feat2))
+                    agg_vec_pairs.append(pair_span_feat)
+
+                
+        # bio_scores = []
+        # for i in range((len(agg_vecs)+batch_size-1)//batch_size):
+        #     batch = torch.stack(agg_vecs[batch_size*i:batch_size*(i+1)], axis=0)
+        #     scores, _ = self.seg_mlp(batch)
+        #     bio_scores
+        bio_scores, attn_scores = self.seg_mlp(torch.stack(agg_vecs, axis=0))
+        bio_pair_scores, attn_pair_scores = self.seg_pair_mlp(torch.stack(agg_vec_pairs, axis=0))
+
+        index = 0
+        for i in range(L):
+            max_l = min(self.max_seg_len, L - i)
+            for l in range(1, max_l + 1):
+                j = i + l
+                # biochemical segment potential scores
+                unary_out[i][l] = bio_scores[index]
+                unary_attn_out[i][l] = attn_scores[index]
+                index += 1
+
+        index = 0
+        for i in range(L):
+            max_l2 = min(self.max_seg_len, L - i)
+            for l2 in range(1, max_l2 + 1):
+                max_l1 = min(self.max_seg_len, i)
+                for l1 in range(1, max_l1 + 1):
+                    # biochemical segment potential scores
+                    edge_out[i][l1][l2] = bio_pair_scores[index]
+                    edge_attn_out[i][l1][l2] = attn_pair_scores[index]
+                    index += 1
+       
+        # b) compute descr_scores
+        for i in range(L):
+            max_l = min(self.max_seg_len, L - i)
+            for l in range(1, max_l + 1):
+                j = i + l
+                fp = self.feats[prot_id]['fp'][(i, j)]
+                descr_score = self.zernike_projector(fp)
+                # total score + length bias
+                unary_out[i][l] += descr_score.squeeze()
+
+        for i in range(L):
+            max_l2 = min(self.max_seg_len, L - i)
+            for l2 in range(1, max_l2 + 1):
+                max_l1 = min(self.max_seg_len, i)
+                for l1 in range(1, max_l1 + 1):
+                    foldseek = self.feats[prot_id]['foldseek'][(i, l1, l2)]
+                    foldseek = self.seg_pair_aggregator(foldseek)
+                    descr_score = self.foldseek_projector(foldseek)
+                    edge_out[i][l1][l2] += descr_score.squeeze()
+
+        # c) add length bias
+        for i in range(L):
+            max_l = min(self.max_seg_len, L - i)
+            for l in range(1, max_l + 1):
+                unary_out[i][l] += self.gamma * l
+
+        for i in range(L):
+            max_l2 = min(self.max_seg_len, L - i)
+            for l2 in range(1, max_l2 + 1):
+                max_l1 = min(self.max_seg_len, i)
+                for l1 in range(1, max_l1 + 1):
+                    edge_out[i][l1][l2] += self.gamma * (l1+l2)
+
+        return unary_out, unary_attn_out, edge_out, edge_attn_out
+    
 
 def zero_initialize(self):
     # Loop over all named parameters and zero them

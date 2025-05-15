@@ -43,7 +43,8 @@ from foldingdiff.angles_and_coords import (
     extract_backbone_coords,
     extract_side_chain_coords,
     extract_backbone_residue_idxes,
-    extract_aa_seq
+    extract_aa_seq,
+    extract_c_beta_coords
 )
 from foldingdiff.annotations import find_secondary_structures
 from foldingdiff import custom_metrics as cm
@@ -582,6 +583,7 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
         full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
         side_chain_coords_pfunc = extract_side_chain_coords
         aa_seq_func = extract_aa_seq
+        c_beta_func = extract_c_beta_coords
         if hasattr(self, "secondary") and self.secondary:
             secondary_pfunc = find_secondary_structures        
         logging.info(
@@ -598,6 +600,7 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
                 secondary_strucs = list(pool.map(secondary_pfunc, fnames, chunksize=250))
             side_chain_arrays = list(pool.map(extract_side_chain_coords, fnames, chunksize=250))
             aa_arrays = list(pool.map(extract_aa_seq, fnames, chunksize=250))
+            c_beta_arrays = list(pool.map(c_beta_func, fnames, chunksize=250))
             pool.close()
             pool.join()            
         else:
@@ -616,18 +619,19 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
                 secondary_strucs = [secondary_pfunc(fname) for fname in fnames]
             side_chain_arrays = [extract_side_chain_coords(fname) for fname in fnames]
             aa_arrays = [extract_aa_seq(fname) for fname in fnames]
+            c_beta_arrays = [c_beta_func(fname) for fname in fnames]
         
         # Contains only non-null structures
         structures = []
-        args = [fnames, struct_arrays, coord_arrays, full_coord_arrays, full_atom_idxes, side_chain_arrays, aa_arrays]
+        args = [fnames, struct_arrays, coord_arrays, full_coord_arrays, full_atom_idxes, side_chain_arrays, aa_arrays, c_beta_arrays]
         if hasattr(self, "secondary") and self.secondary:
             args += [secondary_strucs]
         pargs = zip(*args)
         for parg in pargs:
             if hasattr(self, "secondary") and self.secondary:
-                fname, s, c, c_full, idxes, sc, aa, sec = parg
+                fname, s, c, c_full, idxes, sc, aa, c_beta, sec = parg
             else:
-                fname, s, c, c_full, idxes, sc, aa = parg
+                fname, s, c, c_full, idxes, sc, aa, c_beta = parg
             if s is None:
                 print("s is None", fname)
                 continue
@@ -635,10 +639,13 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
                 print("idxes is None", fname)
                 continue
             if len(aa) != len(s):
-                breakpoint()                
+                breakpoint()    
+            if len(c_beta) != len(aa):
+                breakpoint()
             structure = {
                 "angles": s,
                 "coords": c,
+                "c_beta": c_beta,
                 "full_coords": c_full,
                 "full_idxes": idxes,
                 "side_chain": sc,
