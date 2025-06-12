@@ -6,11 +6,9 @@ import os
 import pandas as pd
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, adjusted_rand_score, mutual_info_score
-import math
+import random
 from collections import Counter
-
-
-
+from tqdm import tqdm
 
 
 def parse_and_write(infile, outfile):
@@ -257,6 +255,21 @@ def boundary_metrics(true_domains, pred_segs, delta=0):
     return {"precision": prec, "recall": rec, "f1": f1}
 
 
+def random_partition(seq_len, num_segments):
+    """
+    Create a random partition of [0, seq_len) into num_segments half-open intervals.
+    """
+    # choose num_segments-1 cut points between 1 and seq_len-1
+    if num_segments <= 1:
+        return [(0, seq_len)]
+    cuts = sorted(random.sample(range(1, seq_len), num_segments - 1))
+    segments = []
+    prev = 0
+    for c in cuts:
+        segments.append((prev, c))
+        prev = c
+    segments.append((prev, seq_len))
+    return segments
 
 
 def main(args):
@@ -283,25 +296,108 @@ def main(args):
                     assert start + l == 3*t.n-1
                     assert l % 3 == 2
                     l += 1
-                pred_segs.append((start//3, start//3+l//3))
-            true_domains = []
-            for (f, to) in df[['ali_from', 'ali_to']].values:
-                true_domains.append((f, to))
-            if len(true_domains) == 0:
-                continue
-            metrics = {
-                "name": p.name, 
-                "n": len(true_domains)
-            }
-            metrics.update({
-                f"boundary_{k}": v for (k, v) in boundary_metrics(true_domains, pred_segs, delta=0).items()
-            })
-            metrics.update(domain_f1(true_domains, pred_segs, iou_threshold=0.5))
-            all_metrics.append(metrics)
+                pred_segs.append((start//3, start//3+l//3))     
+        else:
+            continue
+        
+        true_domains = [(f, to) for f, to in df[['ali_from', 'ali_to']].values]
+        if not true_domains:
+            continue
+
+        # 1) Compute observed metrics
+        metrics = {
+            "name": p.name,
+            "n": len(true_domains)
+        }
+        # boundary_... keys
+        metrics.update({f"boundary_{k}": v 
+                        for k, v in boundary_metrics(true_domains, pred_segs, delta=0).items()})
+        # domain-level metrics
+        metrics.update(domain_f1(true_domains, pred_segs, iou_threshold=0.5))
+
+        # 2) Prepare for randomization
+        seq_len = pred_segs[-1][1]
+        num_segments = len(pred_segs)
+        # numeric metric keys (exclude name,n)
+        metric_keys = [k for k in metrics if k not in ("name", "n")]
+
+        # 3) Generate random partitions & collect metric distributions
+        random_stats = {k: [] for k in metric_keys}
+        N = 1000
+        for _ in tqdm(range(N), "scoring random partitions"):
+            rand_segs = random_partition(seq_len, num_segments)
+            # compute the same metrics on the random segmentation
+            b_stats = boundary_metrics(true_domains, rand_segs, delta=0)
+            d_stats = domain_f1(true_domains, rand_segs, iou_threshold=0.5)
+            # record boundary_... keys
+            for k, v in b_stats.items():                
+                random_stats[f"boundary_{k}"].append(v)
+            # record domain-level keys
+            for k, v in d_stats.items():                
+                random_stats[k].append(v)
+
+        # 4) Compute one-sided p-values (greater-or-equal)
+        for k in metric_keys:
+            obs = metrics[k]
+            vals = random_stats[k]
+            # +1 correction for zero counts
+            p_val = (sum(v >= obs for v in vals) + 1) / (N + 1)
+            metrics[f"{k}_pval"] = p_val
+        all_metrics.append(dict(sorted(metrics.items())))
+
+    # After loop, all_metrics has p-values alongside your existing metrics.
 
     df = pd.DataFrame(all_metrics)
-    for c in df.columns[2:]:
-        print(c, (df[c]*df['n']).sum()/df['n'].sum())    
+    for c in df.columns:
+        if c in ['name', 'n']:
+            continue
+        print(c, round(100*df[c].mean(), 2))
+
+
+# def main(args):
+#     bpe = pickle.load(open(args.pkl_file, 'rb'))
+#     all_metrics = []
+#     for i in range(len(bpe.tokenizers)):
+#         t = bpe.tokenizers[i]
+#         p = Path(t.fname)
+#         r = p.relative_to(os.getcwd())
+#         n = Path(p.name)
+#         out = Path(os.path.join('./scripts/', r, n.with_suffix('.domtblout')))
+#         if os.path.exists(out):
+#             csv_out = out.with_suffix(".csv")
+#             try:
+#                 parse_and_write(out, csv_out)
+#             except:
+#                 print(out)
+#                 continue
+#             # parse_crh(out, csv_out)
+#             df = pd.read_csv(csv_out)
+#             pred_segs = []
+#             for (start, _, l) in t.bond_to_token.values():
+#                 if l % 3 != 0:
+#                     assert start + l == 3*t.n-1
+#                     assert l % 3 == 2
+#                     l += 1
+#                 pred_segs.append((start//3, start//3+l//3))                        
+#             true_domains = []
+#             for (f, to) in df[['ali_from', 'ali_to']].values:
+#                 true_domains.append((f, to))
+#             if len(true_domains) == 0:
+#                 continue
+#             metrics = {
+#                 "name": p.name, 
+#                 "n": len(true_domains)
+#             }
+#             metrics.update({
+#                 f"boundary_{k}": v for (k, v) in boundary_metrics(true_domains, pred_segs, delta=0).items()
+#             })
+#             metrics.update(domain_f1(true_domains, pred_segs, iou_threshold=0.5))
+#             # TODO: generate 10000 random segmentations, compute metrics, and record p-values
+#             all_metrics.append(metrics)
+
+#     df = pd.DataFrame(all_metrics)
+#     for c in df.columns[2:]:
+#         print(c, (df[c]*df['n']).sum()/df['n'].sum())    
 
 
 if __name__ == "__main__":
