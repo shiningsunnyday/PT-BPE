@@ -603,7 +603,7 @@ def test_probe(args, test_datasets, num_classes):
     tree_encoder = UpDownTreeEncoder(embed_dim, concat_updown=True).to(device)
 
     # 3) Load checkpoint
-    ckpt = torch.load(best_ckpt, map_location=device)
+    ckpt = torch.load(best_ckpt, map_location=device, weights_only=False)
     tree_encoder.load_state_dict(ckpt["encoder_state_dict"])
     probe.load_state_dict(ckpt["probe_state_dict"])
     tree_encoder.eval()
@@ -681,7 +681,7 @@ def test_probe(args, test_datasets, num_classes):
                         pred = (scores > 0.5).long()
                         label = label.squeeze(0)
                         loss = criterion(logits, label.float())
-                        all_scores.append(scores.cpu().tolist())
+                        all_scores.extend(scores.cpu().tolist())
                     else:
                         pred = logits.argmax(dim=1) # (num_residues,)
                         loss = criterion(logits, label)
@@ -718,7 +718,7 @@ def load_datasets(args):
     bpe = pickle.load(open(args.pkl_file, 'rb'))
     if args.pkl_data_file:
         if os.path.exists(args.pkl_data_file):
-            train_dataset, valid_dataset, test_datasets = pickle.load(open(args.pkl_data_file, 'rb'))
+            train_dataset, valid_dataset, test_datasets = pickle.load(open(args.pkl_data_file, 'rb'))            
             print(f"Train: {len(train_dataset)}, Valid: {len(valid_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
             return train_dataset, valid_dataset, test_datasets
     if args.task == "remote-homology-detection":
@@ -735,7 +735,7 @@ def load_datasets(args):
         test_family_dataset = MyDataset(bpe.tokenizers, test_family_holdout, label_map)
         test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
         test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)
-        test_datasets = [test_family_dataset, test_fold_dataset, test_superfamily_dataset]
+        test_datasets = [('family', test_family_dataset), ('fold', test_fold_dataset), ('superfamily', test_superfamily_dataset)]
     elif args.task in ["BindInt", "BindBio", "repeat-motif-prediction", "CatInt", "CatBio", "conserved-site-prediction"]:
         if args.task == "BindInt":
             train_path = 'data/struct_token_bench/interpro/binding_label_train_deduplicated.jsonl'

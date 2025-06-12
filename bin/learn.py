@@ -40,12 +40,13 @@ def parse_args():
                             help="Number of PDB files.")
     parser.add_argument("--pad", type=int, default=512, help="Max protein size")
     parser.add_argument("--debug", action='store_true')    
-    parser.add_argument("--num-workers", type=int, default=5, help="Num workers")
     parser.add_argument("--visualize", action='store_true')    
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--cuda", default="cpu")
     # run artifacts
     parser.add_argument("--auto", action='store_true', help='auto set folders')
+    parser.add_argument("--config", help='file to config compute_feats')
+    parser.add_argument("--batch_size", help='batch size for feat computation checkpointing', type=int, default=100)
     parser.add_argument("--save_dir", default="./ckpts")
     parser.add_argument("--plot_dir", default="./plots/learn")
     # model params
@@ -53,6 +54,7 @@ def parse_args():
     # hparams
     parser.add_argument("--edge", action='store_true', help="define potential function on edges")
     parser.add_argument("--gamma", type=float, default=0.)
+    parser.add_argument("--l1", type=float, default=0.01)
     parser.add_argument("--max-seg-len", type=int, default=50, help="Max length of segment")
     return parser.parse_args()
 
@@ -334,8 +336,7 @@ def get_model(args, max_len):
             seg_pair_potential=seg_pair_mlp,
             length_bias=args.gamma,          # γ from your DP
             max_seg_len=args.max_seg_len,
-            device=args.cuda,
-            num_workers=0 if args.debug else args.num_workers            
+            device=args.cuda
         )
     else:
         model = SemiCRFModel(
@@ -345,8 +346,7 @@ def get_model(args, max_len):
             seg_potential=seg_mlp,
             length_bias=args.gamma,          # γ from your DP
             max_seg_len=args.max_seg_len,
-            device=args.cuda,
-            num_workers=0 if args.debug else args.num_workers
+            device=args.cuda
         )
     return model.to(args.cuda)
 
@@ -354,8 +354,7 @@ def get_model(args, max_len):
 # ---------------------------------------------------------------------
 # main training function – rewritten for SemiCRFModel
 # ---------------------------------------------------------------------
-def main() -> None:
-    args = parse_args()
+def main(args) -> None:
     logging.info(args)
 
     # ---------------- output folders ---------------------------------
@@ -367,7 +366,8 @@ def main() -> None:
         os.makedirs(args.save_dir,  exist_ok=True)
         logging.info(f"plots : {args.plot_dir}")
         logging.info(f"ckpts : {args.save_dir}")
-
+    
+    json.dump(args.__dict__, open(os.path.join(args.save_dir, 'args.json'), 'w+'))
     logging.info(f"CUDA available : {torch.cuda.is_available()}")
     logging.info(f"Using device   : {args.cuda}")
 
@@ -395,12 +395,19 @@ def main() -> None:
     # ---------------- precompute if needed ------------------------------------
     if args.model == "feats":
         cache_path = os.path.join(args.save_dir, "feats.pkl")
-        if os.path.exists(cache_path):
-            feats = pickle.load(open(feats.pkl, 'rb'))
+        if not args.debug and os.path.exists(cache_path):
+            feats = pickle.load(open(cache_path, 'rb'))
             model.feats = feats
         else:
-            model.compute_feats(dataset)
-            pickle.dump(model.feats, open(cache_path, "wb+"))
+            if args.config:
+                config = json.load(open(args.config))
+            # compute feats in batches            
+            if args.batch_size:
+                model.compute_batch_feats(dataset, config, save_dir=args.save_dir, batch_size=args.batch_size)
+            else:
+                model.compute_feats(dataset, config)
+            if not args.debug:
+                pickle.dump(model.feats, open(cache_path, "wb+"))
 
     # -----------------------------------------------------------------
     for epoch in range(args.epochs):
@@ -416,11 +423,16 @@ def main() -> None:
                 prot_id = Path(t.fname).stem
                 # --------- call SemiCRFModel.precompute -------------------
                 if args.edge:
-                    unary_out, unary_attn_scores, edge_out, edge_attn_scores = model.precompute(
-                        prot_id       = prot_id,
-                        aa_seq        = t.aa,              # Tokenizer stores AA sequence
-                        coords_tensor = coords
-                    )  
+                    try:
+                        unary_out, unary_attn_scores, edge_out, edge_attn_scores = model.precompute(
+                            prot_id       = prot_id,
+                            aa_seq        = t.aa,              # Tokenizer stores AA sequence
+                            coords_tensor = coords
+                        )  
+                    except Exception as e:
+                        print(e)
+                        print(t.fname)
+                        raise
                 else:
                     out, attn_scores = model.precompute(
                         prot_id       = prot_id,
@@ -479,11 +491,10 @@ def main() -> None:
 
                 # 2) The best MAP score = maxₗ map_alpha[N, ℓ]
                 best_map, _ = torch.max(map_alpha[N], dim=0)         # scalar
-
                 loss = -logZ
             else:
                 loss   = -log_a[N]                       # negative log‑partition
-            loss   = loss + 0.01 * l1_penalty(model) # optional L1 reg
+            loss   = loss + args.l1 * l1_penalty(model) # optional L1 reg
             loss.backward()
             opt.step()
 
@@ -521,4 +532,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    if args.debug:
+        breakpoint()
+    main(args)        

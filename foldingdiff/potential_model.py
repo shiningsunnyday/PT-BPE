@@ -16,7 +16,7 @@ from pyzernike import ZernikeDescriptor
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
 from biotite.structure.io.pdb import PDBFile
 from Bio.PDB import PDBParser, DSSP
-
+import pickle
 from foldingdiff.foldseek import *
 
 HYDROPATHY = {
@@ -377,8 +377,7 @@ class SemiCRFModel(nn.Module):
         encoder: Optional[nn.Module] = None,
         length_bias: float = 0.0,
         max_seg_len: int = 100,
-        device: Optional[torch.device] = None,
-        num_workers: int = 20
+        device: Optional[torch.device] = None
     ):
         super().__init__()
         self.encoder         = encoder
@@ -388,7 +387,6 @@ class SemiCRFModel(nn.Module):
         self.gamma           = length_bias
         self.max_seg_len     = max_seg_len
         self.device          = device or torch.device("cpu")
-        self.num_workers     = num_workers
         if self.encoder:
             # linear projection from encoder hidden -> scalar
             self.enc2score = nn.Linear(
@@ -439,7 +437,7 @@ class SemiCRFModel(nn.Module):
             for seq in sequences:
                 in_f.write(seq+'\n')
             in_path = in_f.name
-
+        print(in_path)
         # 3) Reserve an output path
         out_fd, out_path = tempfile.mkstemp(suffix='.pt')
         os.close(out_fd)
@@ -616,15 +614,15 @@ class SemiCRFModel(nn.Module):
             ss_preds.append(ss_pred)
         print("Secondary structure prediction done.")
         return prot_ids, ss_preds      
+    
 
-
-    def compute_feats(self, dataset):
+    def compute_feats(self, dataset, config):
         tasks = {
-            "embeddings": lambda: self.compute_embeddings(dataset, batch_size=2),
-            "disorder":   lambda: self.compute_disorder(dataset, batch_size=2, max_workers=self.num_workers),
-            "sec":        lambda: self.compute_sec(dataset, batch_size=2, max_workers=self.num_workers),
-            "plddt":      lambda: self.compute_plddt(dataset, batch_size=2),
-            "fps":        lambda: self.compute_fps(dataset, max_workers=self.num_workers),
+            "disorder":   lambda: self.compute_disorder(dataset, **config["disorder"]),
+            "embeddings": lambda: self.compute_embeddings(dataset, **config["embeddings"]),            
+            "sec":        lambda: self.compute_sec(dataset, **config["sec"]),
+            "plddt":      lambda: self.compute_plddt(dataset, **config["plddt"]),
+            "fps":        lambda: self.compute_fps(dataset, **config["fps"]),
         }
         for task in tasks:
             tasks[task]()
@@ -640,7 +638,31 @@ class SemiCRFModel(nn.Module):
         #             future.result()   # will re-raise if that task errored
         #             print(f"{name} done")
         #         except Exception as e:
-        #             print(f"⚠️ {name} failed: {e}")
+        #             print(f"⚠️ {name} failed: {e}")        
+
+
+    def compute_batch_feats(self, dataset, config, save_dir, batch_size):
+        # compute feats in batches        
+        for i in range((len(dataset)+batch_size-1)//batch_size):                            
+            batch_path = os.path.join(save_dir, f"feats_{batch_size}_{i}.pkl")
+            if os.path.exists(batch_path):
+                print(f"batch {i} done, continuing")
+                continue
+            else:
+                print(f"begin feat computation batch {i}")
+                self.compute_feats(dataset[batch_size*i:batch_size*(i+1)], config)        
+                print(f"begin saving feat batch {i}")
+                pickle.dump(self.feats, open(batch_path, "wb+"))
+                print(f"done saving feat batch {i}")
+                self.feats = defaultdict(dict)
+        print("all feat batches ready")
+        for i in range((len(dataset)+batch_size-1)//batch_size):                            
+            batch_path = os.path.join(save_dir, f"feats_{batch_size}_{i}.pkl")
+            print(f"loading feat batch {i}")
+            feats = pickle.load(open(batch_path, "rb"))
+            for k in feats:
+                self.feats[k] = feats[k]        
+        print("all feats loaded")
 
         
     def compute_fps(self,
@@ -703,7 +725,7 @@ class SemiCRFModel(nn.Module):
             prot_ids, plddts = SemiCRFModel._compute_protein_plddt(dataset)
             for i, prot_id in enumerate(prot_ids):
                 plddt = plddts[i]
-                plddt = plddt[plddt==plddt]
+                plddt[plddt!=plddt] = 0.
                 self.feats[prot_id]['plddt'] = plddt.cpu().numpy()               
 
 
@@ -913,8 +935,7 @@ class SemiCRF2DModel(SemiCRFModel):
         seg_pair_potential: SegmentPairPotentialMLP,
         length_bias: float = 0.0,
         max_seg_len: int = 100,
-        device: Optional[torch.device] = None,
-        num_workers: int = 20
+        device: Optional[torch.device] = None
     ):
         super().__init__(
             res_featurizer=res_featurizer, 
@@ -922,17 +943,25 @@ class SemiCRF2DModel(SemiCRFModel):
             seg_potential=seg_potential,
             length_bias=length_bias,
             max_seg_len=max_seg_len,
-            device=device,
-            num_workers=num_workers
+            device=device
         )
         self.foldseek_projector = nn.Linear(22, 1)
         self.seg_pair_mlp    = seg_pair_potential        
         self.seg_pair_aggregator = seg_pair_aggregator
 
 
-    def compute_feats(self, dataset):    
-        self.compute_foldseek(dataset, self.max_seg_len)
-        super(SemiCRF2DModel, self).compute_feats(dataset)
+    def compute_feats(self, dataset, config):    
+        tasks = {
+            "disorder":   lambda: self.compute_disorder(dataset, **config["disorder"]),
+            "embeddings": lambda: self.compute_embeddings(dataset, **config["embeddings"]),            
+            "sec":        lambda: self.compute_sec(dataset, **config["sec"]),
+            "plddt":      lambda: self.compute_plddt(dataset, **config["plddt"]),
+            "fps":        lambda: self.compute_fps(dataset, **config["fps"]),
+            "foldseek":   lambda: self.compute_foldseek(dataset, self.max_seg_len, **config["foldseek"])
+        }
+        
+        for task in tasks:
+            tasks[task]()
         # spin up one “worker” per compute_*, all running concurrently
         # with ThreadPoolExecutor(max_workers=len(tasks)) as exec:
         #     future_to_name = {
@@ -956,11 +985,8 @@ class SemiCRF2DModel(SemiCRFModel):
         Compute all (i, l1, l2) foldseeks for a single protein t.
         Returns (prot_id, { (i,l1,l2): torch.Tensor(foldseek) }).
         """
-        t, max_seg_len, device = args
-        prot_id = Path(t.fname).stem
-        aa_seq  = t.aa
-        coords  = t.compute_coords()
-        beta_c  = t.beta_coords
+        fname, aa_seq, coords, beta_c, max_seg_len, device = args
+        prot_id = Path(fname).stem
         coords_np = coords.cpu().numpy() if torch.is_tensor(coords) else coords
         L = len(aa_seq)
         foldseeks_dict = {}
@@ -988,10 +1014,10 @@ class SemiCRF2DModel(SemiCRFModel):
         and shows a tqdm bar as each finishes.
         """
         args_list = [
-            (t, max_L, self.device)
+            (t.fname, t.aa, t.compute_coords(), t.beta_coords, max_L, self.device)
             for t in dataset
         ]
-        if False: # max_workers:
+        if max_workers:
             ctx = mp.get_context('spawn')
             with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
                 futures = {
