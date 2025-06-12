@@ -2,8 +2,8 @@
 #
 #SBATCH -p kempner # partition (queue)
 #SBATCH --account kempner_mzitnik_lab
-#SBATCH -c 10 # number of cores
-#SBATCH --mem 500g # memory pool for all cores
+#SBATCH -c 16 # number of cores
+#SBATCH --mem 100g # memory pool for all cores
 #SBATCH --gres=gpu:1 # gpu
 #SBATCH -t 3-0:00 # time (D-HH:MM)
 #SBATCH -o /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_predict.%j.out # STDOUT
@@ -24,31 +24,38 @@ if [ $# -ne 1 ]; then
   exit 1
 fi
 
+level="residue"
 case "$1" in
   1)
     pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746813758.8588822/bpe_iter=3920.pkl"
     task="conserved-site-prediction"
-    ckpt_dir="./ckpts/1747270965.922862/"
+    ckpt_dir="./ckpts/1747270965.922862" # done
     ;;
   2)
     pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746813758.8587544/bpe_iter=5590.pkl"
     task="CatBio"
-    ckpt_dir="./ckpts/1747272230.710532/"
+    ckpt_dir="./ckpts/1747272230.710532" # done
     ;;
   3)
     pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8771565/bpe_iter=2500.pkl"
     task="BindBio"
-    ckpt_dir="./ckpts/1747272233.400883/"
+    ckpt_dir="./ckpts/1747272233.400883"
     ;;
   4)
     pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8771634/bpe_iter=7200.pkl"
     task="CatInt"
-    ckpt_dir="./ckpts/1747272259.176812/"
+    ckpt_dir="./ckpts/1747272259.176812/" # done
     ;;
   5)
     pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8772147/bpe_iter=9990.pkl"
     task="repeat-motif-prediction"
-    ckpt_dir="./ckpts/1747271619.576858/"
+    ckpt_dir="./ckpts/1747271619.576858" # done
+    ;;
+  6)
+    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1744875790.3072364/bpe_iter=6000.pkl"
+    task="remote-homology-detection"
+    ckpt_dir="./ckpts/1744932629.834232"
+    level="protein"
     ;;
   *)
     echo "Invalid option: $1"
@@ -64,10 +71,10 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --pkl-file ${pkl_file} \
   --task ${task} \
   --pkl-data-file /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/data/struct_token_bench/processed_pickles/${task}.pkl \
-  --level residue \
-  --auto
-  # --test \
-  # --save-dir ${ckpt_dir}
+  --level ${level} \
+  --test \
+  --save-dir ${ckpt_dir}
+  # --auto
 
 # test
 # PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
