@@ -261,14 +261,13 @@ def save_circular_histogram_equal_counts(angles, path=None, bins=10, title=None)
     widths      = np.diff(edges)
     centers     = edges[:-1] + widths/2
 
-    if path is None:
-        return edges[:-1], edges[1:], widths, counts
-
-    fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
-    ax.bar(centers, counts, width=widths, bottom=0.0, edgecolor='black', align='center')
-    ax.set_title(title or "Circular Histogram (Equal‑Count Bins)")
-    plt.savefig(path, bbox_inches='tight')
-    plt.close()
+    if path is not None:            
+        fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
+        ax.bar(centers, counts, width=widths, bottom=0.0, edgecolor='black', align='center')
+        ax.set_title(title or "Circular Histogram (Equal‑Count Bins)")
+        plt.savefig(path, bbox_inches='tight')
+        plt.close()
+    return edges[:-1], edges[1:], widths, counts
 
 
 def save_circular_histogram(angles, path=None, bins=10, title=None):
@@ -288,18 +287,16 @@ def save_circular_histogram(angles, path=None, bins=10, title=None):
     counts, bin_edges = np.histogram(angles, bins=bins)
     widths = np.diff(bin_edges)
     bin_centers = bin_edges[:-1] + widths / 2
-    if path is None:
-        return bin_edges[:-1], bin_edges[1:], widths, counts
-
-    # Create a polar subplot
-    fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
-    
-    # Create a bar plot for each bin in the polar coordinate system
-    ax.bar(bin_centers, counts, width=widths, bottom=0.0, edgecolor='black', align='center')    
-    ax.set_title(title if title else "Circular Histogram (Rose Diagram)")
-    plt.savefig(path, bbox_inches='tight')
-    print("Histogram saved at", os.path.abspath(path))
-    plt.close()
+    if path is not None:
+        # Create a polar subplot
+        fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})    
+        # Create a bar plot for each bin in the polar coordinate system
+        ax.bar(bin_centers, counts, width=widths, bottom=0.0, edgecolor='black', align='center')    
+        ax.set_title(title if title else "Circular Histogram (Rose Diagram)")
+        plt.savefig(path, bbox_inches='tight')
+        print("Histogram saved at", os.path.abspath(path))
+        plt.close()
+    return bin_edges[:-1], bin_edges[1:], widths, counts
 
 
 def legend_key_to_tuple(label):

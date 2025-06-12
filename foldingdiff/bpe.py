@@ -57,16 +57,17 @@ class BPE():
         self.res_init = res_init
         self.bins = bins
         self.bin_strategy = bin_strategy
+        print(self.bin_strategy)
         self.n = len(self.tokenizers)
         self.save_dir = save_dir
         self._step = 0
         self._times = []
         self._ious = []
     
-    def initialize(self):
+    def initialize(self, path=None):
         logger.info(f"Initialize start")
         start_time = time.perf_counter()
-        self._init_thresholds() # call this before _init_tokens
+        self._init_thresholds(path=path) # call this before _init_tokens
         logger.info(f"_init_thresholds took {time.perf_counter()-start_time}")
         start_time = time.perf_counter()        
         self._init_tokens()        
@@ -137,7 +138,7 @@ class BPE():
         breakpoint()        
 
 
-    def _init_thresholds(self):
+    def _init_thresholds(self, path=None):
         """
         We obtain the thresholds
         These threshold determine statistical significance of a motif, so we should choose them carefully
@@ -163,14 +164,15 @@ class BPE():
                     t_vals = angles[key][angles[key].fillna(0)!=0.].tolist()
                     vals[key] = vals.get(key, []) + t_vals
             for key in t.BOND_ANGLES+t.DIHEDRAL_ANGLES:
+                name = f"{key}_{self.bin_strategy}_{num_bins}.png"
                 if self.bin_strategy == "histogram":
-                    starts, ends, widths, counts = save_circular_histogram(vals[key], path=None, bins=self.bins[size])
+                    starts, ends, widths, counts = save_circular_histogram(vals[key], path=Path(path).with_name(name), bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins")
                 elif self.bin_strategy == "uniform":
-                    starts, ends, widths, counts = save_circular_histogram_equal_counts(vals[key], path=None, bins=self.bins[size])
+                    starts, ends, widths, counts = save_circular_histogram_equal_counts(vals[key], path=Path(path).with_name(name), bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins")
                 else:
                     raise NotImplementedError
                 logger.info(f"# bins: {len(counts)}, bin starts: {starts}, bin ends: {ends}, counts: {counts}")
-                # save_circular_histogram(vals[key], path=f"/n/home02/msun415/foldingdiff/hist_{key}.png", bins=self.bins, title=f"Histogram {key}")
+                
                 for start, end, width, count in zip(starts, ends, widths, counts):
                     _thresholds[key] = _thresholds.get(key, []) + [(float(start), float(end))]
                     _bin_counts[key] = _bin_counts.get(key, []) + [count]                 
