@@ -3,6 +3,19 @@
 *.pkl
 data/cath/*
 data/alphafold/*.pdb.gz
+*.png
+*.gif
+*.pt
+*.txt
+*.fasta
+*.pdb
+ckpts/*
+*.err
+*.out
+*.mdb
+temp/*
+scripts/temp/*
+*output.tsv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -11,6 +24,7 @@ __pycache__/
 
 # C extensions
 *.so
+freqgeo-1.0/*
 
 # Distribution / packaging
 .Python
