@@ -300,8 +300,9 @@ class CathCanonicalAnglesDataset(Dataset):
             else:
                 raise ValueError(f"Unknown pdb set: {pdbs}")
         # for debug
-        demo_pdb = '/n/home02/msun415/foldingdiff/data/cath/dompdb/3w6sC00.pdb'
-        # demo_pdb = '/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/data/remote_homology/test_superfamily_holdout_pdbs/1QCR_D.pdb'
+        # demo_pdb = './data/cath/dompdb/3w6sC00.pdb'
+        demo_pdb = './data/remote_homology/test_superfamily_holdout_pdbs/2J7Q_A.pdb'
+        # demo_pdb = './data/remote_homology/test_superfamily_holdout_pdbs/1QCR_D.pdb'
         if demo_pdb in fnames:
             fnames.remove(demo_pdb)
             fnames = [demo_pdb] + fnames
