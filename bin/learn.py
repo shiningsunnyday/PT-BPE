@@ -9,6 +9,7 @@ import psutil
 if torch.cuda.is_available():
     torch.cuda.reset_peak_memory_stats()
 from torch import optim
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from tqdm import tqdm
 import time
@@ -351,6 +352,50 @@ def get_model(args, max_len):
     return model.to(args.cuda)
 
 
+class FeatDataset(Dataset):
+    def __init__(self, tokenizers, save_dir):
+        self.tokenizers = tokenizers
+        self.save_dir = save_dir
+        for t in self.tokenizers:
+            prot_id = Path(t.fname).stem
+            assert os.path.exists(os.path.join(save_dir, f"{prot_id}.pkl"))
+
+    
+    def __len__(self):
+        return len(self.tokenizers)
+
+
+    def __getitem__(self, idx):
+        t = self.tokenizers[idx]
+        prot_id = Path(t.fname).stem
+        path = os.path.join(self.save_dir, f"{prot_id}.pkl")
+        feats = pickle.load(open(path, "rb"))
+        return t, feats
+
+
+def collate_fn(batch):
+    assert len(batch) == 1
+    return batch[0]
+
+def find_latest_checkpoint(save_dir: str) -> Path:
+    save_path = Path(save_dir)
+    # Grab all files matching your naming pattern
+    cks = list(save_path.glob("epoch=*_*loss=*.pt"))
+    if not cks:
+        raise FileNotFoundError(f"No checkpoints found in {save_dir}")
+
+    # Option 1: sort by epoch number embedded in the filename
+    def epoch_num(p: Path):
+        m = re.search(r"epoch=(\d+)", p.name)
+        return int(m.group(1)) if m else -1
+
+    latest_by_epoch = max(cks, key=epoch_num)
+
+    # Option 2: alternatively, sort by file‐modified time
+    # latest_by_epoch = max(cks, key=lambda p: p.stat().st_mtime)
+
+    return latest_by_epoch
+
 # ---------------------------------------------------------------------
 # main training function – rewritten for SemiCRFModel
 # ---------------------------------------------------------------------
@@ -394,25 +439,28 @@ def main(args) -> None:
 
     # ---------------- precompute if needed ------------------------------------
     if args.model == "feats":
-        cache_path = os.path.join(args.save_dir, "feats.pkl")
-        if not args.debug and os.path.exists(cache_path):
-            feats = pickle.load(open(cache_path, 'rb'))
-            model.feats = feats
-        else:
-            if args.config:
-                config = json.load(open(args.config))
-            # compute feats in batches            
-            if args.batch_size:
-                model.compute_batch_feats(dataset, config, save_dir=args.save_dir, batch_size=args.batch_size)
-            else:
-                model.compute_feats(dataset, config)
-            if not args.debug:
-                pickle.dump(model.feats, open(cache_path, "wb+"))
+        if args.config:
+            config = json.load(open(args.config))
+        # compute feats in batches            
+        model.compute_batch_feats(dataset, config, save_dir=args.save_dir, batch_size=args.batch_size)
+        dataset = FeatDataset(dataset, args.save_dir)
+        dataset = DataLoader(dataset, collate_fn=collate_fn, batch_size=1, num_workers=4, prefetch_factor=1, persistent_workers=True, pin_memory=True)
 
     # -----------------------------------------------------------------
-    for epoch in range(args.epochs):
+    checkpoint_path = find_latest_checkpoint(args.save_dir)    
+    ckpt = torch.load(checkpoint_path, map_location=model.device)
+    if isinstance(ckpt, dict):
+        model.load_state_dict(ckpt['model_state'])
+        opt.load_state_dict(ckpt['optim_state'])
+        best_loss = ckpt['best_loss']
+        start_epoch = ckpt['epoch'] + 1
+    else:
+        model.load_state_dict(ckpt)
+        best_loss = float('inf')
+        start_epoch = 0
+    for epoch in range(start_epoch, args.epochs):
         total_loss = 0.0
-        for idx, t in tqdm(enumerate(dataset), desc=f"epoch {epoch}"):
+        for idx, (t, feats) in tqdm(enumerate(dataset), desc=f"epoch {epoch}"):
             opt.zero_grad()
 
             # --------- build “angles” tensor the same way as before ---
@@ -420,14 +468,12 @@ def main(args) -> None:
                 N = t.n
                 assert t.n == len(t.aa), "number of residues != length of amino acid sequence"
                 coords = t.compute_coords()
-                prot_id = Path(t.fname).stem
                 # --------- call SemiCRFModel.precompute -------------------
                 if args.edge:
                     try:
                         unary_out, unary_attn_scores, edge_out, edge_attn_scores = model.precompute(
-                            prot_id       = prot_id,
-                            aa_seq        = t.aa,              # Tokenizer stores AA sequence
-                            coords_tensor = coords
+                            feats         = feats,
+                            aa_seq        = t.aa              # Tokenizer stores AA sequence
                         )  
                     except Exception as e:
                         print(e)
@@ -435,7 +481,7 @@ def main(args) -> None:
                         raise
                 else:
                     out, attn_scores = model.precompute(
-                        prot_id       = prot_id,
+                        feats         = feats,
                         aa_seq        = t.aa,              # Tokenizer stores AA sequence
                         coords_tensor = coords
                     )                                       # out[i][l] ready for DP
@@ -525,9 +571,21 @@ def main(args) -> None:
         # ---------------- checkpoint if improved ---------------------
         if total_loss < best_loss:
             best_loss = total_loss
-            torch.save(model.state_dict(),
-                       os.path.join(args.save_dir, f"epoch={epoch}_loss={best_loss:.4f}.pt"))
-            logging.info(f"[epoch {epoch}] new best total loss {best_loss:.4f}")
+            checkpoint = {
+                'epoch':         epoch,
+                'model_state':   model.state_dict(),
+                'optim_state':   opt.state_dict(),
+                'best_loss':     best_loss,
+                # optionally: 'scheduler_state': scheduler.state_dict(),
+                # you can add any other metadata you like
+            }
+
+            filename = os.path.join(
+                args.save_dir,
+                f"epoch={epoch}_loss={best_loss:.4f}.pt"
+            )
+            torch.save(checkpoint, filename)
+            logging.info(f"[epoch {epoch}] saved new best checkpoint (loss={best_loss:.4f})")
 
 
 

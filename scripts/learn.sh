@@ -4,7 +4,7 @@
 ##SBATCH -p test
 #SBATCH --account kempner_mzitnik_lab
 #SBATCH -c 16 # number of cores
-#SBATCH --mem 100g # memory pool for all cores
+#SBATCH --mem 200g # memory pool for all cores
 #SBATCH --gres=gpu:1 # gpu
 #SBATCH -t 3-00:00 # time (D-HH:MM)
 ##SBATCH -t 0-12:00 # time (D-HH:MM)

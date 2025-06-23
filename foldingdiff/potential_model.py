@@ -4,7 +4,7 @@ import subprocess
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import math
@@ -394,7 +394,7 @@ class SemiCRFModel(nn.Module):
                 1,
             )
         else:
-            self.zernike_projector = nn.Linear(25, 1)
+            self.zernike_projector = nn.Linear(9, 1)
             self.feats = defaultdict(dict)
     
     @staticmethod
@@ -404,7 +404,7 @@ class SemiCRFModel(nn.Module):
         Compute all (i,j) fingerprints for a single protein t.
         Returns (prot_id, { (i,j): torch.Tensor(fp) }).
         """
-        t, grid_size, padding, order, device = args
+        t, grid_size, padding, order = args
         prot_id = Path(t.fname).stem
         aa_seq  = t.aa
         coords  = t.compute_coords()
@@ -417,7 +417,7 @@ class SemiCRFModel(nn.Module):
                 subcoords = coords_np[3*i:3*j]
                 grid      = voxelize(subcoords, grid_size=grid_size, padding=padding)
                 fp        = compute_3d_zernike(grid, order=order)
-                fps_dict[(i, j)] = torch.as_tensor(fp, device=device)
+                fps_dict[(i, j)] = fp
 
         return prot_id, fps_dict
 
@@ -626,6 +626,7 @@ class SemiCRFModel(nn.Module):
         }
         for task in tasks:
             tasks[task]()
+        
         # spin up one “worker” per compute_*, all running concurrently
         # with ThreadPoolExecutor(max_workers=len(tasks)) as exec:
         #     future_to_name = {
@@ -640,10 +641,25 @@ class SemiCRFModel(nn.Module):
         #         except Exception as e:
         #             print(f"⚠️ {name} failed: {e}")        
 
+    @staticmethod
+    def dump_feat_batch(i, batch_size, save_dir):
+        batch_path = os.path.join(save_dir, f"feats_{batch_size}_{i}.pkl")
+        print(f"[batch {i}] loading {batch_path!r}")
+        with open(batch_path, "rb") as f:
+            feats = pickle.load(f)
+        for prot_id, feat in feats.items():
+            out_path = os.path.join(save_dir, f"{prot_id}.pkl")
+            # you can choose "xb" if you want to avoid overwriting existing files
+            with open(out_path, "wb") as g:
+                pickle.dump(feat, g)
+        print(f"[batch {i}] done")
+        return i        
+
 
     def compute_batch_feats(self, dataset, config, save_dir, batch_size):
-        # compute feats in batches        
-        for i in range((len(dataset)+batch_size-1)//batch_size):                            
+        # compute feats in batches    
+        n_batches = (len(dataset)+batch_size-1)//batch_size
+        for i in range(n_batches):                            
             batch_path = os.path.join(save_dir, f"feats_{batch_size}_{i}.pkl")
             if os.path.exists(batch_path):
                 print(f"batch {i} done, continuing")
@@ -656,13 +672,16 @@ class SemiCRFModel(nn.Module):
                 print(f"done saving feat batch {i}")
                 self.feats = defaultdict(dict)
         print("all feat batches ready")
-        for i in range((len(dataset)+batch_size-1)//batch_size):                            
-            batch_path = os.path.join(save_dir, f"feats_{batch_size}_{i}.pkl")
-            print(f"loading feat batch {i}")
-            feats = pickle.load(open(batch_path, "rb"))
-            for k in feats:
-                self.feats[k] = feats[k]        
-        print("all feats loaded")
+        # cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", mp.cpu_count()))
+        # cpus = min(cpus, 10)
+        # ctx = mp.get_context('spawn')
+        # with ProcessPoolExecutor(max_workers=cpus) as exe:
+        #     # This will print each batch’s completion as they finish:
+        #     for i in exe.map(SemiCRFModel.dump_feat_batch, range(n_batches), [batch_size]*n_batches, [save_dir]*n_batches):
+        #         pass
+        for i in range(n_batches):
+            SemiCRFModel.dump_feat_batch(i, batch_size, save_dir)
+        print("All feats dumped.")
 
         
     def compute_fps(self,
@@ -676,12 +695,11 @@ class SemiCRFModel(nn.Module):
         and shows a tqdm bar as each finishes.
         """
         args_list = [
-            (t, grid_size, padding, order, self.device)
+            (t, grid_size, padding, order)
             for t in dataset
         ]
         if max_workers:
-            ctx = mp.get_context('spawn')
-            with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
                     executor.submit(SemiCRFModel._compute_protein_fps, args): args[0]
                     for args in args_list
@@ -812,7 +830,7 @@ class SemiCRFModel(nn.Module):
     # -----------------------------------------------------------------
     def forward(
         self,
-        prot_id: str,
+        feats: Dict,
         aa_seq: str,
         angles_tensor: torch.Tensor,            # (1, L, num_features)
         coords_tensor: torch.Tensor,            # (3*L, 3)
@@ -843,10 +861,10 @@ class SemiCRFModel(nn.Module):
             L = len(aa_seq)
         
         # 2) pre‑compute residue‑level biochemical feature tensor (L, feat_dim)        
-        plddt = self.feats[prot_id]['plddt']
-        disorder = self.feats[prot_id]['disorder']
-        ss_pred = self.feats[prot_id]['sec']
-        embedding = self.feats[prot_id]['embedding']        
+        plddt = feats['plddt']
+        disorder = feats['disorder']
+        ss_pred = feats['sec']
+        embedding = feats['embedding']        
         res_feats = self.featurizer(
             aa_seq, ss_pred=ss_pred,
             disorder=disorder,
@@ -897,7 +915,8 @@ class SemiCRFModel(nn.Module):
             for l in range(1, max_l + 1):
                 j = i + l
 
-                fp = self.feats[prot_id]['fp'][(i, j)]
+                fp = feats['fp'][(i, j)]
+                fp = torch.as_tensor(fp).to(self.device)
                 descr_score = self.zernike_projector(fp)
 
                 # total score + length bias
@@ -921,8 +940,8 @@ class SemiCRFModel(nn.Module):
         return out, attn_out
 
     # convenience helper identical to your old precompute signature
-    def precompute(self, prot_id, aa_seq, angles_tensor=None, coords_tensor=None, timestep=None, attention_mask=None):
-        return self.forward(prot_id, aa_seq, angles_tensor, coords_tensor, timestep, attention_mask)        
+    def precompute(self, feats, aa_seq, angles_tensor=None, coords_tensor=None, timestep=None, attention_mask=None):
+        return self.forward(feats, aa_seq, angles_tensor, coords_tensor, timestep, attention_mask)        
 
 
 class SemiCRF2DModel(SemiCRFModel):
@@ -985,7 +1004,7 @@ class SemiCRF2DModel(SemiCRFModel):
         Compute all (i, l1, l2) foldseeks for a single protein t.
         Returns (prot_id, { (i,l1,l2): torch.Tensor(foldseek) }).
         """
-        fname, aa_seq, coords, beta_c, max_seg_len, device = args
+        fname, aa_seq, coords, beta_c, max_seg_len = args
         prot_id = Path(fname).stem
         coords_np = coords.cpu().numpy() if torch.is_tensor(coords) else coords
         L = len(aa_seq)
@@ -999,7 +1018,7 @@ class SemiCRF2DModel(SemiCRFModel):
                     cb = beta_c[i-l1:i+l2]
                     n, ca, c = c[0::3], c[1::3], c[2::3]
                     feats, mask, _ = structure2features(ca, n, c, cb)
-                    foldseeks_dict[(i, l1, l2)] = torch.as_tensor(feats, dtype=torch.float32, device=device)
+                    foldseeks_dict[(i, l1, l2)] = feats
 
         return prot_id, foldseeks_dict        
 
@@ -1014,12 +1033,11 @@ class SemiCRF2DModel(SemiCRFModel):
         and shows a tqdm bar as each finishes.
         """
         args_list = [
-            (t.fname, t.aa, t.compute_coords(), t.beta_coords, max_L, self.device)
+            (t.fname, t.aa, t.compute_coords(), t.beta_coords, max_L)
             for t in dataset
         ]
         if max_workers:
-            ctx = mp.get_context('spawn')
-            with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
                     executor.submit(SemiCRF2DModel._compute_protein_foldseeks, args): args[0]
                     for args in args_list
@@ -1040,13 +1058,8 @@ class SemiCRF2DModel(SemiCRFModel):
     # -----------------------------------------------------------------
     def forward(
         self,
-        prot_id: str,
-        aa_seq: str,
-        angles_tensor: torch.Tensor,            # (1, L, num_features)
-        coords_tensor: torch.Tensor,            # (3*L, 3)
-        timestep: torch.Tensor,                 # (1,) or (1,1)
-        attention_mask: torch.Tensor,           # (1, L)
-        batch_size: int = 64
+        feats: Dict,
+        aa_seq: str
     ) -> List[List[torch.Tensor]]:
         """
         Returns:
@@ -1058,10 +1071,10 @@ class SemiCRF2DModel(SemiCRFModel):
         L = len(aa_seq)
         
         # 2) pre‑compute residue‑level biochemical feature tensor (L, feat_dim)        
-        plddt = self.feats[prot_id]['plddt']
-        disorder = self.feats[prot_id]['disorder']
-        ss_pred = self.feats[prot_id]['sec']
-        embedding = self.feats[prot_id]['embedding']        
+        plddt = feats['plddt']
+        disorder = feats['disorder']
+        ss_pred = feats['sec']
+        embedding = feats['embedding']        
         res_feats = self.featurizer(
             aa_seq, ss_pred=ss_pred,
             disorder=disorder,
@@ -1133,7 +1146,8 @@ class SemiCRF2DModel(SemiCRFModel):
             max_l = min(self.max_seg_len, L - i)
             for l in range(1, max_l + 1):
                 j = i + l
-                fp = self.feats[prot_id]['fp'][(i, j)]
+                fp = feats['fp'][(i, j)]
+                fp = torch.as_tensor(fp, dtype=torch.float32).to(self.device)
                 descr_score = self.zernike_projector(fp)
                 # total score + length bias
                 unary_out[i][l] += descr_score.squeeze()
@@ -1143,7 +1157,8 @@ class SemiCRF2DModel(SemiCRFModel):
             for l2 in range(1, max_l2 + 1):
                 max_l1 = min(self.max_seg_len, i)
                 for l1 in range(1, max_l1 + 1):
-                    foldseek = self.feats[prot_id]['foldseek'][(i, l1, l2)]
+                    foldseek = feats['foldseek'][(i, l1, l2)]                    
+                    foldseek = torch.as_tensor(foldseek, dtype=torch.float32).to(self.device)
                     foldseek = self.seg_pair_aggregator(foldseek)
                     descr_score = self.foldseek_projector(foldseek)
                     edge_out[i][l1][l2] += descr_score.squeeze()
@@ -1162,6 +1177,11 @@ class SemiCRF2DModel(SemiCRFModel):
                     edge_out[i][l1][l2] += self.gamma * (l1+l2)
 
         return unary_out, unary_attn_out, edge_out, edge_attn_out
+
+
+    # convenience helper identical to your old precompute signature
+    def precompute(self, feats, aa_seq):
+        return self.forward(feats, aa_seq)   
     
 
 def zero_initialize(self):
@@ -1177,6 +1197,9 @@ def l1_penalty(self):
     for param in self.parameters():
         l1_sum += param.abs().sum()
     return l1_sum        
+
+
+
 
     
 class AngleTransformer(nn.Module):
