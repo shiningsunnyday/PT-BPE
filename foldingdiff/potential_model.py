@@ -661,12 +661,18 @@ class SemiCRFModel(nn.Module):
         n_batches = (len(dataset)+batch_size-1)//batch_size
         for i in range(n_batches):                            
             batch_path = os.path.join(save_dir, f"feats_{batch_size}_{i}.pkl")
-            if os.path.exists(batch_path):
+            all_dumped = all([os.path.exists(os.path.join(save_dir, f"{Path(t.fname).stem}.pkl")) \
+                for t in dataset[batch_size*i:batch_size*(i+1)]])
+            if all_dumped:
+                print(f"batch {i} already dumped")
+                continue            
+            elif os.path.exists(batch_path):
                 print(f"batch {i} done, continuing")
                 continue
             else:
                 print(f"begin feat computation batch {i}")
-                self.compute_feats(dataset[batch_size*i:batch_size*(i+1)], config)        
+                # check if already all dumped                
+                self.compute_feats(dataset[batch_size*i:batch_size*(i+1)], config)
                 print(f"begin saving feat batch {i}")
                 pickle.dump(self.feats, open(batch_path, "wb+"))
                 print(f"done saving feat batch {i}")
@@ -680,7 +686,12 @@ class SemiCRFModel(nn.Module):
         #     for i in exe.map(SemiCRFModel.dump_feat_batch, range(n_batches), [batch_size]*n_batches, [save_dir]*n_batches):
         #         pass
         for i in range(n_batches):
-            SemiCRFModel.dump_feat_batch(i, batch_size, save_dir)
+            all_dumped = all([os.path.exists(os.path.join(save_dir, f"{Path(t.fname).stem}.pkl")) \
+                for t in dataset[batch_size*i:batch_size*(i+1)]])
+            if all_dumped:
+                continue
+            else:
+                SemiCRFModel.dump_feat_batch(i, batch_size, save_dir)
         print("All feats dumped.")
 
         

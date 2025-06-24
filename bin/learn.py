@@ -11,6 +11,7 @@ if torch.cuda.is_available():
 from torch import optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import sys
 from tqdm import tqdm
 import time
 import argparse
@@ -369,8 +370,13 @@ class FeatDataset(Dataset):
         t = self.tokenizers[idx]
         prot_id = Path(t.fname).stem
         path = os.path.join(self.save_dir, f"{prot_id}.pkl")
-        feats = pickle.load(open(path, "rb"))
-        return t, feats
+        try:
+            feats = pickle.load(open(path, "rb"))
+        except Exception as e:
+            # this will go straight to stderr and flush immediately
+            print(f"Failed to unpickle {path}: {e}", file=sys.stderr, flush=True)
+            raise
+        return idx, t, feats
 
 
 def collate_fn(batch):
@@ -394,7 +400,7 @@ def find_latest_checkpoint(save_dir: str) -> Path:
     # Option 2: alternatively, sort by file‐modified time
     # latest_by_epoch = max(cks, key=lambda p: p.stat().st_mtime)
 
-    return latest_by_epoch
+    return latest_by_epoch, epoch_num(latest_by_epoch)
 
 # ---------------------------------------------------------------------
 # main training function – rewritten for SemiCRFModel
@@ -447,20 +453,25 @@ def main(args) -> None:
         dataset = DataLoader(dataset, collate_fn=collate_fn, batch_size=1, num_workers=4, prefetch_factor=1, persistent_workers=True, pin_memory=True)
 
     # -----------------------------------------------------------------
-    checkpoint_path = find_latest_checkpoint(args.save_dir)    
-    ckpt = torch.load(checkpoint_path, map_location=model.device)
-    if isinstance(ckpt, dict):
-        model.load_state_dict(ckpt['model_state'])
-        opt.load_state_dict(ckpt['optim_state'])
-        best_loss = ckpt['best_loss']
-        start_epoch = ckpt['epoch'] + 1
-    else:
-        model.load_state_dict(ckpt)
+    try:
+        checkpoint_path, epoch = find_latest_checkpoint(args.save_dir)   
+        ckpt = torch.load(checkpoint_path, map_location=model.device)         
+        if 'model_state' in ckpt:
+            model.load_state_dict(ckpt['model_state'])
+            opt.load_state_dict(ckpt['optim_state'])
+            best_loss = ckpt['best_loss']            
+            assert ckpt['epoch'] == epoch
+            start_epoch = ckpt['epoch'] + 1
+        else:
+            model.load_state_dict(ckpt)
+            best_loss = float('inf')
+            start_epoch = epoch + 1
+    except FileNotFoundError:
         best_loss = float('inf')
         start_epoch = 0
     for epoch in range(start_epoch, args.epochs):
         total_loss = 0.0
-        for idx, (t, feats) in tqdm(enumerate(dataset), desc=f"epoch {epoch}"):
+        for _, (idx, t, feats) in tqdm(enumerate(dataset), desc=f"epoch {epoch}"):
             opt.zero_grad()
 
             # --------- build “angles” tensor the same way as before ---
@@ -562,10 +573,9 @@ def main(args) -> None:
             else:                
                 prob = torch.exp(map_a[N] - log_a[N]).item()
             if prob > 0.5:   # arbitrary threshold for visualisation
-                path = Path(os.path.join(args.plot_dir, f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"))
+                path = Path(os.path.join(args.save_dir, f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"))
                 attn_path = path.with_name(path.stem + "_attn" + path.suffix)
-                t.visualize(path,
-                                vis_dihedral=False)
+                t.visualize(path, vis_dihedral=False)
                 plot_feature_importance(attn_agg.detach().cpu().numpy(), model.aggregator.per_res_labels, attn_path)
 
         # ---------------- checkpoint if improved ---------------------
