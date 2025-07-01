@@ -28,6 +28,7 @@ class BinaryTreeBuilder:
     def __init__(self):
         # Use a regular dict mapping keys to nodes.
         self.nodes = {}
+        self.leaves = {}
 
     def add_leaf(self, key):
         """
@@ -36,6 +37,7 @@ class BinaryTreeBuilder:
         if key in self.nodes:
             raise ValueError(f"Key '{key}' already exists.")
         self.nodes[key[0]] = Node(key)
+        self.leaves[key[0]] = Node(key)
         # print(f"Added leaf with key '{key}'.")
 
     def combine(self, left_key, right_key, parent_key):
@@ -67,6 +69,25 @@ class BinaryTreeBuilder:
         # Insert the new parent node.
         self.nodes[parent_key[0]] = parent
         # print(f"Combined nodes '{left_key}' and '{right_key}' into new parent with key '{parent_key}'.")
+    
+    def split(self, parent_key, left_key, right_key):
+        """
+        Split parent_key into left_key, right_key
+
+        - left: the key of the new left node
+        - right: the key of the new right node
+        """
+        assert self.nodes[parent_key[0]].left is None
+        assert self.nodes[parent_key[0]].right is None
+        left_node = Node(left_key)
+        right_node = Node(right_key)
+        self.leaves.pop(parent_key[0])
+        self.leaves[left_key[0]] = left_node
+        self.leaves[right_key[0]] = right_node
+        self.nodes[parent_key[0]].left = left_node
+        self.nodes[parent_key[0]].right = right_node
+
+        
 
     def get_tree(self):
         """

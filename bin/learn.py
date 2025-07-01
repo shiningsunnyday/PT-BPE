@@ -4,6 +4,10 @@ from foldingdiff.tokenizer import Tokenizer
 from foldingdiff.plotting import plot_feature_importance
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
 import torch
+import os
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 import gc
 import psutil
 if torch.cuda.is_available():
@@ -291,7 +295,7 @@ def obtain_span(t, a, b, bert=False):
         return np.array(span)
 
 
-def get_model(args, max_len):
+def get_model(args, device, max_len):
     if args.model == "transformer":
         encoder = AngleTransformer(d_model=32, nhead=4, num_layers=2, max_len=max_len)
     elif args.model == "bert":
@@ -338,7 +342,7 @@ def get_model(args, max_len):
             seg_pair_potential=seg_pair_mlp,
             length_bias=args.gamma,          # γ from your DP
             max_seg_len=args.max_seg_len,
-            device=args.cuda
+            device=device
         )
     else:
         model = SemiCRFModel(
@@ -348,9 +352,9 @@ def get_model(args, max_len):
             seg_potential=seg_mlp,
             length_bias=args.gamma,          # γ from your DP
             max_seg_len=args.max_seg_len,
-            device=args.cuda
+            device=device
         )
-    return model.to(args.cuda)
+    return model.to(device)
 
 
 class FeatDataset(Dataset):
@@ -419,8 +423,7 @@ def main(args) -> None:
         logging.info(f"ckpts : {args.save_dir}")
     
     json.dump(args.__dict__, open(os.path.join(args.save_dir, 'args.json'), 'w+'))
-    logging.info(f"CUDA available : {torch.cuda.is_available()}")
-    logging.info(f"Using device   : {args.cuda}")
+    logging.info(f"CUDA available : {torch.cuda.is_available()}")    
 
     # ---------------- load data --------------------------------------
     raw_ds = FullCathCanonicalCoordsDataset(
@@ -434,12 +437,24 @@ def main(args) -> None:
     max_len = max([3 * (3 * t.n - 1) - 2 for t in dataset])
 
     # ---------------- build model ------------------------------------
-    model = get_model(args, max_len=max_len)           # returns SemiCRFModel
-    model.to(args.cuda)
+    # --- 1) Detect distributed or not ---
+    is_ddp = False
+    if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
+        is_ddp = True
+        dist.init_process_group(backend="nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        # single‐GPU (or CPU) fallback
+        device = torch.device(args.cuda if torch.cuda.is_available() else "cpu")     
+
+    logging.info(f"Using device   : {device}")        
+    model = get_model(args, device, max_len=max_len)           # returns SemiCRFModel
+    if is_ddp:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     logging.info(f"Model allocated on {next(model.parameters()).device}")
-
     opt = optim.Adam(model.parameters())
-
     best_loss = float("inf")
     model.train()
 
@@ -448,28 +463,52 @@ def main(args) -> None:
         if args.config:
             config = json.load(open(args.config))
         # compute feats in batches            
-        model.compute_batch_feats(dataset, config, save_dir=args.save_dir, batch_size=args.batch_size)
+        if is_ddp:
+            obj = model.module
+        else:
+            obj = model
+        obj.compute_batch_feats(dataset, config, save_dir=args.save_dir, batch_size=args.batch_size)
         dataset = FeatDataset(dataset, args.save_dir)
-        dataset = DataLoader(dataset, collate_fn=collate_fn, batch_size=1, num_workers=4, prefetch_factor=1, persistent_workers=True, pin_memory=True)
+        # dataset = DataLoader(dataset, collate_fn=collate_fn, batch_size=1, num_workers=4, prefetch_factor=1, persistent_workers=True, pin_memory=True)
+        sampler = DistributedSampler(dataset)
+        if is_ddp:
+            sampler = DistributedSampler(dataset)
+            shuffle = False
+        else:
+            sampler = None
+            shuffle = True        
+        dataset = DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=shuffle,
+            sampler=sampler,
+            num_workers=4,
+            prefetch_factor=2, 
+            persistent_workers=True,
+            pin_memory=True,
+            collate_fn=collate_fn,
+        )
 
     # -----------------------------------------------------------------
     try:
         checkpoint_path, epoch = find_latest_checkpoint(args.save_dir)   
         ckpt = torch.load(checkpoint_path, map_location=model.device)         
         if 'model_state' in ckpt:
-            model.load_state_dict(ckpt['model_state'])
+            obj.load_state_dict(ckpt['model_state'])
             opt.load_state_dict(ckpt['optim_state'])
             best_loss = ckpt['best_loss']            
             assert ckpt['epoch'] == epoch
             start_epoch = ckpt['epoch'] + 1
         else:
-            model.load_state_dict(ckpt)
+            obj.load_state_dict(ckpt)
             best_loss = float('inf')
             start_epoch = epoch + 1
     except FileNotFoundError:
         best_loss = float('inf')
         start_epoch = 0
     for epoch in range(start_epoch, args.epochs):
+        if is_ddp:
+            sampler.set_epoch(epoch)
         total_loss = 0.0
         for _, (idx, t, feats) in tqdm(enumerate(dataset), desc=f"epoch {epoch}"):
             opt.zero_grad()
@@ -482,7 +521,7 @@ def main(args) -> None:
                 # --------- call SemiCRFModel.precompute -------------------
                 if args.edge:
                     try:
-                        unary_out, unary_attn_scores, edge_out, edge_attn_scores = model.precompute(
+                        unary_out, unary_attn_scores, edge_out, edge_attn_scores = obj.precompute(
                             feats         = feats,
                             aa_seq        = t.aa              # Tokenizer stores AA sequence
                         )  
@@ -491,14 +530,13 @@ def main(args) -> None:
                         print(t.fname)
                         raise
                 else:
-                    out, attn_scores = model.precompute(
+                    out, attn_scores = obj.precompute(
                         feats         = feats,
                         aa_seq        = t.aa,              # Tokenizer stores AA sequence
                         coords_tensor = coords
                     )                                       # out[i][l] ready for DP
             else:
-                N = 3 * t.n - 1 # bond level
-        
+                N = 3 * t.n - 1 # bond level        
                 bert_flag = args.model == "bert"
                 span = obtain_span(t, 0, N, bert=bert_flag)
 
@@ -506,14 +544,14 @@ def main(args) -> None:
                 span_tensor = (
                     torch.tensor(span, dtype=torch.float32)
                         .reshape(1, -1, in_feat)
-                        .to(args.cuda)
+                        .to(device)
                 )
                 attention_mask = torch.ones(1, span_tensor.size(1),
-                                            dtype=torch.long, device=args.cuda)
-                timestep = torch.ones(1, 1, dtype=torch.long, device=args.cuda)
+                                            dtype=torch.long, device=device)
+                timestep = torch.ones(1, 1, dtype=torch.long, device=device)
 
                 # --------- call SemiCRFModel.precompute -------------------
-                out, attn_scores = model.precompute(
+                out, attn_scores = obj.precompute(
                     aa_seq        = t.aa,              # Tokenizer stores AA sequence
                     angles_tensor = span_tensor,
                     timestep      = timestep,
@@ -558,13 +596,15 @@ def main(args) -> None:
             total_loss += loss.item()
 
             # --------------- (optional) diagnostics -------------------
-            if torch.cuda.is_available():
-                alloc = torch.cuda.memory_allocated() / 1024**2
-                reserv = torch.cuda.memory_reserved() / 1024**2
-                logging.info(f"E{epoch} I{idx}  GPU MB  alloc {alloc:.1f}  reserv {reserv:.1f}")
-
-            cpu_mem = psutil.Process(os.getpid()).memory_info().rss / 1024**2
-            logging.info(f"E{epoch} I{idx}  CPU MB {cpu_mem:.1f}")
+            is_main = (not is_ddp) or dist.get_rank() == 0
+            if is_main:
+                if torch.cuda.is_available():
+                    alloc = torch.cuda.memory_allocated() / 1024**2
+                    reserv = torch.cuda.memory_reserved() / 1024**2
+                    logging.info(f"E{epoch} I{idx}  GPU MB  alloc {alloc:.1f}  reserv {reserv:.1f}")
+                
+                cpu_mem = psutil.Process(os.getpid()).memory_info().rss / 1024**2
+                logging.info(f"E{epoch} I{idx}  CPU MB {cpu_mem:.1f}")
 
             # segmentation probability
             if args.edge:
@@ -576,27 +616,30 @@ def main(args) -> None:
                 path = Path(os.path.join(args.save_dir, f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"))
                 attn_path = path.with_name(path.stem + "_attn" + path.suffix)
                 t.visualize(path, vis_dihedral=False)
-                plot_feature_importance(attn_agg.detach().cpu().numpy(), model.aggregator.per_res_labels, attn_path)
+                plot_feature_importance(attn_agg.detach().cpu().numpy(), obj.aggregator.per_res_labels, attn_path)
 
         # ---------------- checkpoint if improved ---------------------
-        if total_loss < best_loss:
-            best_loss = total_loss
-            checkpoint = {
-                'epoch':         epoch,
-                'model_state':   model.state_dict(),
-                'optim_state':   opt.state_dict(),
-                'best_loss':     best_loss,
-                # optionally: 'scheduler_state': scheduler.state_dict(),
-                # you can add any other metadata you like
-            }
+        if (not is_ddp) or dist.get_rank() == 0:
+            if total_loss < best_loss:
+                best_loss = total_loss
+                checkpoint = {
+                    'epoch':         epoch,
+                    'model_state':   obj.state_dict(),
+                    'optim_state':   opt.state_dict(),
+                    'best_loss':     best_loss,
+                    # optionally: 'scheduler_state': scheduler.state_dict(),
+                    # you can add any other metadata you like
+                }
 
-            filename = os.path.join(
-                args.save_dir,
-                f"epoch={epoch}_loss={best_loss:.4f}.pt"
-            )
-            torch.save(checkpoint, filename)
-            logging.info(f"[epoch {epoch}] saved new best checkpoint (loss={best_loss:.4f})")
+                filename = os.path.join(
+                    args.save_dir,
+                    f"epoch={epoch}_loss={best_loss:.4f}.pt"
+                )
+                torch.save(checkpoint, filename)
+                logging.info(f"[epoch {epoch}] saved new best checkpoint (loss={best_loss:.4f})")
 
+    if is_ddp:
+        dist.destroy_process_group()    
 
 
 if __name__ == "__main__":

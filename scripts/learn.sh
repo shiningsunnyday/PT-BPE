@@ -5,7 +5,7 @@
 #SBATCH --account kempner_mzitnik_lab
 #SBATCH -c 16 # number of cores
 #SBATCH --mem 200g # memory pool for all cores
-#SBATCH --gres=gpu:1 # gpu
+#SBATCH --gres=gpu:4 # gpu
 #SBATCH -t 3-00:00 # time (D-HH:MM)
 ##SBATCH -t 0-12:00 # time (D-HH:MM)
 #SBATCH -o /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_learn.%j.out # STDOUT
@@ -32,10 +32,17 @@ else
   extra="--auto"
 fi
 
+SAVE_DIR=$7
+ID="${SAVE_DIR##*/}"
+SRC="/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff/ckpts/$ID/"
+DST="/n/netscratch/mzitnik_lab/Lab/${USER}/$ID/"
+mkdir -p "$DST"
+rsync -av --ignore-existing "${SRC}"*.pkl "$DST"
 
+export NGPU=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 case "$2" in
   1)
-    python bin/learn.py --data-dir $3 --config config.json --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" --max-seg-len 10000000000 --l1 $6 $extra $debug;;
+    torchrun --nproc_per_node=$NGPU bin/learn.py --data-dir $3 --config config.json --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" --max-seg-len 10000000000 --l1 $6 $extra $debug;;
   *)
-    python bin/learn.py --data-dir $3 --config config.json --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" --edge --max-seg-len 20 --l1 $6 $extra $debug
+    torchrun --nproc_per_node=$NGPU bin/learn.py --data-dir $3 --config config.json --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" --edge --max-seg-len 20 --l1 $6 $extra $debug
 esac

@@ -3,6 +3,7 @@ from pathlib import Path
 import csv
 import argparse
 import os
+import json
 import pandas as pd
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, adjusted_rand_score, mutual_info_score
@@ -275,9 +276,18 @@ def random_partition(seq_len, num_segments):
 def main(args):
     bpe = pickle.load(open(args.pkl_file, 'rb'))
     all_metrics = []
-    for i in range(len(bpe.tokenizers)):
-        t = bpe.tokenizers[i]
+    sorted_tokenizers = sorted(bpe.tokenizers, key=lambda t: Path(t.fname).stem)
+    for i in range(len(sorted_tokenizers)):
+        t = sorted_tokenizers[i]
         p = Path(t.fname)
+        prot_id = p.stem
+        path = os.path.join(args.save_dir, f"{prot_id}.json")
+        if os.path.exists(path):
+            print(f"eval {prot_id}")
+            vals = json.load(open(path)).values()
+        else:
+            continue
+            # vals = t.bond_to_token.values()
         r = p.relative_to(os.getcwd())
         n = Path(p.name)
         out = Path(os.path.join('./scripts/', r, n.with_suffix('.domtblout')))
@@ -291,7 +301,7 @@ def main(args):
             # parse_crh(out, csv_out)
             df = pd.read_csv(csv_out)
             pred_segs = []
-            for (start, _, l) in t.bond_to_token.values():
+            for (start, _, l) in vals:
                 if l % 3 != 0:
                     assert start + l == 3*t.n-1
                     assert l % 3 == 2
@@ -403,5 +413,6 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pkl_file")
+    parser.add_argument("--save_dir")
     args = parser.parse_args()
     main(args)    
