@@ -275,9 +275,18 @@ class CathCanonicalAnglesDataset(Dataset):
             for ext in [".pdb", ".pdb.gz"]:
                 fnames.extend(glob.glob(os.path.join(pdbs, f"*{ext}")))
             assert fnames, f"No PDB files found in {pdbs}"
-            logging.info(f"Found {len(fnames)} PDB files in {pdbs}")
+            logging.info(f"Found {len(fnames)} PDB files in {pdbs}")       
         else:  # Should be a keyword
-            if pdbs == "cath":
+            if pdbs == "all":
+                ext = ".pdb"
+                pat = os.path.join(LOCAL_DATA_DIR, "**/*.pdb")
+                files = glob.glob(pat, recursive=True)
+                c = Counter([Path(f).parent.relative_to(LOCAL_DATA_DIR) for f in files])
+                logging.info(f"Counter {c}")
+                num_uniq = len(set([Path(f).name for f in files]))                     
+                logging.info(f"{num_uniq} unique")
+                fnames = files
+            elif pdbs == "cath":
                 fnames = glob.glob(os.path.join(CATH_DIR, "dompdb", "*"))
                 assert fnames, f"No files found in {CATH_DIR}/dompdb"
             elif pdbs == "alphafold":

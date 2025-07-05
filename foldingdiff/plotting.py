@@ -300,13 +300,21 @@ def save_circular_histogram(angles, path=None, bins=10, title=None):
 
 
 def legend_key_to_tuple(label):
-    tup = []
-    for sublabel in label.split():
-        if sublabel.isdigit():
-            tup.append(int(sublabel))
-        else:
-            tup.append(sublabel)
-    return tuple(tup)
+    if label in ['N', 'CA', 'C']:
+        return (0,)
+    else:
+        tuple_pat = re.compile(r'^Token\s+(\(\d+,\s*\d+\))$')
+        int_pat = re.compile(r'^Token\s+(\d+)$')
+        match = tuple_pat.match(label)
+        if match is None:
+            match = int_pat.match(label)
+        assert match is not None
+        assert len(match.groups()) == 1
+        v = eval(match.group(1))
+        if isinstance(v, tuple):
+            return v
+        else:            
+            return (v,)
 
 # Helper: Compute dihedral angle from four points.
 def dihedral(p0, p1, p2, p3):
@@ -408,7 +416,7 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
             for i in range(length):
                 segment = token_coords[i:i+2]
                 ax.plot(segment[:, 0], segment[:, 1], segment[:, 2],
-                        color=cmap(bt % 10), 
+                        color=cmap((sum(bt) if isinstance(bt, tuple) else bt) % 10), 
                         label=f"Token {bt}" if i == 0 else None,
                         linewidth=2)
         # Highlight the boundary atoms between tokens.
@@ -536,7 +544,7 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
     ax.set_zlim(*zlim)    
     handles, labels = ax.get_legend_handles_labels()
     unique = {}
-    # Sorting legend entries (assumes helper legend_key_to_tuple is defined elsewhere)
+    # Sorting legend entries (assumes helper legend_key_to_tuple is defined elsewhere)    
     for handle, label in sorted(zip(handles, labels), key=lambda it: legend_key_to_tuple(it[1])):
         if label not in unique:
             unique[label] = handle
@@ -544,11 +552,14 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
     labels = list(unique.keys())
     if tokens is not None:
         for i, label in enumerate(labels):
-            token_id_match = re.match('Token (\d+)', label)
-            if token_id_match is None:
+            bt = legend_key_to_tuple(label)
+            if bt == (0,):
                 continue
-            bt = int(token_id_match.groups()[0])
-            color = cmap(bt % 10)
+            if len(bt) == 1:
+                bt = bt[0]                
+                color = cmap(bt % 10)
+            else:
+                color = cmap(sum(bt) % 10)
             handles[i] = BackboneFragment(bt, token_lookup[bt], color)
         ncol = (len(handles)+n_per_row-1)//n_per_row
         handles, labels = column_fill(handles, labels, ncol)

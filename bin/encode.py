@@ -119,18 +119,28 @@ def str2dict(v):
     for (a, b) in pairs:
         bins[int(a)] = int(b)
     return bins
+
+def int_or_inf(x: str):
+    # allow case‐insensitive “inf”
+    if x.lower() in ("inf", "infinity"):
+        return float("inf")
+    try:
+        return int(x)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"‘{x}’ is not an integer or ‘inf’")
     
 def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
     # folder
     parser.add_argument("--auto", action='store_true', help='auto set folders')
+    parser.add_argument("--base-dir", type=str, default="./")
     parser.add_argument("--save-dir", type=str, default="plots/bpe", 
                         help="Directory to save output files (images, pdb files, plots, etc.).")
     parser.add_argument("--log-dir", type=str, default="logs", 
                         help="Directory where log files will be saved.")
-    parser.add_argument("--data-dir", type=str, default="cath", choices=[
-         'cath', 'homo', 'ec', "bindint", "bindbio", "repeat", "catint", "catbio", "conserved",
-         ], help="Which dataset.")    
+    parser.add_argument("--data-dir", type=str, default="cath", help="""Which dataset. Suggested choices:  \
+                        'cath', 'homo', 'ec', 'bindint', 'bindbio', 'repeat', 'catint', 'catbio', 'conserved'
+                        """)
     parser.add_argument("--ckpt-dir", type=str, help="continue from bpe.pkl")
     parser.add_argument("--toy", type=int, default=0, 
                             help="Number of PDB files. 0 for all.")    
@@ -143,9 +153,25 @@ def parse_args():
     parser.add_argument("--bins", type=str2dict, help=":-separated number of bins per size step, example: 1-100:10-10 means 100 bins from token size 1 to 9, 10 bins from 10 onwards", default="1-10")
     parser.add_argument("--sec", type=str2bool, default=False, help="whether to compute sec structures to guide token discovery")
     parser.add_argument("--sec-eval", type=str2bool, default=False, help="whether to evaluate sec structure overlap")
-    parser.add_argument("--p-min-size", default=float("inf"), help="when to start using rmsd binning")
+    parser.add_argument(
+        "--p-min-size",
+        type=int_or_inf,
+        default=float("inf"),
+        help="when to start using rmsd binning; 0 to turn off bpe; or ‘inf’ to mean no limit",
+    )
+    parser.add_argument(
+        "--num-p",
+        type=int,
+        default=3,
+        help="num partitions for rmsd binning",
+    )    
     parser.add_argument("--cache", action='store_true', help="whether to use cached data")
-    return parser.parse_args()
+    parser.add_argument("--save-every", type=int, default=10, help="how often to dump")
+    args = parser.parse_args()
+    # Post‐parse validation
+    if args.p_min_size == 0 and args.bins != {1: 1}:
+        parser.error("--bins must be '1-1' when --p-min-size is 0")    
+    return args
 
 def amino_acid_sequence(fname):
     d3to1 = {'CYS': 'C', 'ASP': 'D', 'SER': 'S', 'GLN': 'Q', 'LYS': 'K', 'ILE': 'I', 'PRO': 'P', 'THR': 'T', 'PHE': 'F', 'ASN': 'N',  'GLY': 'G', 'HIS': 'H', 'LEU': 'L', 'ARG': 'R', 'TRP': 'W',  'ALA': 'A', 'VAL':'V', 'GLU': 'E', 'TYR': 'Y', 'MET': 'M'}       
@@ -166,15 +192,15 @@ def main():
         ckpt_dir = Path(args.ckpt_dir)
         _dir = ckpt_dir
         name = _dir.name
-        plot_dir = f'./plots/learn/{name}'        
+        plot_dir = os.path.join(args.base_dir, f'./plots/learn/{name}')
         assert os.path.exists(plot_dir)
         assert os.path.exists(_dir)
         setattr(args, 'plot_dir', plot_dir)
         setattr(args, 'save_dir', _dir)            
     elif args.auto:
         cur_time = time.time()
-        setattr(args, 'plot_dir', f'./plots/learn/{cur_time}')
-        setattr(args, 'save_dir', f'./ckpts/{cur_time}')
+        setattr(args, 'plot_dir', os.path.join(args.base_dir, f'./plots/learn/{cur_time}'))
+        setattr(args, 'save_dir', os.path.join(args.base_dir, f'./ckpts/{cur_time}'))
         os.makedirs(args.plot_dir, exist_ok=True)
         os.makedirs(args.save_dir, exist_ok=True)
     args_path = os.path.join(args.save_dir, "args.txt")
@@ -244,8 +270,15 @@ def main():
         logger.info(f"loading {ckpt} at iter={_iter}")
         bpe = pickle.load(open(ckpt, 'rb'))
     else:
-        bpe = BPE(dataset.structures, bins=args.bins, bin_strategy=args.bin_strategy, save_dir=args.save_dir, rmsd_partition_min_size=args.p_min_size, compute_sec_structs=args.sec, plot_iou_with_sec_structs=args.sec_eval,
-        res_init=args.res_init)
+        bpe = BPE(dataset.structures, 
+                  bins=args.bins, 
+                  bin_strategy=args.bin_strategy, 
+                  save_dir=args.save_dir, 
+                  rmsd_partition_min_size=args.p_min_size, 
+                  num_partitions=args.num_p,
+                  compute_sec_structs=args.sec, 
+                  plot_iou_with_sec_structs=args.sec_eval,                  
+                  res_init=args.res_init)
         # use this for sanity check
         bpe.initialize()
         bpe.bin()    
@@ -276,7 +309,7 @@ def main():
                 print(f"frames have different sizes")
         bpe.step()        
         bpe.tokenizers[0].bond_to_token.tree.visualize(os.path.join(args.save_dir, f'tokens_iter={t}.png'), horizontal_gap=0.5, font_size=6)
-        if t % 10 == 0:
+        if t % args.save_every == 0:
             # save
             pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_iter={t}.pkl'), 'wb+'))
             time_path = os.path.join(args.save_dir, f"times_iter={t}.png")            

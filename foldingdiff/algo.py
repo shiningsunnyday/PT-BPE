@@ -150,7 +150,7 @@ def k_means(strucs, k, max_iterations=10, tol=0.1):
     return medoids, assignments
 
 
-def k_medoids(strucs, k, max_iterations=100, tol=1e-4):
+def k_medoids(strucs, k, max_iterations=10, tol=1e-4):
     """
     Perform k-medoids clustering on a set of structures.
 

@@ -2,7 +2,7 @@
 #
 #SBATCH -p test # partition (queue)
 #SBATCH -c 10 # number of cores
-#SBATCH --mem 50g # memory pool for all cores
+#SBATCH --mem 500g # memory pool for all cores
 #SBATCH -t 0-12:00 # time
 #SBATCH -o /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_encode.%j.out # STDOUT
 #SBATCH -e /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_encode.%j.err # STDERR
@@ -21,13 +21,22 @@ cd "/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff"
 toy=$1
 data_dir=$2
 pad="512"
-bins="1-20"
-bin_strat="histogram"
+bins=$3
+bin_strat="uniform"
 sec="False"
 res_init="true"
-# ckpt_dir=$7
+save_every=1
 
-# base command
+extra=""
+
+if [ -n "$4" ]; then
+  extra="$extra --p-min-size $4"
+fi
+
+if [ -n "$5" ]; then
+  extra="$extra --num-p $5"
+fi
+
 PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff/bin/python -m bin.encode \
   --auto \
@@ -36,8 +45,9 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --res-init $res_init \
   --sec $sec \
   --data-dir $data_dir \
+  --save-every $save_every \
   --log-dir /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/logs \
   --pad $pad \
-  --save-dir /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/plots \
   --toy $toy \
-  --cache
+  --cache \
+  $extra

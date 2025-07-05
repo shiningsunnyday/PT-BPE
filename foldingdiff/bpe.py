@@ -1,6 +1,6 @@
 from foldingdiff.tokenizer import *
 from foldingdiff.plotting import *
-# from foldingdiff.algo import *
+from foldingdiff.algo import *
 import heapq
 import json
 import logging
@@ -43,7 +43,7 @@ class BPE():
         bins: resolution of discretization, dict from size to num_bins
         bin_strategy: how to bin values
         compute_sec_structs: whether to use secondary structure count to define token pair priority
-        rmsd_packing_min_size: when to start using rmsd partitioning
+        rmsd_packing_min_size: when to start using rmsd partitioning, if 0 run with special setting
         num_partitions: how many partitions
         """
         self.tokenizers = []
@@ -53,6 +53,7 @@ class BPE():
         self.compute_sec_structs = compute_sec_structs
         self.plot_iou_with_sec_structs = plot_iou_with_sec_structs
         self.rmsd_partition_min_size = rmsd_partition_min_size
+        self.rmsd_only = rmsd_partition_min_size == 0
         self.num_partitions = num_partitions
         self.res_init = res_init
         self.bins = bins
@@ -98,15 +99,27 @@ class BPE():
                 for i in range(t.n):
                     start = 3*i
                     length = 3 if i < t.n-1 else 2
-                    geo_dict = t.token_geo(start, length)        
-                    key = self._bin_val(geo_dict)
+                    geo = t.token_geo(start, length)
+                    for k in geo:
+                        if k not in Tokenizer.BOND_ANGLES+Tokenizer.DIHEDRAL_ANGLES:
+                            continue
+                        quant_vals = []
+                        for i, v in enumerate(geo[k]):
+                            lookup = self._thresholds[length]
+                            v = (v+2*np.pi) % (2*np.pi) # Convert to [0, 2*pi]
+                            ind = BPE.get_ind(v, lookup[k])
+                            quant_vals.append(ind)      
+                        geo[k] = quant_vals
+
+                    key = self._bin_val(geo)
                     key_str = BPE.hash_geo(key)
                     if key_str not in label_dict:
                         n = len(label_dict)
                         label_dict[key_str] = n
                     else:
                         n = label_dict[key_str]
-                    t.set_token_geo(start, length, key)
+                    if not self.rmsd_only:
+                        t.set_token_geo(start, length, key)
                     labels.append(n)
                 # 3*(t.n-1) + 2 bonds
                 new_tokens = [(3*i, labels[i], 3) for i in range(t.n-1)] + [(3*t.n-3, labels[t.n-1], 2)]
@@ -122,8 +135,9 @@ class BPE():
                 t.token_pos = token_pos
                 t.tokens = new_tokens
                 t.bond_to_token = bond_to_token
+
         if self.res_init:
-            self._tokens = {n: json.dumps(key_str) for key_str, n in label_dict.items()}
+            self._tokens = {n: json.loads(key_str) for key_str, n in label_dict.items()}
             logger.info(f"initialized {len(self._tokens)} residue-level tokens")
 
     
@@ -163,12 +177,14 @@ class BPE():
                 for key in t.BOND_ANGLES+t.DIHEDRAL_ANGLES: # these are mostly fixed
                     t_vals = angles[key][angles[key].fillna(0)!=0.].tolist()
                     vals[key] = vals.get(key, []) + t_vals
+            if path is not None:
+                path = Path(path).with_name(name)
             for key in t.BOND_ANGLES+t.DIHEDRAL_ANGLES:
                 name = f"{key}_{self.bin_strategy}_{num_bins}.png"
                 if self.bin_strategy == "histogram":
-                    starts, ends, widths, counts = save_circular_histogram(vals[key], path=Path(path).with_name(name), bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins")
+                    starts, ends, widths, counts = save_circular_histogram(vals[key], path=path, bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins")
                 elif self.bin_strategy == "uniform":
-                    starts, ends, widths, counts = save_circular_histogram_equal_counts(vals[key], path=Path(path).with_name(name), bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins")
+                    starts, ends, widths, counts = save_circular_histogram_equal_counts(vals[key], path=path, bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins")
                 else:
                     raise NotImplementedError
                 logger.info(f"# bins: {len(counts)}, bin starts: {starts}, bin ends: {ends}, counts: {counts}")
@@ -220,8 +236,8 @@ class BPE():
         tok1 = t.bond_to_token[t.token_pos[idx1]]
         tok2 = t.bond_to_token[t.token_pos[idx2]]
         bt1, bt2 = tok1[1], tok2[1]
-        pt1 = not ignore_left and isinstance(bt1, tuple)
-        pt2 = not ignore_right and isinstance(bt2, tuple)
+        pt1 = not ignore_left and isinstance(bt1, tuple) # partition key
+        pt2 = not ignore_right and isinstance(bt2, tuple) # partition key
         # two cases: idx1, l1 is a token or (idx1, idx1+l1) in a token sharing one endpoint
         assert (tok1[0] <= idx1 and tok1[0]+tok1[2] == idx1+l1)
         assert (tok2[0] == idx2 and tok2[2] >= l2)                
@@ -615,7 +631,8 @@ class BPE():
             struc = t.token_geo(i1, length)            
             logger.info(f"Partition {p}: {struc}")
             self._sphere_dict[k].append(struc)
-            t.visualize_bonds(i1, length, f'plots/bpe/{k}-{p}.png')
+            key_vis_path = os.path.join(self.save_dir, f"key_iter={self._step}_{p}.png")
+            t.visualize_bonds(i1, length, key_vis_path)
         return assignments
 
 
@@ -788,7 +805,8 @@ class BPE():
             if rmsd_key is not None:
                 start_time = time.perf_counter()
                 i1 = t.token_pos[index-1]
-                t.set_token_geo(i1, length, self._sphere_dict[key][p])
+                if not self.rmsd_only: # don't set if rmsd_only
+                    t.set_token_geo(i1, length, self._sphere_dict[key][p])
                 step_times["step6"] += time.perf_counter() - start_time    
             
             # if i == 0 and t.bond_to_token[235] == (235, (41, 2), 6) and t.bond_to_token[241] == (241, 103, 24) and t.bond_to_token[265] == (265, 11, 3):
