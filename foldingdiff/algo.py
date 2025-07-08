@@ -71,7 +71,6 @@ def compute_rmsd(P, Q):
     rmsd = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
     return rmsd
 
-
 def compute_value_ranges(strucs):
     keys = list(strucs[0])
     value_ranges = {}
@@ -79,7 +78,6 @@ def compute_value_ranges(strucs):
         value_ranges[k] = [struc[k] for struc in strucs]
         value_ranges[k] = (min(value_ranges[k]), max(value_ranges[k]))
     return value_ranges
-
 
 def initialize(strucs, k):
     """
@@ -95,7 +93,6 @@ def initialize(strucs, k):
             new_struc[key] = np.random.uniform(start, end)
         new_strucs.append(new_struc)
     return new_strucs
-
 
 def k_means(strucs, k, max_iterations=10, tol=0.1):
     """
@@ -148,7 +145,6 @@ def k_means(strucs, k, max_iterations=10, tol=0.1):
         if diff < tol:
             break
     return medoids, assignments
-
 
 def k_medoids(strucs, k, max_iterations=10, tol=1e-4):
     """

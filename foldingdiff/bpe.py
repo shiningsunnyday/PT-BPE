@@ -8,26 +8,6 @@ from collections import defaultdict
 from sortedcontainers import SortedDict
 logger = logging.getLogger(__name__)
 
-class ThresholdDict(dict): # only add, no remove
-    def __new__(cls, *args, **kwargs):
-        instance = super().__new__(cls)
-        instance.max_key = -1
-        return instance
-
-    def __init__(self):
-        super().__init__()
-        self.max_key = -1
-
-    def __setitem__(self, key, val):
-        if isinstance(key, int) and key > self.max_key:
-            self.max_key = key
-        super().__setitem__(key, val)
-    
-    def __getitem__(self, key):
-        if isinstance(key, int) and key > self.max_key:
-            key = self.max_key        
-        return super().__getitem__(key)
-
 class BPE():
     def __init__(self, structures, bins, 
         bin_strategy="histogram",
@@ -194,8 +174,82 @@ class BPE():
                     _bin_counts[key] = _bin_counts.get(key, []) + [count]                 
             self._thresholds[size] = _thresholds
             self._bin_counts[size] = _bin_counts
-            last_size = size        
+            last_size = size
+    
 
+    @property
+    def vocab_size(self):
+        vocab = len(self._tokens)
+        vocab += self.cum_bin_count()
+        return vocab
+        
+    
+    def cum_bin_count(self, key=None):
+        count = 0
+        for k, v in self._bin_counts.items():
+            if key == k:
+                break
+            count += len(v)
+        return count
+
+
+    def quantize(self, tokenized):
+        quantized = []
+        for i, token in enumerate(tokenized):
+            if token[0] == "MOTIF":
+                quant = token[1]
+            else:                
+                dt = token[1]
+                cum = self.cum_bin_count(dt)
+                relv = self._thresholds[1][dt]
+                ind = BPE.get_ind((token[2] + 2*np.pi) % (2*np.pi), relv)
+                quant = cum+ind
+            quantized.append(quant)
+        return quantized
+
+
+    def dequantize(self, quantized):
+        cum = self.cum_bin_count()
+        num_vocab = self.vocab_size
+        tokenized = []
+        for i, quant in enumerate(quantized):
+            if quant < num_vocab-cum:
+                if quant > len(self._tokens):
+                    raise ValueError(f"pos {i} > vocab range=\(0, {len(self._tokens)}\)")                                    
+                token = ("MOTIF", list(self._tokens)[quant])
+            else:
+                c = quant-(num_vocab-cum)
+                token = None
+                for k, v in self._bin_counts.items():
+                    if c < len(v):
+                        start, end = v[c]
+                        prefix = "DIHEDRAL" if k in Tokenizer.DIHEDRAL_ANGLES else "BOND_ANGLE"
+                        token = (prefix, k, (start+end)/2)
+                        break
+                    c -= len(v)
+                if token is None:
+                    raise ValueError(f"pos {i} > vocab_size={num_vocab}")                
+            tokenized.append(token)
+        return tokenized
+
+
+    def recover(self, tokenized):
+        repl = defaultdict(list)
+        for token in tokenized:
+            if token[0] == "MOTIF":
+                bt = token[1]
+                key_dict = self._tokens[bt]
+                while isinstance(key_dict, str):
+                    key_dict = json.loads(key_dict)
+                for k in key_dict:
+                    repl[k] += key_dict[k]
+            else:
+                dt = token[1]
+                val = token[2]
+                repl[dt].append(val)
+
+        repl = dict(repl)  
+        return repl
     
     @staticmethod
     def hash_geo(geo):
@@ -385,7 +439,7 @@ class BPE():
         #     self._geo_step[key] = 0
         self._pqueue = [(-len(self._geo_dict[key]), key) for key in self._geo_dict]
         heapq.heapify(self._pqueue)        
-    
+
 
     def _bin_val(self, key_dict):
         size = Tokenizer.num_bonds(key_dict)
