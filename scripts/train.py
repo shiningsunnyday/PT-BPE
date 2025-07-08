@@ -7,7 +7,9 @@ from torch.utils.data import Subset
 import pandas as pd
 from pathlib import Path
 import wandb
+from collections import Counter
 import random
+import logging
 
 # -----------------------------
 # 0) ARGPARSE
@@ -27,7 +29,7 @@ def parse_args():
         help="Path to pickle file containing tokenized sequences"
     )
     parser.add_argument(
-        "--labels_path", type=str, required=True,
+        "--labels_path", type=str,
         help="Path to csv file containing processed probe labels"
     )
     parser.add_argument(
@@ -45,12 +47,10 @@ def parse_args():
 
     # model & training hyperparameters
     parser.add_argument("--seed",         type=int,   default=0)
-    parser.add_argument("--vocab_size",   type=int,   default=10_000)
     parser.add_argument("--d_model",      type=int,   default=256)
     parser.add_argument("--num_layers",   type=int,   default=8)
     parser.add_argument("--num_heads",    type=int,   default=8)
     parser.add_argument("--d_ff",         type=int,   default=1024)
-    parser.add_argument("--max_len",      type=int,   default=512)
     parser.add_argument("--batch_size",   type=int,   default=32)
     parser.add_argument("--lr",           type=float, default=1e-4)
     parser.add_argument("--epochs",       type=int,   default=10)
@@ -65,12 +65,13 @@ def parse_args():
 # 1) DATASET
 # -----------------------------
 class ProteinDataset(Dataset):
-    def __init__(self, ckpt_path, labels_path, max_len=512):
+    def __init__(self, ckpt_path, labels_path):
         """
         lables_path: csv for labels to structures in ckpt_path
         """
         bpe = pickle.load(open(ckpt_path, 'rb'))        
         self.vocab_size = bpe.vocab_size
+        logging.info(f"VOCAB SIZE: {self.vocab_size}")
         if labels_path:
             df = pd.read_csv(labels_path)              
         else:
@@ -78,6 +79,7 @@ class ProteinDataset(Dataset):
         self.seqs = []
         self.probe = []
         self.probe_split = []
+        count = 0
         for t in bpe.tokenizers:
             tokenized = t.tokenize()
             seq = bpe.quantize(tokenized)
@@ -91,16 +93,34 @@ class ProteinDataset(Dataset):
                 result = df.loc[mask]
                 if len(result) >= 1:
                     row = result.iloc[0]
-                    label = row["residue_label"]
-                    split = row["split"]
+                    label = eval(row["residue_label"])
+                    if len(label) == t.n:                        
+                        if len(t.bond_to_token) < len(label):
+                            motif_label = []
+                            for (start, _, length) in t.bond_to_token.values():
+                                counts = Counter(label[start//3: (start+length+1)//3])
+                                key, _ = counts.most_common(1)[0]
+                                motif_label.append(key)
+                                if start+length < 3*t.n-1:
+                                    motif_label.append(None)
+                                    motif_label.append(None)
+                                    motif_label.append(None)                    
+                            label = motif_label
+                        split = row["split"]
+                    else:
+                        label = [None for _ in seq]
+                        split = None
                 else:
-                    label = None
+                    label = [None for _ in seq]
                     split = None
                 self.probe.append(label)
                 self.probe_split.append(split)
+                count += (split is not None)
             self.seqs.append(seq)        
-        # len(sorted(self.seqs, key=len)[int(0.95*len(self.seqs))])
+        max_len = len(sorted(self.seqs, key=len)[int(0.95*len(self.seqs))])
         self.max_len = max_len
+        logging.info(f"MAX LEN: {max_len}")
+        logging.info(f"{count}/{len(bpe.tokenizers)} structures have labels")
 
     def __len__(self):
         return len(self.seqs)
@@ -116,11 +136,11 @@ class ProteinDataset(Dataset):
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
         }
-        if self.probe is not None:
-            breakpoint()
+        if len(self.probe):
             probe_seq = self.probe[idx][: self.max_len]
             pad_probe = probe_seq + [0] * pad_len
-            item["probe_labels"] = torch.tensor(pad_probe, dtype=torch.long)
+            item["probe_labels"] = torch.tensor([val if (val is not None) else 0 for val in pad_probe], dtype=torch.long)
+            item["probe_mask"] = torch.tensor([(val is not None) for val in pad_probe], dtype=torch.bool)
         return item
 
 
@@ -171,7 +191,8 @@ def make_collate_fn(global_max_len: int):
         if "probe_labels" in batch[0]:
             probe_labels = torch.stack([item["probe_labels"][:batch_max] for item in batch], dim=0)
             out["probe_labels"] = probe_labels
-        
+            probe_mask = torch.stack([item["probe_mask"][:batch_max] for item in batch], dim=0)
+            out["probe_mask"] = probe_mask            
         return out
 
     return collate_fn
@@ -242,52 +263,96 @@ def evaluate_next_token(model, dataloader, device, criterion):
             total_tokens += nt
     return total_loss / total_tokens
 
-def evaluate_probe(model, train_loader, val_loader, device, d_model, num_labels, probe_epochs, probe_lr):
+def evaluate_probe(model,
+                   train_loader,
+                   val_loader,
+                   device,
+                   d_model,
+                   num_labels,
+                   probe_epochs,
+                   probe_lr):
     model.eval()
-    feats, labs = [], []
+
+    # 1) Gather training features, labels, and mask
+    feats, labs, masks = [], [], []
     with torch.no_grad():
         for batch in train_loader:
-            input_ids = batch["input_ids"].to(device)
-            mask = batch["attention_mask"].to(device)
-            probe_labels = batch["probe_labels"].to(device)
-            _, hidden = model(input_ids, mask)
-            B, L, D = hidden.size()
-            feats.append(hidden.reshape(B*L, D))
-            labs.append(probe_labels.reshape(B*L))
-    feat_train = torch.cat(feats, dim=0)
-    lab_train  = torch.cat(labs, dim=0)
+            input_ids   = batch["input_ids"].to(device)
+            attn_mask   = batch["attention_mask"].to(device)
+            probe_labels= batch["probe_labels"].to(device)
+            probe_mask  = batch["probe_mask"].to(device)
 
+            _, hidden = model(input_ids, attn_mask)            # hidden: (B, L, D)
+            B, L, D    = hidden.size()
+
+            feats.append(hidden.reshape(B * L, D))             # (B*L, D)
+            labs.append(probe_labels.reshape(B * L))           # (B*L,)
+            masks.append(probe_mask.reshape(B * L).bool())     # (B*L,)
+
+    feat_train = torch.cat(feats, dim=0)        # (N_train_positions, D)
+    lab_train  = torch.cat(labs,  dim=0)        # (N_train_positions,)
+    mask_train = torch.cat(masks, dim=0)        # (N_train_positions,)
+
+    # 2) Keep only labeled positions
+    feat_train = feat_train[mask_train]
+    lab_train  = lab_train[mask_train]
+
+    # 3) Train linear probe
     probe = ProbeClassifier(d_model, num_labels).to(device)
-    opt = torch.optim.Adam(probe.parameters(), lr=probe_lr)
-    crit = nn.CrossEntropyLoss(ignore_index=0)
+    opt   = torch.optim.Adam(probe.parameters(), lr=probe_lr)
+    crit  = nn.CrossEntropyLoss()
+
     probe.train()
     for _ in range(probe_epochs):
         opt.zero_grad()
-        logits_p = probe(feat_train)
-        loss_p = crit(logits_p, lab_train)
+        logits_p = probe(feat_train)               # (N_labeled, num_labels)
+        loss_p   = crit(logits_p, lab_train)       # only over labeled positions
         loss_p.backward()
         opt.step()
 
-    correct, total = 0, 0
+    # 4) Evaluate on validation split, again masking out unlabeled positions
     probe.eval()
+    correct, total = 0, 0
     with torch.no_grad():
         for batch in val_loader:
-            input_ids = batch["input_ids"].to(device)
-            mask = batch["attention_mask"].to(device)
+            input_ids    = batch["input_ids"].to(device)
+            attn_mask    = batch["attention_mask"].to(device)
             probe_labels = batch["probe_labels"].to(device)
-            _, hidden = model(input_ids, mask)
-            B, L, D = hidden.size()
-            feats_v = hidden.reshape(B*L, D)
-            labs_v  = probe_labels.reshape(B*L)
+            probe_mask   = batch["probe_mask"].to(device)
+
+            _, hidden = model(input_ids, attn_mask)
+            B, L, D    = hidden.size()
+
+            feats_v = hidden.reshape(B * L, D)
+            labs_v  = probe_labels.reshape(B * L)
+            mask_v  = probe_mask.reshape(B * L).bool()
+
+            # filter to only positions with labels
+            breakpoint()
+            feats_v = feats_v[mask_v]
+            labs_v  = labs_v[mask_v]
+
             preds = probe(feats_v).argmax(dim=-1)
             correct += (preds == labs_v).sum().item()
-            total += labs_v.numel()
+            total   += labs_v.numel()
+
     return correct / total
 
 # -----------------------------
 # 5) MAIN TRAIN/EVAL LOOP
 # -----------------------------
 def main(args):
+    if args.debug:
+        # override for minimal debug run
+        args.d_model    = 64
+        args.num_layers = 1
+        args.num_heads  = 2
+        args.d_ff       = 256
+        args.max_len    = 32
+        args.batch_size = 4
+        args.epochs     = 1
+        args.eval_interval = 10            
+
     # 1) W&B init (disable if debug)
     wandb.init(
         entity=args.wandb_team,
@@ -299,38 +364,45 @@ def main(args):
     # 2) Load & split
     full_ds = ProteinDataset(
         args.checkpoint_path,
-        args.labels_path,
-        max_len=args.max_len
+        args.labels_path
     )
+    # derived metrics: vocab_size / max_len
+    vocab_size = full_ds.vocab_size
+    max_len = full_ds.max_len
 
     # 3) Debug mode: take only first 10
     # next-token splits: train / val / test_ntp
     train_ds, val_ds, test_ntp_ds = split_dataset(full_ds, args.seed)
     # probing splits: probe_train / probe_val / probe_test
-    probe_train_ds, probe_val_ds, probe_test_ds = split_probe_dataset(full_ds)        
+    if args.labels_path:
+        probe_train_ds, probe_val_ds, probe_test_ds = split_probe_dataset(full_ds)        
+
     if args.debug:
         idx10 = list(range(10))
         train_ds       = Subset(train_ds, idx10)
         val_ds         = Subset(val_ds,   idx10)
         test_ntp_ds    = Subset(test_ntp_ds, idx10)
-        probe_train_ds = Subset(probe_train_ds, idx10)
-        probe_val_ds   = Subset(probe_val_ds,   idx10)
-        probe_test_ds  = Subset(probe_test_ds,  idx10)    
+        if args.labels_path:
+            probe_train_ds = Subset(probe_train_ds, idx10)
+            probe_val_ds   = Subset(probe_val_ds,   idx10)
+            probe_test_ds  = Subset(probe_test_ds,  idx10)    
 
     # 4) DataLoaders
-    collate_fn         = make_collate_fn(args.max_len)
+    collate_fn         = make_collate_fn(max_len)
     train_loader       = DataLoader(train_ds,       batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
     val_loader         = DataLoader(val_ds,         batch_size=args.batch_size, collate_fn=collate_fn)
     test_ntp_loader    = DataLoader(test_ntp_ds,    batch_size=args.batch_size, collate_fn=collate_fn)
-    probe_train_loader = DataLoader(probe_train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
-    probe_val_loader   = DataLoader(probe_val_ds,   batch_size=args.batch_size, collate_fn=collate_fn)
-    probe_test_loader  = DataLoader(probe_test_ds,  batch_size=args.batch_size, collate_fn=collate_fn)
+
+    if args.labels_path:
+        probe_train_loader = DataLoader(probe_train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
+        probe_val_loader   = DataLoader(probe_val_ds,   batch_size=args.batch_size, collate_fn=collate_fn)
+        probe_test_loader  = DataLoader(probe_test_ds,  batch_size=args.batch_size, collate_fn=collate_fn)
 
     # 5) Model / optimizer / loss
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ProteinLM(
-        args.vocab_size, args.d_model, args.num_layers,
-        args.num_heads, args.d_ff, args.max_len
+        vocab_size, args.d_model, args.num_layers,
+        args.num_heads, args.d_ff, max_len
     ).to(device)
 
     # Inference mode?  Load weights and skip training
@@ -346,17 +418,18 @@ def main(args):
         wandb.log({"test/ntp_loss": ntp_loss, "test/ntp_ppl": ntp_ppl})
 
         # b) Zero-shot probe on **probe_test** (trained on probe_train)
-        probe_acc = evaluate_probe(
-            model,
-            probe_train_loader,
-            probe_test_loader,
-            device,
-            args.d_model,
-            num_labels = full_ds.probe['label'].nunique(),
-            probe_epochs=args.probe_epochs,
-            probe_lr=args.probe_lr
-        )
-        wandb.log({"test/probe_acc": probe_acc})
+        if args.labels_path:
+            probe_acc = evaluate_probe(
+                model,
+                probe_train_loader,
+                probe_test_loader,
+                device,
+                args.d_model,
+                num_labels = full_ds.probe['label'].nunique(),
+                probe_epochs=args.probe_epochs,
+                probe_lr=args.probe_lr
+            )
+            wandb.log({"test/probe_acc": probe_acc})
         return
 
     # 6) Training loop
@@ -372,7 +445,7 @@ def main(args):
             m    = batch["attention_mask"].to(device)
             lbls = batch["labels"].to(device)
             logits, _ = model(ids, m)
-            loss = crit(logits.view(-1, args.vocab_size), lbls.view(-1))
+            loss = crit(logits.view(-1, vocab_size), lbls.view(-1))
             loss.backward()
             optimizer.step()
 
@@ -390,17 +463,18 @@ def main(args):
                 })
 
                 # b) zero-shot probe on **probe_val**
-                probe_acc = evaluate_probe(
-                    model,
-                    probe_train_loader,
-                    probe_val_loader,
-                    device,
-                    args.d_model,
-                    num_labels = full_ds.probe['label'].nunique(),
-                    probe_epochs=args.probe_epochs,
-                    probe_lr=args.probe_lr
-                )
-                wandb.log({"val/probe_acc": probe_acc, "step": step})
+                if args.labels_path:
+                    probe_acc = evaluate_probe(
+                        model,
+                        probe_train_loader,
+                        probe_val_loader,
+                        device,
+                        args.d_model,
+                        num_labels = full_ds.probe['label'].nunique(),
+                        probe_epochs=args.probe_epochs,
+                        probe_lr=args.probe_lr
+                    )
+                    wandb.log({"val/probe_acc": probe_acc, "step": step})
                 model.train()
 
         # end‐of‐epoch checkpoint
@@ -411,5 +485,6 @@ def main(args):
     wandb.finish()
 
 if __name__ == "__main__":
-    args = parse_args()    
+    args = parse_args() 
+    breakpoint()   
     main(args)

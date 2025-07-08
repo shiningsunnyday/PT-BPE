@@ -197,7 +197,7 @@ class BPE():
         quantized = []
         for i, token in enumerate(tokenized):
             if token[0] == "MOTIF":
-                quant = token[1]
+                quant = list(self._tokens).index(token[1])
             else:                
                 dt = token[1]
                 cum = self.cum_bin_count(dt)
