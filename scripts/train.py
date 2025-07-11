@@ -71,11 +71,14 @@ class ProteinDataset(Dataset):
         """
         bpe = pickle.load(open(ckpt_path, 'rb'))        
         self.vocab_size = bpe.vocab_size
+        self.label_set = set()
         logging.info(f"VOCAB SIZE: {self.vocab_size}")
         if labels_path:
             df = pd.read_csv(labels_path)              
+            self.do_probe = True
         else:
             df = None
+            self.do_probe = False
         self.seqs = []
         self.probe = []
         self.probe_split = []
@@ -83,7 +86,7 @@ class ProteinDataset(Dataset):
         for t in bpe.tokenizers:
             tokenized = t.tokenize()
             seq = bpe.quantize(tokenized)
-            if df is not None:
+            if self.do_probe:
                 pdb_chain = Path(t.fname).stem.split('_')
                 if len(pdb_chain) != 2:
                     raise ValueError(f"{t.fname} should be pdbid_chainid")
@@ -94,18 +97,18 @@ class ProteinDataset(Dataset):
                 if len(result) >= 1:
                     row = result.iloc[0]
                     label = eval(row["residue_label"])
+                    self.label_set |= set(label)
                     if len(label) == t.n:                        
-                        if len(t.bond_to_token) < len(label):
-                            motif_label = []
-                            for (start, _, length) in t.bond_to_token.values():
-                                counts = Counter(label[start//3: (start+length+1)//3])
-                                key, _ = counts.most_common(1)[0]
-                                motif_label.append(key)
-                                if start+length < 3*t.n-1:
-                                    motif_label.append(None)
-                                    motif_label.append(None)
-                                    motif_label.append(None)                    
-                            label = motif_label
+                        motif_label = []
+                        for (start, _, length) in t.bond_to_token.values():
+                            counts = Counter(label[start//3: (start+length+1)//3])
+                            key, _ = counts.most_common(1)[0]
+                            motif_label.append(key)
+                            if start+length < 3*t.n-1:
+                                motif_label.append(None)
+                                motif_label.append(None)
+                                motif_label.append(None)                    
+                        label = motif_label
                         split = row["split"]
                     else:
                         label = [None for _ in seq]
@@ -114,6 +117,8 @@ class ProteinDataset(Dataset):
                     label = [None for _ in seq]
                     split = None
                 self.probe.append(label)
+                if len(label) != len(seq):
+                    breakpoint()
                 self.probe_split.append(split)
                 count += (split is not None)
             self.seqs.append(seq)        
@@ -121,6 +126,7 @@ class ProteinDataset(Dataset):
         self.max_len = max_len
         logging.info(f"MAX LEN: {max_len}")
         logging.info(f"{count}/{len(bpe.tokenizers)} structures have labels")
+        logging.info(f"LABEL SET: {self.label_set}")
 
     def __len__(self):
         return len(self.seqs)
@@ -136,11 +142,13 @@ class ProteinDataset(Dataset):
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
         }
-        if len(self.probe):
+        if self.do_probe:
             probe_seq = self.probe[idx][: self.max_len]
-            pad_probe = probe_seq + [0] * pad_len
-            item["probe_labels"] = torch.tensor([val if (val is not None) else 0 for val in pad_probe], dtype=torch.long)
-            item["probe_mask"] = torch.tensor([(val is not None) for val in pad_probe], dtype=torch.bool)
+            pad_probe = probe_seq + [None] * pad_len
+            probe_labels = [val if (val is not None) else 0 for val in pad_probe]
+            probe_mask = [(val is not None) for val in pad_probe]
+            item["probe_labels"] = torch.tensor(probe_labels, dtype=torch.long)
+            item["probe_mask"] = torch.tensor(probe_mask, dtype=torch.bool)
         return item
 
 
@@ -328,7 +336,6 @@ def evaluate_probe(model,
             mask_v  = probe_mask.reshape(B * L).bool()
 
             # filter to only positions with labels
-            breakpoint()
             feats_v = feats_v[mask_v]
             labs_v  = labs_v[mask_v]
 
@@ -369,6 +376,7 @@ def main(args):
     # derived metrics: vocab_size / max_len
     vocab_size = full_ds.vocab_size
     max_len = full_ds.max_len
+    num_labels = len(full_ds.label_set)
 
     # 3) Debug mode: take only first 10
     # next-token splits: train / val / test_ntp
@@ -425,7 +433,7 @@ def main(args):
                 probe_test_loader,
                 device,
                 args.d_model,
-                num_labels = full_ds.probe['label'].nunique(),
+                num_labels = num_labels,
                 probe_epochs=args.probe_epochs,
                 probe_lr=args.probe_lr
             )
@@ -470,7 +478,7 @@ def main(args):
                         probe_val_loader,
                         device,
                         args.d_model,
-                        num_labels = full_ds.probe['label'].nunique(),
+                        num_labels = num_labels,
                         probe_epochs=args.probe_epochs,
                         probe_lr=args.probe_lr
                     )
@@ -485,6 +493,5 @@ def main(args):
     wandb.finish()
 
 if __name__ == "__main__":
-    args = parse_args() 
-    breakpoint()   
+    args = parse_args()    
     main(args)
