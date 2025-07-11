@@ -25,7 +25,7 @@ bins=$3
 bin_strat="uniform"
 sec="False"
 res_init="true"
-save_every=1
+save_every=10
 
 extra=""
 
@@ -49,5 +49,4 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --log-dir /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/logs \
   --pad $pad \
   --toy $toy \
-  --cache \
   $extra

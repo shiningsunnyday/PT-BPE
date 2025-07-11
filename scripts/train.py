@@ -41,7 +41,7 @@ def parse_args():
         help="Skip training and run final eval on test splits"
     )
     parser.add_argument(
-        "--model_ckpt", type=str, default=None,
+        "--model_path", type=str, default=None,
         help="Path to a saved model checkpoint for inference mode"
     )    
 
@@ -65,11 +65,10 @@ def parse_args():
 # 1) DATASET
 # -----------------------------
 class ProteinDataset(Dataset):
-    def __init__(self, ckpt_path, labels_path):
+    def __init__(self, bpe, labels_path):
         """
         lables_path: csv for labels to structures in ckpt_path
-        """
-        bpe = pickle.load(open(ckpt_path, 'rb'))        
+        """        
         self.vocab_size = bpe.vocab_size
         self.label_set = set()
         logging.info(f"VOCAB SIZE: {self.vocab_size}")
@@ -369,8 +368,9 @@ def main(args):
     )
 
     # 2) Load & split
+    bpe = pickle.load(open(args.checkpoint_path, 'rb'))
     full_ds = ProteinDataset(
-        args.checkpoint_path,
+        bpe,
         args.labels_path
     )
     # derived metrics: vocab_size / max_len
@@ -413,6 +413,7 @@ def main(args):
         args.num_heads, args.d_ff, max_len
     ).to(device)
 
+    breakpoint()
     # Inference mode?  Load weights and skip training
     if args.inference:
         assert args.model_path, "--model_path required in inference mode"
@@ -423,7 +424,7 @@ def main(args):
         # a) Next-token on **test** split
         ntp_loss = evaluate_next_token(model, test_ntp_loader, device, crit)
         ntp_ppl  = torch.exp(torch.tensor(ntp_loss))
-        wandb.log({"test/ntp_loss": ntp_loss, "test/ntp_ppl": ntp_ppl})
+        wandb.log({"test/ntp_loss": ntp_loss, "test/ntp_ppl": ntp_ppl})        
 
         # b) Zero-shot probe on **probe_test** (trained on probe_train)
         if args.labels_path:

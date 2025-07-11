@@ -186,9 +186,13 @@ class BPE():
     
     def cum_bin_count(self, key=None):
         count = 0
-        for k, v in self._bin_counts.items():
+        if self.res_init:
+            assert key is None or (key in ["omega", "phi", "C:1N:1CA"])
+        for k, v in self._bin_counts[1].items():
             if key == k:
                 break
+            if self.res_init and k not in ["omega", "phi", "C:1N:1CA"]:
+                continue
             count += len(v)
         return count
 
@@ -203,7 +207,7 @@ class BPE():
                 cum = self.cum_bin_count(dt)
                 relv = self._thresholds[1][dt]
                 ind = BPE.get_ind((token[2] + 2*np.pi) % (2*np.pi), relv)
-                quant = cum+ind
+                quant = len(self._tokens)+cum+ind
             quantized.append(quant)
         return quantized
 
@@ -220,7 +224,9 @@ class BPE():
             else:
                 c = quant-(num_vocab-cum)
                 token = None
-                for k, v in self._bin_counts.items():
+                for k, v in self._thresholds[1].items():
+                    if self.res_init and k not in ["omega", "phi", "C:1N:1CA"]:
+                        continue
                     if c < len(v):
                         start, end = v[c]
                         prefix = "DIHEDRAL" if k in Tokenizer.DIHEDRAL_ANGLES else "BOND_ANGLE"
@@ -250,7 +256,57 @@ class BPE():
 
         repl = dict(repl)  
         return repl
-    
+
+    @staticmethod
+    def init_structure(n):
+        angles = {
+            "0C:1N": [0. for _ in range(n)],
+            "N:CA": [0. for _ in range(n)],
+            "CA:C": [0. for _ in range(n)],
+            "phi": [np.nan for _ in range(n)],
+            "psi": [np.nan for _ in range(n)],
+            "omega": [np.nan for _ in range(n)],
+            "tau": [np.nan for _ in range(n)],
+            "CA:C:1N": [np.nan for _ in range(n)],
+            "C:1N:1CA": [np.nan for _ in range(n)]
+        }
+        idxes = sum([[i,i,i] for i in range(1, n+1)], [])
+        return {
+            "angles": pd.DataFrame(angles),
+            "coords": None,
+            "c_beta": None,
+            "full_idxes": idxes,
+            "full_coords": None,
+            "side_chain": None,
+            "aa": None,
+            "fname": None
+        }
+
+    def recover_structure(self, repl, tokenized):
+        n = len(repl["N:CA"])
+        struc = self.init_structure(n)
+        # ref.tokenizers[0].angles_and_dists
+        struc["angles"]["N:CA"].iloc[:-1] = repl["N:CA"][1:]
+        struc["angles"]["CA:C"].iloc[:-1] = repl["CA:C"][1:]
+        struc["angles"]["0C:1N"].iloc[:-1] = repl["0C:1N"]
+        struc["angles"]["phi"].iloc[1:] = repl["phi"]
+        struc["angles"]["psi"].iloc[:-1] = repl["psi"]
+        struc["angles"]["omega"].iloc[:-1] = repl["omega"]
+        struc["angles"]["tau"].iloc[:-1] = repl["tau"][1:]
+        struc["angles"]["CA:C:1N"].iloc[:-1] = repl["CA:C:1N"]
+        struc["angles"]["C:1N:1CA"].iloc[:-1] = repl["C:1N:1CA"]
+        t_new = Tokenizer(struc)
+        t_new.bond_to_token = {}
+        cur = 0
+        for key, *pargs in tokenized:    
+            if key == "MOTIF":
+                token_id = pargs[0]
+                nb = Tokenizer.num_bonds(self._tokens[token_id]) 
+                t_new.bond_to_token[cur] = (cur, token_id, nb)
+                cur += nb
+        return t_new
+
+
     @staticmethod
     def hash_geo(geo):
         return json.dumps(geo, sort_keys=True)
