@@ -4,12 +4,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import Subset
+import torch.nn.functional as F
 import pandas as pd
 from pathlib import Path
 import wandb
 from collections import Counter
 import random
 import logging
+from foldingdiff.tokenizer import *
 
 # -----------------------------
 # 0) ARGPARSE
@@ -44,6 +46,12 @@ def parse_args():
         "--model_path", type=str, default=None,
         help="Path to a saved model checkpoint for inference mode"
     )    
+
+   # sampling‐specific args:
+    parser.add_argument("--num_samples", type=int, default=10,
+                        help="How many unconditional sequences to sample")
+    parser.add_argument("--temperature", type=float, default=1.0,
+                        help="Sampling softmax temperature")    
 
     # model & training hyperparameters
     parser.add_argument("--seed",         type=int,   default=0)
@@ -344,6 +352,89 @@ def evaluate_probe(model,
 
     return correct / total
 
+def sample_unconditional(
+    model,
+    device,
+    bpe,
+    length_prior: list[int],
+    start_prior: list[int],
+    num_samples: int = 1,
+    temperature: float = 1.0,
+):
+    """
+    Unconditional sampling of `num_samples` sequences of total length K
+    (where K is drawn from length_prior and satisfies K%4==1), *without* any
+    extra BOS token.  The first token is sampled from start_prior.
+    """
+    assert bpe.res_init, "BPE must be initialized"
+
+    # 1) filter legal lengths
+    legal_lengths = [K for K in length_prior if K % 4 == 1]
+    assert legal_lengths, "No K in length_prior satisfies K%4==1"
+
+    # 2) precompute your 4 ranges
+    n         = len(bpe._tokens)
+    omega_off = bpe.cum_bin_count('omega')
+    cac1n_off = bpe.cum_bin_count('C:1N:1CA')
+    phi_off   = bpe.cum_bin_count('phi')
+    ranges = {
+        0: (0,   n),
+        1: (n + omega_off,
+            n + omega_off + len(bpe._bin_counts[1]['omega'])),
+        2: (n + phi_off,
+            n + phi_off + len(bpe._bin_counts[1]['phi'])),
+        3: (n + cac1n_off,
+            n + cac1n_off + len(bpe._bin_counts[1]['CA:C:1N'])),
+    }
+    term_motifs = np.array([i < len(bpe._tokens) \
+                   and Tokenizer.num_bonds(list(bpe._tokens.values())[i]) == 2 \
+                    for i in range(bpe.vocab_size)])
+    
+    vocab_size = model.token_emb.num_embeddings
+    model.eval()
+    samples = []
+
+    with torch.no_grad():
+        for _ in range(num_samples):
+            # a) pick your length
+            K = random.choice(legal_lengths)
+
+            # b) sample the very first token from your empirical start_prior
+            first_tok = random.choice(start_prior)
+            seq = torch.tensor([[first_tok]], dtype=torch.long, device=device)
+
+            # c) generate the remaining K-1 tokens
+            for j in range(1, K):
+                attn_mask = torch.ones_like(seq)
+                logits, _ = model(seq, attn_mask)
+                logits = logits[0, -1]  # last‐position logits
+
+                # apply the j%4 mask
+                lo, hi = ranges[j % 4]
+                block = torch.full((vocab_size,), float("-inf"), device=device)
+                block[lo:hi] = 0.0
+                if j < K-1:
+                    block[term_motifs] = float("-inf")
+                else:
+                    block[~term_motifs] = float("-inf")           
+                logits = logits + block
+
+                # sample next
+                probs = F.softmax(logits / temperature, dim=-1)
+                nxt   = torch.multinomial(probs, 1)  # shape (1,)
+                seq   = torch.cat([seq, nxt.unsqueeze(0)], dim=1)
+
+            samples.append(seq.squeeze(0).tolist())
+
+    # (optional) decode & visualize
+    for i, sample in enumerate(samples):
+        quant = bpe.dequantize(sample)
+        repl  = bpe.recover(quant)
+        t     = bpe.recover_structure(repl, quant)
+        t.visualize(f"{i}.png")
+
+    return samples
+
 # -----------------------------
 # 5) MAIN TRAIN/EVAL LOOP
 # -----------------------------
@@ -413,14 +504,24 @@ def main(args):
         args.num_heads, args.d_ff, max_len
     ).to(device)
 
-    breakpoint()
     # Inference mode?  Load weights and skip training
     if args.inference:
         assert args.model_path, "--model_path required in inference mode"
         model.load_state_dict(torch.load(args.model_path, map_location=device))
+        length_prior = [len(seq) for seq in full_ds.seqs]
+        start_prior = [seq[0] for seq in full_ds.seqs]
+        samples = sample_unconditional(
+            model=model,
+            device=device,
+            bpe=bpe,
+            length_prior=length_prior,
+            start_prior=start_prior,
+            num_samples=args.num_samples,
+            temperature=args.temperature,
+        )        
         model.eval()
         crit = nn.CrossEntropyLoss(ignore_index=0)
-
+        
         # a) Next-token on **test** split
         ntp_loss = evaluate_next_token(model, test_ntp_loader, device, crit)
         ntp_ppl  = torch.exp(torch.tensor(ntp_loss))
@@ -495,4 +596,5 @@ def main(args):
 
 if __name__ == "__main__":
     args = parse_args()    
+    breakpoint()
     main(args)

@@ -6,10 +6,57 @@ import glob
 import hashlib
 import logging
 from typing import *
+import ast
+from argparse import Namespace
 
 import requests
 
 import numpy as np
+
+def load_args_from_txt(args_path: str) -> Namespace:
+    """
+    Read a file of lines "name: value" and return a Namespace
+    with attributes name=value (with Python‐literal parsing).
+    """
+    ns = Namespace()
+    with open(args_path, "r") as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if not line.strip() or ": " not in line:
+                continue
+            name, val_str = line.split(": ", 1)
+            # try to parse literal (numbers, dicts, booleans, etc.)
+            try:
+                val = ast.literal_eval(val_str)
+            except Exception:
+                # fallback to string
+                val = val_str
+            setattr(ns, name, val)
+    return ns
+
+def validate_args_match(current: Namespace, loaded: Namespace, skip: list = None):
+    """
+    Compare every attribute in `loaded` to the same attr in `current`,
+    raising an AssertionError if any differ (except those in skip).
+    """
+    skip = set(skip or [])
+    for name, loaded_val in vars(loaded).items():
+        if name in skip:
+            continue
+
+        if not hasattr(current, name):
+            raise AssertionError(f"Current args has no field '{name}'")
+
+        cur_val = getattr(current, name)
+        # normalize directories to absolute paths
+        if name.endswith("_dir") or name.endswith("_path"):
+            loaded_val = os.path.abspath(loaded_val)
+            cur_val    = os.path.abspath(cur_val)
+
+        if cur_val != loaded_val:
+            raise AssertionError(
+                f"Mismatch for '{name}': current={cur_val!r}  saved={loaded_val!r}"
+            )
 
 
 def is_huggingface_hub_id(s: str) -> bool:

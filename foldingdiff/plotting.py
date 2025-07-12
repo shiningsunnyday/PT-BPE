@@ -5,7 +5,7 @@ import os, sys
 import re
 from pathlib import Path
 from typing import Optional, Sequence, Union
-
+import pickle
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -16,7 +16,8 @@ from matplotlib.patches import Circle
 from matplotlib.legend_handler import HandlerBase
 import matplotlib.cm as cm
 import seaborn as sns
-
+from tqdm import tqdm
+from foldingdiff.algo import compute_rmsd
 from astropy.visualization import LogStretch
 from astropy.visualization.mpl_normalize import ImageNormalize
 
@@ -355,6 +356,66 @@ def column_fill(handles, labels, ncol):
                 new_h.append(rows_h[r][c])
                 new_l.append(rows_l[r][c])
     return new_h, new_l
+
+
+
+def plot(ref_coords, d, output_path, no_iters=500, step_iter=10, ratio=1):
+    Ks, Ls, errs = [], [], []
+    for t in range(0, no_iters+1, step_iter):
+        path = f'./ckpts/{d}/bpe_iter={t}.pkl'
+        if not os.path.exists(path):
+            break
+        bpe = pickle.load(open(path, 'rb'))
+        usage = [len(t.bond_to_token) for t in bpe.tokenizers]
+        cur_coords = []
+        for i in range(len(ref_coords)):
+            coord = bpe.tokenizers[i].compute_coords()
+            assert ref_coords[i].shape == coord.shape
+            cur_coords.append(coord)
+        K = len(bpe._tokens)
+        L = np.mean(usage)
+        errors = []
+        for i in tqdm(range(len(ref_coords))):
+            coords = cur_coords[i]
+            try:
+                error = compute_rmsd(coords, ref_coords[i])
+            except:
+                print(i)
+                raise
+            errors.append(error)
+        err = np.mean(errors)
+        errs.append(err)
+        Ks.append(K)
+        Ls.append(L)
+    Ks = np.array(Ks)
+    Ls = np.array(Ls)
+    errs = np.array(errs)
+    N = len(Ks)
+    # make figure + first (left) axis
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    # plot L vs K on left y-axis
+    x_diag = np.linspace(Ks.min(), Ks.max(), 100)
+    ax1.plot(x_diag, x_diag/ratio, linestyle='--', label=f"L=K (K/L={ratio:.1f})")
+    ax1.plot(Ks, Ls, marker='o', label="L vs K", linewidth=2)
+    ax1.set_xlabel("K (Vocab Size) Each Round")
+    ax1.set_ylabel("L  (#Motif-Tokens Per PDB)")
+    ax1.set_xticks(Ks)
+    # create a second y-axis that shares the same x
+    ax2 = ax1.twinx()
+    ax2.plot(Ks, errs, marker='x', linestyle=':', label="Error", linewidth=2, color="tab:red")
+    ax2.set_ylabel("Error", color="tab:red")
+    ax2.tick_params(axis="y", labelcolor="tab:red")
+    # combine legends from both axes
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
+    ax1.set_title(f"L vs K for N={N} w/ {len(Ks)} BPE rounds")
+    fig.tight_layout()
+    plt.show()  
+    plt.savefig(output_path) 
+
+
+# bpe = pickle.load(open(f'./ckpts/{d}/bpe_iter=0.pkl', 'rb'))
 
 def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_factor=0.7, vis_dihedral=True, xlim=None, ylim=None, zlim=None, n_per_row=50):
     """

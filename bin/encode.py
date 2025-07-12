@@ -12,6 +12,7 @@ import argparse
 import pickle
 from datetime import datetime
 
+
 def setup_logger(log_dir):
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -167,11 +168,13 @@ def parse_args():
     )    
     parser.add_argument("--cache", action='store_true', help="whether to use cached data")
     parser.add_argument("--save-every", type=int, default=10, help="how often to dump")
+    parser.add_argument("--num_ref", type=int, default=10, help="how many ref structures to eval error")
     args = parser.parse_args()
     # Post‐parse validation
     if args.p_min_size == 0 and args.bins != {1: 1}:
         parser.error("--bins must be '1-1' when --p-min-size is 0")    
     return args
+
 
 def amino_acid_sequence(fname):
     d3to1 = {'CYS': 'C', 'ASP': 'D', 'SER': 'S', 'GLN': 'Q', 'LYS': 'K', 'ILE': 'I', 'PRO': 'P', 'THR': 'T', 'PHE': 'F', 'ASN': 'N',  'GLY': 'G', 'HIS': 'H', 'LEU': 'L', 'ARG': 'R', 'TRP': 'W',  'ALA': 'A', 'VAL':'V', 'GLU': 'E', 'TYR': 'Y', 'MET': 'M'}       
@@ -206,27 +209,12 @@ def main():
     args_path = os.path.join(args.save_dir, "args.txt")
     if os.path.exists(args_path):
         print(f"loading args from {args_path}")
-        with open(args_path) as f:
-            lines = f.readlines()
-            for line in lines:
-                line = line.rstrip('\n')
-                i = line.index(': ')
-                n, v = line[:i], line[i+2:]
-                cur = getattr(args, n)
-                if n == "ckpt_dir":
-                    continue
-                if "_dir" in n: # some path
-                    v = os.path.abspath(v)
-                    cur = os.path.abspath(cur)                         
-                if isinstance(cur, dict):
-                    v = eval(v)       
-                elif isinstance(cur, float):
-                    v = float(v)
-                elif isinstance(cur, bool):
-                    v = eval(v)
-                elif isinstance(cur, int):
-                    v = int(v)
-                assert cur == v, f"args.{n} == {cur} is different than ckpt value: {v}"
+        loaded_args = load_args_from_txt(args_path)
+        validate_args_match(
+            current   = args,
+            loaded    = loaded_args,
+            skip      = ["ckpt_dir"],   # fields you don’t need to compare
+        )
     else:
         with open(args_path, "w") as f:
             for arg_name, arg_value in sorted(args.__dict__.items()):
@@ -246,7 +234,12 @@ def main():
     #         logger.info("Processing file: %s", f)
     #         all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
     dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
-                                            use_cache=args.cache, debug=False, zero_center=False, toy=args.toy, pad=args.pad, secondary=args.sec)     
+                                             use_cache=args.cache, 
+                                             debug=False, 
+                                             zero_center=False, 
+                                             toy=args.toy, 
+                                             pad=args.pad, 
+                                             secondary=args.sec)     
     cleaned_structures = []
     for i, struc in enumerate(dataset.structures):
         if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
@@ -254,6 +247,7 @@ def main():
         else:
             cleaned_structures.append(struc)
     logger.info(f"Removed {len(dataset.structures)-len(cleaned_structures)}/{len(dataset.structures)} structures with nan dihedrals.")
+    N = len(cleaned_structures)
     dataset.structures = cleaned_structures
     _iter, ckpt = -1, ""
     for f in glob.glob(f"{args.save_dir}/bpe_iter=*.pkl"):
@@ -266,9 +260,14 @@ def main():
         if cur_iter > _iter:
             _iter = cur_iter
             ckpt = f"{args.save_dir}/{f}"    
+    ref_path = f"{args.save_dir}/ref_coords.npy"
     if _iter > -1:
         logger.info(f"loading {ckpt} at iter={_iter}")
         bpe = pickle.load(open(ckpt, 'rb'))
+        if os.path.exists(ref_path):
+            ref_coords = np.load(ref_path)
+        else:
+            ref_coords = None
     else:
         bpe = BPE(dataset.structures, 
                   bins=args.bins, 
@@ -279,6 +278,8 @@ def main():
                   compute_sec_structs=args.sec, 
                   plot_iou_with_sec_structs=args.sec_eval,                  
                   res_init=args.res_init)
+        ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
+        np.save(ref_path, ref_coords)
         # use this for sanity check
         bpe.initialize()
         bpe.bin()    
@@ -313,6 +314,14 @@ def main():
             # save
             pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_iter={t}.pkl'), 'wb+'))
             time_path = os.path.join(args.save_dir, f"times_iter={t}.png")            
+            run_path = os.path.join(args.save_dir, f"run_iter={t}.png")            
+            if ref_coords:
+                plot(ref_coords, 
+                    Path(args.save_dir).name,
+                    run_path, 
+                    no_iters=t, 
+                    step_iter=args.save_every, 
+                    ratio=N/1000)
             bpe.plot_times(time_path)
             if bpe.plot_iou_with_sec_structs:
                 iou_path = os.path.join(args.save_dir, f"iou_iter={t}.png")
