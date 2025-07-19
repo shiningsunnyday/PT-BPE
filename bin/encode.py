@@ -168,6 +168,7 @@ def parse_args():
     )    
     parser.add_argument("--cache", action='store_true', help="whether to use cached data")
     parser.add_argument("--save-every", type=int, default=10, help="how often to dump")
+    parser.add_argument("--plot-every", type=int, default=50, help="how often to plot")
     parser.add_argument("--num_ref", type=int, default=10, help="how many ref structures to eval error")
     args = parser.parse_args()
     # Post‐parse validation
@@ -314,6 +315,11 @@ def main():
             # save
             pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_iter={t}.pkl'), 'wb+'))
             time_path = os.path.join(args.save_dir, f"times_iter={t}.png")            
+            bpe.plot_times(time_path)
+            if bpe.plot_iou_with_sec_structs:
+                iou_path = os.path.join(args.save_dir, f"iou_iter={t}.png")
+                bpe.plot_iou(iou_path)
+        if t % args.plot_every == 0:
             run_path = os.path.join(args.save_dir, f"run_iter={t}.png")            
             if ref_coords:
                 plot(ref_coords, 
@@ -321,11 +327,7 @@ def main():
                     run_path, 
                     no_iters=t, 
                     step_iter=args.save_every, 
-                    ratio=N/1000)
-            bpe.plot_times(time_path)
-            if bpe.plot_iou_with_sec_structs:
-                iou_path = os.path.join(args.save_dir, f"iou_iter={t}.png")
-                bpe.plot_iou(iou_path)
+                    ratio=N/1000)            
         if args.debug: 
             bpe_debug.old_step()
             for i in range(bpe.n):

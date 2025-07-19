@@ -25,28 +25,29 @@ bins=$3
 bin_strat="uniform"
 sec="False"
 res_init="true"
-save_every=10
+save_every=$4
+plot_every=$5
+p_size=$6
+num_p=$7
 
-extra=""
-
-if [ -n "$4" ]; then
-  extra="$extra --p-min-size $4"
-fi
-
-if [ -n "$5" ]; then
-  extra="$extra --num-p $5"
+if [ -n "$8" ]; then
+  extra="--save-dir $8"
+else
+  extra="--auto"
 fi
 
 PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff/bin/python -m bin.encode \
-  --auto \
   --bin-strategy $bin_strat \
   --bins $bins \
   --res-init $res_init \
   --sec $sec \
   --data-dir $data_dir \
   --save-every $save_every \
+  --plot-every $plot_every \
   --log-dir /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/logs \
   --pad $pad \
   --toy $toy \
+  --p-min-size $p_size \
+  --num-p $num_p \
   $extra

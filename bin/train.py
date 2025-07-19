@@ -1,583 +1,732 @@
-"""
-Training script.
-
-Example usage: python ~/protdiff/bin/train.py ~/protdiff/config_jsons/full_run_canonical_angles_only_zero_centered_1000_timesteps_reduced_len.json
-"""
-
-import os, sys
-import shutil
-import json
-import logging
-from pathlib import Path
-import multiprocessing
 import argparse
-import functools
-from datetime import datetime
-from typing import *
-
-import numpy as np
-from matplotlib import pyplot as plt
-
+import pickle
 import torch
-from torch.utils.data import Dataset, Subset
-from torch.utils.data.dataloader import DataLoader
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Subset
 import torch.nn.functional as F
+from sklearn.metrics import roc_auc_score, f1_score
+import pandas as pd
+from pathlib import Path
+import wandb
+from collections import Counter
+import random
+import logging
+from tqdm import tqdm
+from foldingdiff.tokenizer import *
 
-import pytorch_lightning as pl
-from pytorch_lightning.strategies.ddp import DDPStrategy
-
-from transformers import BertConfig
-
-from foldingdiff import datasets
-from foldingdiff import modelling
-from foldingdiff import losses
-from foldingdiff import beta_schedules
-from foldingdiff import plotting
-from foldingdiff import utils
-from foldingdiff import custom_metrics as cm
-
-assert torch.cuda.is_available(), "Requires CUDA to train"
-# reproducibility
-torch.manual_seed(6489)
-# torch.use_deterministic_algorithms(True)
-torch.backends.cudnn.benchmark = False
-
-# Define some typing literals
-ANGLES_DEFINITIONS = Literal[
-    "canonical", "canonical-full-angles", "canonical-minimal-angles", "cart-coords"
-]
-
-
-@pl.utilities.rank_zero_only
-def plot_timestep_distributions(
-    train_dset,
-    timesteps: int,
-    plots_folder: Path,
-    shift_angles_zero_twopi: bool = False,
-    n_intervals: int = 11,
-) -> None:
-    """
-    Plot the distributions across timesteps. This is parallelized across multiple cores
-    """
-    ts = np.linspace(0, timesteps, num=n_intervals, endpoint=True).astype(int)
-    ts = np.minimum(ts, timesteps - 1).tolist()
-    logging.info(f"Plotting distributions at {ts} to {plots_folder}")
-    args = [
-        (
-            t,
-            train_dset,
-            True,
-            not shift_angles_zero_twopi,
-            plots_folder / f"train_dists_at_t_{t}.pdf",
-        )
-        for t in ts
-    ]
-
-    # Parallelize the plotting
-    pool = multiprocessing.Pool(processes=min(multiprocessing.cpu_count(), len(ts)))
-    pool.starmap(plotting.plot_val_dists_at_t, args)
-    pool.close()
-    pool.join()
-
-
-@pl.utilities.rank_zero_only
-def plot_kl_divergence(train_dset, plots_folder: Path) -> None:
-    """
-    Plot the KL divergence over time
-    """
-    # This works because the main body of this script should clean out the dir
-    # between runs
-    outname = plots_folder / "kl_divergence_timesteps.pdf"
-    if outname.is_file():
-        logging.info(f"KL divergence plot exists at {outname}; skipping...")
-    kl_at_timesteps = cm.kl_from_dset(train_dset)  # Shape (n_timesteps, n_features)
-    n_timesteps, n_features = kl_at_timesteps.shape
-    fig, axes = plt.subplots(
-        dpi=300, figsize=(n_features * 3.05, 2.5), ncols=n_features, sharey=True
+# -----------------------------
+# 0) ARGPARSE
+# -----------------------------
+def parse_args():
+    parser = argparse.ArgumentParser(description="Protein Motif LM Training")
+    parser.add_argument(
+        "--wandb_team", type=str, default="msun415",
+        help="Weights & Biases team name"
     )
-    for i, (ft_name, ax) in enumerate(zip(train_dset.feature_names["angles"], axes)):
-        ax.plot(np.arange(n_timesteps), kl_at_timesteps[:, i], label=ft_name)
-        ax.axhline(0, color="grey", linestyle="--", alpha=0.5)
-        ax.set(title=ft_name)
-        if i == 0:
-            ax.set(ylabel="KL divergence")
-        ax.set(xlabel="Timestep")
-    fig.suptitle(
-        f"KL(empirical || Gaussian) over timesteps={train_dset.timesteps}", y=1.05
+    parser.add_argument(
+        "--wandb_project", type=str, default="protein-motif-lm",
+        help="Weights & Biases project name"
     )
-    fig.savefig(outname, bbox_inches="tight")
+    parser.add_argument("--task", choices=["remote-homology-detection", # per-protein
+                                            "structural-flexibility-prediction", # per-residue regression
+                                            "BindInt",
+                                            "BindBio",
+                                            "CatInt",
+                                            "CatBio",
+                                            "conserved-site-prediction",
+                                            "repeat-motif-prediction",
+                                            "epitope-region-prediction", # per-residue classification
+    ], default="remote-homology-detection")    
+    parser.add_argument(
+        "--checkpoint_path", type=str, required=True,
+        help="Path to pickle file containing tokenized sequences"
+    )
+    parser.add_argument(
+        "--labels_path", type=str,
+        help="Path to csv file containing processed probe labels"
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Run minimal reproducible example for debugging purposes only"
+    )
+    parser.add_argument(
+        "--inference", action="store_true",
+        help="Skip training and run final eval on test splits"
+    )
+    parser.add_argument(
+        "--model_path", type=str, default=None,
+        help="Path to a saved model checkpoint for inference mode"
+    )    
 
+   # sampling‐specific args:
+    parser.add_argument("--num_samples", type=int, default=10,
+                        help="How many unconditional sequences to sample")
+    parser.add_argument("--temperature", type=float, default=1.0,
+                        help="Sampling softmax temperature")    
 
-def get_train_valid_test_sets(
-    dataset_key: str = "cath",
-    angles_definitions: ANGLES_DEFINITIONS = "canonical-full-angles",
-    max_seq_len: int = 512,
-    min_seq_len: int = 0,
-    seq_trim_strategy: datasets.TRIM_STRATEGIES = "leftalign",
-    timesteps: int = 250,
-    variance_schedule: beta_schedules.SCHEDULES = "linear",
-    var_scale: float = np.pi,
-    toy: Union[int, bool] = False,
-    exhaustive_t: bool = False,
-    syn_noiser: str = "",
-    single_angle_debug: int = -1,  # Noise and return a single angle. -1 to disable, 1-3 for omega/theta/phi
-    single_time_debug: bool = False,  # Noise and return a single time
-    train_only: bool = False,
-) -> Tuple[Dataset, Dataset, Dataset]:
-    """
-    Get the dataset objects to use for train/valid/test
+    # model & training hyperparameters
+    parser.add_argument("--seed",         type=int,   default=0)
+    parser.add_argument("--d_model",      type=int,   default=256)
+    parser.add_argument("--num_layers",   type=int,   default=8)
+    parser.add_argument("--hidden_dims",  type=int,   nargs='+', default=[32])
+    parser.add_argument("--dropout",      type=float, default=0.5)
+    parser.add_argument("--num_heads",    type=int,   default=8)
+    parser.add_argument("--d_ff",         type=int,   default=1024)
+    parser.add_argument("--batch_size",   type=int,   default=32)
+    parser.add_argument("--lr",           type=float, default=1e-4)
+    parser.add_argument("--epochs",       type=int,   default=10)
+    parser.add_argument("--eval_interval",type=int,   default=500)
+    parser.add_argument("--probe_layer",  type=int,   default=4)
+    parser.add_argument("--probe_epochs", type=int,   default=5)
+    parser.add_argument("--probe_lr",     type=float, default=1e-3)
 
-    Note, these need to be wrapped in data loaders later
-    """
-    assert (
-        single_angle_debug != 0
-    ), f"Invalid value for single_angle_debug: {single_angle_debug}"
+    return parser.parse_args()
 
-    clean_dset_class = {
-        "canonical": datasets.CathCanonicalAnglesDataset,
-        "canonical-full-angles": datasets.CathCanonicalAnglesOnlyDataset,
-        "canonical-minimal-angles": datasets.CathCanonicalMinimalAnglesDataset,
-        "cart-coords": datasets.CathCanonicalCoordsDataset,
-    }[angles_definitions]
-    logging.info(f"Clean dataset class: {clean_dset_class}")
-
-    splits = ["train"] if train_only else ["train", "validation", "test"]
-    logging.info(f"Creating data splits: {splits}")
-    clean_dsets = [
-        clean_dset_class(
-            pdbs=dataset_key,
-            split=s,
-            pad=max_seq_len,
-            min_length=min_seq_len,
-            trim_strategy=seq_trim_strategy,
-            zero_center=False if angles_definitions == "cart-coords" else True,
-            toy=toy,
-        )
-        for s in splits
-    ]
-    assert len(clean_dsets) == len(splits)
-    # Set the training set mean to the validation set mean
-    if len(clean_dsets) > 1 and clean_dsets[0].means is not None:
-        logging.info(f"Updating valid/test mean offset to {clean_dsets[0].means}")
-        for i in range(1, len(clean_dsets)):
-            clean_dsets[i].means = clean_dsets[0].means
-
-    if syn_noiser != "":
-        if syn_noiser == "halfhalf":
-            logging.warning("Using synthetic half-half noiser")
-            dset_noiser_class = datasets.SynNoisedByPositionDataset
+# -----------------------------
+# 1) DATASET
+# -----------------------------
+class ProteinDataset(Dataset):
+    def __init__(self, bpe, labels_path, task):
+        """
+        lables_path: csv for labels to structures in ckpt_path
+        """        
+        self.task = task
+        self.vocab_size = bpe.vocab_size
+        self.label_set = set()
+        logging.info(f"VOCAB SIZE: {self.vocab_size}")
+        if labels_path:
+            df = pd.read_csv(labels_path)              
+            self.do_probe = True
         else:
-            raise ValueError(f"Unknown synthetic noiser {syn_noiser}")
-    else:
-        if single_angle_debug > 0:
-            logging.warning("Using single angle noise!")
-            dset_noiser_class = functools.partial(
-                datasets.SingleNoisedAngleDataset, ft_idx=single_angle_debug
-            )
-        elif single_time_debug:
-            logging.warning("Using single angle and single time noise!")
-            dset_noiser_class = datasets.SingleNoisedAngleAndTimeDataset
-        else:
-            dset_noiser_class = datasets.NoisedAnglesDataset
+            df = None
+            self.do_probe = False
+        self.seqs = []
+        self.probe = []
+        self.probe_split = []
+        count = 0
+        for t in bpe.tokenizers:
+            tokenized = t.tokenize()
+            seq = bpe.quantize(tokenized)
+            if self.do_probe:
+                pdb_chain = Path(t.fname).stem.split('_')
+                if len(pdb_chain) != 2:
+                    raise ValueError(f"{t.fname} should be pdbid_chainid")
+                pdb_id = pdb_chain[0]
+                chain_id = pdb_chain[1]
+                mask = (df.pdb_id == pdb_id) & (df.chain_id == chain_id)
+                result = df.loc[mask]
+                if len(result) >= 1:
+                    row = result.iloc[0]
+                    if self.task == "remote-homology-detection":
+                        label = row["fold_label"]
+                        self.label_set.add(label)
+                        split = row["split"]
+                    else:
+                        label = eval(row["residue_label"])
+                        self.label_set |= set(label)
+                        if len(label) == t.n:                        
+                            motif_label = []
+                            for (start, _, length) in t.bond_to_token.values():
+                                counts = Counter(label[start//3: (start+length+1)//3])
+                                key, _ = counts.most_common(1)[0]
+                                motif_label.append(key)
+                                if start+length < 3*t.n-1:
+                                    motif_label.append(None)
+                                    motif_label.append(None)
+                                    motif_label.append(None)                    
+                            label = motif_label
+                            split = row["split"]
+                        else:
+                            label = [None for _ in seq]
+                            split = None
+                else:
+                    label = [None for _ in seq]
+                    split = None
+                self.probe.append(label)
+                self.probe_split.append(split)
+                count += (split is not None)
+            self.seqs.append(seq)        
+        max_len = len(sorted(self.seqs, key=len)[int(0.95*len(self.seqs))])
+        self.max_len = max_len
+        logging.info(f"MAX LEN: {max_len}")
+        logging.info(f"{count}/{len(bpe.tokenizers)} structures have labels")
+        logging.info(f"LABEL SET: {self.label_set}")
 
-    logging.info(f"Using {dset_noiser_class} for noise")
-    noised_dsets = [
-        dset_noiser_class(
-            dset=ds,
-            dset_key="coords" if angles_definitions == "cart-coords" else "angles",
-            timesteps=timesteps,
-            exhaustive_t=(i != 0) and exhaustive_t,
-            beta_schedule=variance_schedule,
-            nonangular_variance=1.0,
-            angular_variance=var_scale,
-        )
-        for i, ds in enumerate(clean_dsets)
-    ]
-    for dsname, ds in zip(splits, noised_dsets):
-        logging.info(f"{dsname}: {ds}")
+    def __len__(self):
+        return len(self.seqs)
 
-    # Pad with None values
-    if len(noised_dsets) < 3:
-        noised_dsets = noised_dsets + [None] * int(3 - len(noised_dsets))
-    assert len(noised_dsets) == 3
+    def __getitem__(self, idx):
+        seq = self.seqs[idx][: self.max_len]
+        pad_len = self.max_len - len(seq)
+        input_ids = seq + [0] * pad_len
+        attention_mask = [1] * len(seq) + [0] * pad_len
+        labels = input_ids[1:] + [0]
+        item = {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
+        if self.do_probe:
+            if self.task == "remote-homology-detection":
+                item["probe_labels"] = self.probe[idx]
+            else:
+                probe_seq = self.probe[idx][: self.max_len]
+                pad_probe = probe_seq + [None] * pad_len
+                probe_labels = [val if (val is not None) else 0 for val in pad_probe]
+                probe_mask = [(val is not None) for val in pad_probe]
+                item["probe_labels"] = torch.tensor(probe_labels, dtype=torch.long)
+                item["probe_mask"] = torch.tensor(probe_mask, dtype=torch.bool)
+        return item
 
-    return tuple(noised_dsets)
+
+def split_dataset(ds, seed=0):
+    n = len(ds)
+    idxes = list(range(n))
+    random.seed(seed)
+    random.shuffle(idxes)
+    train_idxes, valid_idxes, test_idxes = idxes[:int(0.8*n)], idxes[int(0.8*n): int(0.9*n)], idxes[int(0.9*n):]
+    return Subset(ds, train_idxes), Subset(ds, valid_idxes), Subset(ds, test_idxes)
 
 
-def build_callbacks(
-    outdir: str, early_stop_patience: Optional[int] = None, swa: bool = False
-):
+def split_probe_dataset(ds):
+    train_idx = [i for i in range(len(ds)) if ds.probe_split[i] == "train"]
+    valid_idx = [i for i in range(len(ds)) if ds.probe_split[i] == "valid"]
+    test_idx = [i for i in range(len(ds)) if (ds.probe_split[i] and ds.probe_split[i] not in ["train", "valid"])]
+    return Subset(ds, train_idx), Subset(ds, valid_idx), Subset(ds, test_idx)
+
+
+def make_collate_fn(global_max_len: int):
     """
-    Build out the callbacks
+    Returns a `collate_fn` for DataLoader that:
+      1) Computes the true lengths from attention_mask in the batch
+      2) Truncates each tensor to the batch_max length (<= global_max_len)
+      3) Stacks into batched tensors
     """
-    # Create the logging dir
-    os.makedirs(os.path.join(outdir, "logs/lightning_logs"), exist_ok=True)
-    os.makedirs(os.path.join(outdir, "models/best_by_valid"), exist_ok=True)
-    os.makedirs(os.path.join(outdir, "models/best_by_train"), exist_ok=True)
-    callbacks = [
-        pl.callbacks.ModelCheckpoint(
-            monitor="val_loss",
-            dirpath=os.path.join(outdir, "models/best_by_valid"),
-            save_top_k=5,
-            save_weights_only=True,
-            mode="min",
-        ),
-        pl.callbacks.ModelCheckpoint(
-            monitor="train_loss",
-            dirpath=os.path.join(outdir, "models/best_by_train"),
-            save_top_k=5,
-            save_weights_only=True,
-            mode="min",
-        ),
-        pl.callbacks.LearningRateMonitor(logging_interval="epoch"),
-    ]
-    if early_stop_patience is not None and early_stop_patience > 0:
-        logging.info(f"Using early stopping with patience {early_stop_patience}")
-        callbacks.append(
-            pl.callbacks.early_stopping.EarlyStopping(
-                monitor="val_loss",
-                patience=early_stop_patience,
-                verbose=True,
-                mode="min",
+    def collate_fn(batch):
+        # batch is a list of dicts, each with keys:
+        # "input_ids", "attention_mask", "labels" (and optionally "probe_labels")
+        # all are 1D LongTensors of length `global_max_len`.
+        
+        # 1) find true sequence lengths via attention_mask
+        seq_lens = [int(item["attention_mask"].sum().item()) for item in batch]
+        batch_max = min(max(seq_lens), global_max_len)
+        
+        # 2) truncate & stack
+        input_ids      = torch.stack([item["input_ids"][:batch_max]      for item in batch], dim=0)
+        attention_mask = torch.stack([item["attention_mask"][:batch_max] for item in batch], dim=0)
+        labels         = torch.stack([item["labels"][:batch_max]         for item in batch], dim=0)
+        
+        out = {
+            "input_ids":      input_ids,
+            "attention_mask": attention_mask,
+            "labels":         labels,
+        }
+        
+        # 3) optionally carry through probe_labels
+        if "probe_labels" in batch[0]:
+            if isinstance(batch[0]["probe_labels"], Iterable):
+                probe_labels = torch.stack([item["probe_labels"][:batch_max] for item in batch], dim=0)
+                out["probe_labels"] = probe_labels
+                probe_mask = torch.stack([item["probe_mask"][:batch_max] for item in batch], dim=0)
+                out["probe_mask"] = probe_mask  
+            else:
+                out["probe_labels"] = torch.tensor([item["probe_labels"] for item in batch])
+        return out
+
+    return collate_fn
+
+# -----------------------------
+# 2) MODEL
+# -----------------------------
+class ProteinLM(nn.Module):
+    def __init__(self, vocab_size, d_model, num_layers, num_heads, d_ff, max_len):
+        super().__init__()
+        self.token_emb = nn.Embedding(vocab_size, d_model)
+        self.pos_emb   = nn.Embedding(max_len, d_model)
+        self.layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=num_heads,
+                dim_feedforward=d_ff,
+                activation="gelu",
+                batch_first=True,
             )
-        )
-    if swa:
-        # Stochastic weight averaging
-        callbacks.append(pl.callbacks.StochasticWeightAveraging())
-    logging.info(f"Model callbacks: {callbacks}")
-    return callbacks
+            for _ in range(num_layers)
+        ])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size, bias=False)
+        self.head.weight = self.token_emb.weight  # weight tying
 
+    def forward(self, input_ids, attention_mask):
+        seq_len = input_ids.size(1)
+        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
+        x = self.token_emb(input_ids) + self.pos_emb(positions)
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
+        for layer in self.layers:
+            x = layer(
+                x,
+                src_mask = causal_mask,
+                src_key_padding_mask = ~attention_mask.bool()
+            )
+        x = self.ln_f(x)
+        logits = self.head(x)
+        return logits, x
 
-# For some arg defaults, see as reference:
-# https://huggingface.co/docs/transformers/main/en/main_classes/trainer.html
-
-
-@pl.utilities.rank_zero_only
-def record_args_and_metadata(func_args: Dict[str, Any], results_folder: Path):
-    # Create results directory
-    if results_folder.exists():
-        logging.warning(f"Removing old results directory: {results_folder}")
-        shutil.rmtree(results_folder)
-    results_folder.mkdir(exist_ok=True)
-    with open(results_folder / "training_args.json", "w") as sink:
-        logging.info(f"Writing training args to {sink.name}")
-        json.dump(func_args, sink, indent=4)
-        for k, v in func_args.items():
-            logging.info(f"Training argument: {k}={v}")
-
-    # Record current Git version
-    try:
-        import git
-
-        repo = git.Repo(
-            path=os.path.dirname(os.path.abspath(__file__)),
-            search_parent_directories=True,
-        )
-        sha = repo.head.object.hexsha
-        with open(results_folder / "git_sha.txt", "w") as sink:
-            sink.write(sha + "\n")
-    except git.exc.InvalidGitRepositoryError:
-        logging.warning("Could not determine Git repo status -- not a git repo")
-    except ModuleNotFoundError:
-        logging.warning(
-            f"Could not determine Git repo status -- GitPython is not installed"
-        )
-
-
-def train(
-    # Controls output
-    results_dir: str = "./results",
-    # Controls data loading and noising process
-    dataset_key: str = "cath",  # cath, alhpafold, or a directory containing pdb files
-    angles_definitions: ANGLES_DEFINITIONS = "canonical-full-angles",
-    max_seq_len: int = 512,
-    min_seq_len: int = 0,  # 0 means no filtering based on min sequence length
-    trim_strategy: datasets.TRIM_STRATEGIES = "leftalign",
-    timesteps: int = 250,
-    variance_schedule: beta_schedules.SCHEDULES = "linear",  # cosine better on single angle toy test
-    variance_scale: float = 1.0,
-    # Related to model architecture
-    time_encoding: modelling.TIME_ENCODING = "gaussian_fourier",
-    num_hidden_layers: int = 12,  # Default 12
-    hidden_size: int = 384,  # Default 768
-    intermediate_size: int = 768,  # Default 3072
-    num_heads: int = 12,  # Default 12
-    position_embedding_type: Literal[
-        "absolute", "relative_key", "relative_key_query"
-    ] = "absolute",  # relative_key = https://arxiv.org/pdf/1803.02155.pdf | relative_key_query = https://arxiv.org/pdf/2009.13658.pdf
-    dropout_p: float = 0.1,  # Default 0.1, can disable for debugging
-    decoder: modelling.DECODER_HEAD = "mlp",
-    # Related to training strategy
-    gradient_clip: float = 1.0,  # From BERT trainer
-    batch_size: int = 64,
-    lr: float = 5e-5,  # Default lr for huggingface BERT trainer
-    loss: modelling.LOSS_KEYS = "smooth_l1",
-    use_pdist_loss: Union[
-        float, Tuple[float, float]
-    ] = 0.0,  # Use the pairwise distances between CAs as an additional loss term, multiplied by this scalar
-    l2_norm: float = 0.0,  # AdamW default has 0.01 L2 regularization, but BERT trainer uses 0.0
-    l1_norm: float = 0.0,
-    circle_reg: float = 0.0,
-    min_epochs: Optional[int] = None,
-    max_epochs: int = 10000,
-    early_stop_patience: int = 0,  # Set to 0 to disable early stopping
-    lr_scheduler: modelling.LR_SCHEDULE = None,
-    use_swa: bool = False,  # Stochastic weight averaging can improve training genearlization
-    # Misc. and debugging
-    multithread: bool = True,
-    subset: Union[bool, int] = False,  # Subset to n training examples
-    exhaustive_validation_t: bool = False,  # Exhaustively enumerate t for validation/test
-    syn_noiser: str = "",  # If specified, use a synthetic noiser
-    single_angle_debug: int = -1,  # Noise and return a single angle, choose [1, 2, 3] or -1 to disable
-    single_timestep_debug: bool = False,  # Noise and return a single timestep
-    cpu_only: bool = False,
-    ngpu: int = -1,  # -1 for all GPUs
-    write_valid_preds: bool = False,  # Write validation predictions to disk at each epoch
-    dryrun: bool = False,  # Disable some frills for a fast run to just train
-):
-    """Main training loop"""
-    # Record the args given to the function before we create more vars
-    # https://stackoverflow.com/questions/10724495/getting-all-arguments-and-values-passed-to-a-function
-    func_args = locals()
-
-    results_folder = Path(results_dir)
-    record_args_and_metadata(func_args, results_folder)
-
-    # Get datasets and wrap them in dataloaders
-    dsets = get_train_valid_test_sets(
-        dataset_key=dataset_key,
-        angles_definitions=angles_definitions,
-        max_seq_len=max_seq_len,
-        min_seq_len=min_seq_len,
-        seq_trim_strategy=trim_strategy,
-        timesteps=timesteps,
-        variance_schedule=variance_schedule,
-        var_scale=variance_scale,
-        toy=subset,
-        syn_noiser=syn_noiser,
-        exhaustive_t=exhaustive_validation_t,
-        single_angle_debug=single_angle_debug,
-        single_time_debug=single_timestep_debug,
-    )
-    # Record the masked means in the output directory
-    np.save(
-        results_folder / "training_mean_offset.npy",
-        dsets[0].dset.get_masked_means(),
-        fix_imports=False,
-    )
-    # Record the exact files used for training
-    for i, dset in enumerate(dsets):
-        dset_name = ["train", "valid", "test"][i]
-        with open(results_folder / f"{dset_name}_files.txt", "w") as f:
-            f.write("\n".join(dset.dset.filenames))
-
-    # Calculate effective batch size
-    # https://pytorch-lightning.readthedocs.io/en/1.4.0/advanced/multi_gpu.html#batch-size
-    # Under DDP, effective batch size is batch_size * num_gpus * num_nodes
-    effective_batch_size = batch_size
-    if torch.cuda.is_available():
-        effective_batch_size = int(batch_size / torch.cuda.device_count())
-    pl.utilities.rank_zero_info(
-        f"Given batch size: {batch_size} --> effective batch size with {torch.cuda.device_count()} GPUs: {effective_batch_size}"
-    )
-
-    train_dataloader, valid_dataloader, test_dataloader = [
-        DataLoader(
-            dataset=ds,
-            batch_size=effective_batch_size,
-            shuffle=i == 0,  # Shuffle only train loader
-            num_workers=multiprocessing.cpu_count() if multithread else 1,
-            pin_memory=True,
-        )
-        for i, ds in enumerate(dsets)
-    ]
-
-    # Create plots in output directories of distributions from different timesteps
-    plots_folder = results_folder / "plots"
-    os.makedirs(plots_folder, exist_ok=True)
-    # Skip this for debug runs
-    if (
-        single_angle_debug < 0
-        and not single_timestep_debug
-        and not syn_noiser
-        and not dryrun
+# -----------------------------
+# 3) PROBE CLASSIFIER
+# -----------------------------
+class ProbeClassifier(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        num_classes: int,
+        hidden_dims: list[int] = None,
+        activation: str = "relu",
+        dropout: float = 0.0
     ):
-        plot_kl_divergence(dsets[0], plots_folder)
-        plot_timestep_distributions(
-            dsets[0],
-            timesteps=timesteps,
-            plots_folder=plots_folder,
+        """
+        A simple MLP probe.
+
+        Args:
+          input_dim:    Size of the LM hidden states (d_model).
+          num_classes:  Number of output classes.
+          hidden_dims:  List of hidden‐layer sizes. If None, defaults to [input_dim//2].
+          activation:   One of {"relu","gelu","tanh","leaky_relu"}.
+          dropout:      Dropout probability between layers.
+        """
+        super().__init__()
+
+        # default hidden size
+        if hidden_dims is None:
+            hidden_dims = [max(input_dim // 2, 1)]
+
+        # Map string → activation class
+        acts = {
+            "relu":      nn.ReLU,
+            "gelu":      nn.GELU,
+            "tanh":      nn.Tanh,
+            "leaky_relu":nn.LeakyReLU,
+        }
+        Act = acts.get(activation.lower(), nn.ReLU)
+
+        # Build layer sizes: [in → h1 → h2 → … → out]
+        dims = [input_dim] + hidden_dims + [num_classes]
+        layers = []
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i+1]))
+            # for all but final layer, add activation+dropout
+            if i < len(dims) - 2:
+                layers.append(Act())
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        """
+        h: (..., input_dim)  e.g. shape (N, d_model)
+        returns logits (..., num_classes)
+        """
+        return self.net(h)
+
+# -----------------------------
+# 4) EVAL HELPERS
+# -----------------------------
+def evaluate_next_token(model, dataloader, device, criterion):
+    model.eval()
+    total_loss, total_tokens = 0.0, 0
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="eval next token"):
+            input_ids = batch["input_ids"].to(device)
+            mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+            logits, _ = model(input_ids, mask)
+            loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+            nt = mask.sum().item()
+            total_loss += loss.item() * nt
+            total_tokens += nt
+    return total_loss / total_tokens
+
+def evaluate_probe(model,
+                   train_loader,
+                   val_loader,
+                   device,
+                   args,
+                   num_labels,
+                   per_residue=False):
+    model.eval()
+
+    # 1) Gather training features & labels (same as before)...
+    if per_residue:
+        feats, labs, masks = [], [], []
+        with torch.no_grad():
+            for batch in tqdm(train_loader, desc="gather train features"):
+                ids        = batch["input_ids"].to(device)
+                attn_mask  = batch["attention_mask"].to(device)
+                p_labels   = batch["probe_labels"].to(device)
+                p_mask     = batch["probe_mask"].to(device)
+
+                _, hidden = model(ids, attn_mask)      # (B, L, D)
+                B, L, D    = hidden.size()
+
+                feats.append(hidden.reshape(B*L, D))
+                labs.append(p_labels.reshape(B*L))
+                masks.append(p_mask.reshape(B*L).bool())
+
+        feat_train = torch.cat(feats, dim=0)
+        lab_train  = torch.cat(labs,  dim=0)
+        mask_train = torch.cat(masks, dim=0)
+
+        # only keep positions with labels
+        feat_train = feat_train[mask_train]
+        lab_train  = lab_train[mask_train]
+
+    else:
+        feats, labs = [], []
+        with torch.no_grad():
+            for batch in tqdm(train_loader, desc="gather train features"):
+                ids        = batch["input_ids"].to(device)
+                attn_mask  = batch["attention_mask"].to(device)
+                p_labels   = batch["probe_labels"].to(device)  # (B,)
+
+                _, hidden = model(ids, attn_mask)             # (B, L, D)
+                masked    = hidden * attn_mask.unsqueeze(-1)  # zero out padding
+                lengths   = attn_mask.sum(dim=1, keepdim=True)  # (B,1)
+                avg_h     = masked.sum(dim=1) / lengths         # (B, D)
+
+                feats.append(avg_h)
+                labs.append(p_labels)
+
+        feat_train = torch.cat(feats, dim=0)  # (N, D)
+        lab_train  = torch.cat(labs,  dim=0)  # (N,)
+
+    # 2) Train linear probe
+    probe = ProbeClassifier(args.d_model, 
+                            num_labels, 
+                            hidden_dims=args.hidden_dims, 
+                            dropout=args.dropout).to(device)
+    opt   = torch.optim.Adam(probe.parameters(), lr=args.probe_lr)
+    crit  = nn.CrossEntropyLoss()
+
+    probe.train()
+    for _ in tqdm(range(args.probe_epochs), desc="training probe"):
+        opt.zero_grad()
+        logits_p = probe(feat_train)
+        loss_p   = crit(logits_p, lab_train)
+        loss_p.backward()
+        opt.step()
+
+    # 3) Evaluate on validation split
+    probe.eval()
+    # buffers for metrics
+    if per_residue:
+        all_probs, all_labels = [], []
+    else:
+        all_preds, all_labels = [], []
+
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc="probe inference"):
+            ids        = batch["input_ids"].to(device)
+            attn_mask  = batch["attention_mask"].to(device)
+            p_labels   = batch["probe_labels"].to(device)
+
+            _, hidden = model(ids, attn_mask)
+            if per_residue:
+                p_mask = batch["probe_mask"].to(device)
+                B, L, D = hidden.size()
+                feats_v = hidden.reshape(B*L, D)
+                labs_v  = p_labels.reshape(B*L)
+                mask_v  = p_mask.reshape(B*L).bool()
+
+                logits_v = probe(feats_v[mask_v])             # (n_labeled, C)
+                probs_v  = F.softmax(logits_v, dim=-1).cpu().numpy()
+                labs_np  = labs_v[mask_v].cpu().numpy()
+
+                all_probs.append(probs_v)
+                all_labels.append(labs_np)
+
+            else:
+                # protein-level
+                masked   = hidden * attn_mask.unsqueeze(-1)
+                lengths  = attn_mask.sum(dim=1, keepdim=True)
+                avg_h    = masked.sum(dim=1) / lengths  # (B, D)
+                logits_p = probe(avg_h)                              # (B, C)
+                preds    = logits_p.argmax(dim=-1).cpu().numpy()
+                labs_np  = p_labels.cpu().numpy()
+
+                all_preds.append(preds)
+                all_labels.append(labs_np)
+
+    metrics = {}
+    if per_residue:
+        y_true = np.concatenate(all_labels)
+        y_prob = np.concatenate(all_probs)  # shape (N, C)
+        y_pred = y_prob.argmax(axis=1)
+
+        metrics["accuracy"] = (y_pred == y_true).mean()
+        # multi-class AUROC (one-vs-rest, macro average)
+        metrics["auroc"]     = roc_auc_score(
+            y_true, y_prob if num_labels > 2 else y_prob[:, 1], 
+            multi_class="ovo", 
+            average="macro"
         )
+    else:
+        y_true = np.concatenate(all_labels)
+        y_pred = np.concatenate(all_preds)
 
-    # https://jaketae.github.io/study/relative-positional-encoding/
-    # looking at the relative distance between things is more robust
+        metrics["accuracy"]  = (y_pred == y_true).mean()
+        metrics["macro_f1"]  = f1_score(y_true, y_pred, average="macro")
 
-    loss_fn = loss
-    if single_angle_debug > 0 or single_timestep_debug or syn_noiser:
-        loss_fn = functools.partial(losses.radian_smooth_l1_loss, beta=0.1 * np.pi)
-    logging.info(f"Using loss function: {loss_fn}")
+    return metrics
 
-    # Shape of the input is (batch_size, timesteps, features)
-    sample_input = dsets[0][0]["corrupted"]  # First item of the training dset
-    model_n_inputs = sample_input.shape[-1]
-    logging.info(f"Auto detected {model_n_inputs} inputs")
-
-    cfg = BertConfig(
-        max_position_embeddings=max_seq_len,
-        num_attention_heads=num_heads,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        num_hidden_layers=num_hidden_layers,
-        position_embedding_type=position_embedding_type,
-        hidden_dropout_prob=dropout_p,
-        attention_probs_dropout_prob=dropout_p,
-        use_cache=False,
-    )
-    # ft_is_angular from the clean datasets angularity definition
-    ft_key = "coords" if angles_definitions == "cart-coords" else "angles"
-    model = modelling.BertForDiffusion(
-        config=cfg,
-        time_encoding=time_encoding,
-        decoder=decoder,
-        ft_is_angular=dsets[0].dset.feature_is_angular[ft_key],
-        ft_names=dsets[0].dset.feature_names[ft_key],
-        lr=lr,
-        loss=loss_fn,
-        use_pairwise_dist_loss=use_pdist_loss
-        if isinstance(use_pdist_loss, float)
-        else [*use_pdist_loss, timesteps],
-        l2=l2_norm,
-        l1=l1_norm,
-        circle_reg=circle_reg,
-        epochs=max_epochs,
-        steps_per_epoch=len(train_dataloader),
-        lr_scheduler=lr_scheduler,
-        write_preds_to_dir=results_folder / "valid_preds"
-        if write_valid_preds
-        else None,
-    )
-    # https://stackoverflow.com/questions/49201236/check-the-total-number-of-parameters-in-a-pytorch-model
-    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logging.info(f"Model has {num_params} trainable parameters")
-
-    cfg.save_pretrained(results_folder)
-
-    callbacks = build_callbacks(
-        outdir=results_folder, early_stop_patience=early_stop_patience, swa=use_swa
-    )
-
-    # Get accelerator and distributed strategy
-    accelerator, strategy = "cpu", None
-    if not cpu_only and torch.cuda.is_available():
-        accelerator = "cuda"
-        if torch.cuda.device_count() > 1:
-            # https://github.com/Lightning-AI/lightning/discussions/6761https://github.com/Lightning-AI/lightning/discussions/6761
-            strategy = DDPStrategy(find_unused_parameters=False)
-
-    logging.info(f"Using {accelerator} with strategy {strategy}")
-    trainer = pl.Trainer(
-        default_root_dir=results_folder,
-        gradient_clip_val=gradient_clip,
-        min_epochs=min_epochs,
-        max_epochs=max_epochs,
-        check_val_every_n_epoch=1,
-        callbacks=callbacks,
-        logger=pl.loggers.CSVLogger(save_dir=results_folder / "logs"),
-        log_every_n_steps=min(200, len(train_dataloader)),  # Log >= once per epoch
-        accelerator=accelerator,
-        strategy=strategy,
-        gpus=ngpu,
-        enable_progress_bar=False,
-        move_metrics_to_cpu=False,  # Saves memory
-    )
-    trainer.fit(
-        model=model,
-        train_dataloaders=train_dataloader,
-        val_dataloaders=valid_dataloader,
-    )
-
-    # Plot the losses
-    metrics_csv = os.path.join(
-        trainer.logger.save_dir, "lightning_logs/version_0/metrics.csv"
-    )
-    assert os.path.isfile(metrics_csv)
-    # Plot the losses
-    plotting.plot_losses(
-        metrics_csv, out_fname=plots_folder / "losses.pdf", simple=True
-    )
-
-
-def build_parser() -> argparse.ArgumentParser:
+def sample_unconditional(
+    model,
+    device,
+    bpe,
+    length_prior: list[int],
+    start_prior: list[int],
+    num_samples: int = 1,
+    temperature: float = 1.0,
+):
     """
-    Build CLI parser
+    Unconditional sampling of `num_samples` sequences of total length K
+    (where K is drawn from length_prior and satisfies K%4==1), *without* any
+    extra BOS token.  The first token is sampled from start_prior.
     """
-    parser = argparse.ArgumentParser(
-        usage=__doc__,
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    assert bpe.res_init, "BPE must be initialized"
+
+    # 1) filter legal lengths
+    legal_lengths = [K for K in length_prior if K % 4 == 1]
+    assert legal_lengths, "No K in length_prior satisfies K%4==1"
+
+    # 2) precompute your 4 ranges
+    n         = len(bpe._tokens)
+    omega_off = bpe.cum_bin_count('omega')
+    cac1n_off = bpe.cum_bin_count('C:1N:1CA')
+    phi_off   = bpe.cum_bin_count('phi')
+    ranges = {
+        0: (0,   n),
+        1: (n + omega_off,
+            n + omega_off + len(bpe._bin_counts[1]['omega'])),
+        2: (n + phi_off,
+            n + phi_off + len(bpe._bin_counts[1]['phi'])),
+        3: (n + cac1n_off,
+            n + cac1n_off + len(bpe._bin_counts[1]['CA:C:1N'])),
+    }
+    term_motifs = np.array([i < len(bpe._tokens) \
+                   and Tokenizer.num_bonds(list(bpe._tokens.values())[i]) == 2 \
+                    for i in range(bpe.vocab_size)])
+    
+    vocab_size = model.token_emb.num_embeddings
+    model.eval()
+    samples = []
+
+    with torch.no_grad():
+        for _ in range(num_samples):
+            # a) pick your length
+            K = random.choice(legal_lengths)
+
+            # b) sample the very first token from your empirical start_prior
+            first_tok = random.choice(start_prior)
+            seq = torch.tensor([[first_tok]], dtype=torch.long, device=device)
+
+            # c) generate the remaining K-1 tokens
+            for j in range(1, K):
+                attn_mask = torch.ones_like(seq)
+                logits, _ = model(seq, attn_mask)
+                logits = logits[0, -1]  # last‐position logits
+
+                # apply the j%4 mask
+                lo, hi = ranges[j % 4]
+                block = torch.full((vocab_size,), float("-inf"), device=device)
+                block[lo:hi] = 0.0
+                if j < K-1:
+                    block[term_motifs] = float("-inf")
+                else:
+                    block[~term_motifs] = float("-inf")           
+                logits = logits + block
+
+                # sample next
+                probs = F.softmax(logits / temperature, dim=-1)
+                nxt   = torch.multinomial(probs, 1)  # shape (1,)
+                seq   = torch.cat([seq, nxt.unsqueeze(0)], dim=1)
+
+            samples.append(seq.squeeze(0).tolist())
+
+    # (optional) decode & visualize
+    for i, sample in enumerate(samples):
+        quant = bpe.dequantize(sample)
+        repl  = bpe.recover(quant)
+        t     = bpe.recover_structure(repl, quant)
+        t.visualize(f"{i}.png")
+
+    return samples
+
+# -----------------------------
+# 5) MAIN TRAIN/EVAL LOOP
+# -----------------------------
+def main(args):
+    if args.debug:
+        # override for minimal debug run
+        args.d_model    = 64
+        args.num_layers = 1
+        args.num_heads  = 2
+        args.d_ff       = 256
+        args.max_len    = 32
+        args.batch_size = 4
+        args.epochs     = 1
+        args.eval_interval = 1
+
+    # 1) W&B init (disable if debug)
+    wandb.init(
+        entity=args.wandb_team,
+        project=args.wandb_project,
+        config=vars(args),
+        mode="disabled" if args.debug else None
     )
 
-    # https://stackoverflow.com/questions/4480075/argparse-optional-positional-arguments
-    parser.add_argument(
-        "config", nargs="?", default="", type=str, help="json of params"
+    # 2) Load & split
+    save_dir = Path(args.checkpoint_path).parent
+    bpe = pickle.load(open(args.checkpoint_path, 'rb'))
+    full_ds = ProteinDataset(
+        bpe,
+        args.labels_path,
+        task=args.task
     )
-    parser.add_argument(
-        "-o",
-        "--outdir",
-        type=str,
-        default=os.path.join(os.getcwd(), "results"),
-        help="Directory to write model training outputs",
-    )
-    parser.add_argument(
-        "--toy",
-        type=int,
-        default=None,
-        help="Use a toy dataset of n items rather than full dataset",
-    )
-    parser.add_argument(
-        "--debug_single_time",
-        action="store_true",
-        help="Debug single angle and timestep",
-    )
-    parser.add_argument("--cpu", action="store_true", help="Force use CPU")
-    parser.add_argument(
-        "--ngpu", type=int, default=-1, help="Number of GPUs to use (-1 for all)"
-    )
-    parser.add_argument("--dryrun", action="store_true", help="Dry run")
-    return parser
+    # derived metrics: vocab_size / max_len
+    vocab_size = full_ds.vocab_size
+    max_len = full_ds.max_len
+    num_labels = len(full_ds.label_set)
 
+    # 3) Debug mode: take only first 10
+    # next-token splits: train / val / test_ntp
+    train_ds, val_ds, test_ntp_ds = split_dataset(full_ds, args.seed)
+    # probing splits: probe_train / probe_val / probe_test
+    if args.labels_path:
+        probe_train_ds, probe_val_ds, probe_test_ds = split_probe_dataset(full_ds)        
 
-def main():
-    """Run the training script based on params in the given json file"""
-    parser = build_parser()
-    args = parser.parse_args()
+    if args.debug:
+        idx10 = list(range(10))
+        train_ds       = Subset(train_ds, idx10)
+        val_ds         = Subset(val_ds,   idx10)
+        test_ntp_ds    = Subset(test_ntp_ds, idx10)
+        if args.labels_path:
+            probe_train_ds = Subset(probe_train_ds, idx10)
+            probe_val_ds   = Subset(probe_val_ds,   idx10)
+            probe_test_ds  = Subset(probe_test_ds,  idx10)    
 
-    # Load in parameters and run training loop
-    config_args = {}  # Empty dictionary as default
-    if args.config:
-        with open(args.config) as source:
-            config_args = json.load(source)
-    config_args = utils.update_dict_nonnull(
-        config_args,
-        {
-            "results_dir": args.outdir,
-            "subset": args.toy,
-            "single_timestep_debug": args.debug_single_time,
-            "cpu_only": args.cpu,
-            "ngpu": args.ngpu,
-            "dryrun": args.dryrun,
-        },
-    )
-    train(**config_args)
+    # 4) DataLoaders
+    collate_fn         = make_collate_fn(max_len)
+    train_loader       = DataLoader(train_ds,       batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader         = DataLoader(val_ds,         batch_size=args.batch_size, collate_fn=collate_fn)
+    test_ntp_loader    = DataLoader(test_ntp_ds,    batch_size=args.batch_size, collate_fn=collate_fn)
 
+    if args.labels_path:
+        probe_train_loader = DataLoader(probe_train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
+        probe_val_loader   = DataLoader(probe_val_ds,   batch_size=args.batch_size, collate_fn=collate_fn)
+        probe_test_loader  = DataLoader(probe_test_ds,  batch_size=args.batch_size, collate_fn=collate_fn)
+
+    # 5) Model / optimizer / loss
+    device = torch.device("cuda" if (not args.debug and torch.cuda.is_available()) else "cpu")
+    model = ProteinLM(
+        vocab_size, args.d_model, args.num_layers,
+        args.num_heads, args.d_ff, max_len
+    ).to(device)
+
+    # Inference mode?  Load weights and skip training
+    if args.inference:
+        assert args.model_path, "--model_path required in inference mode"
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
+        logging.info(f"loaded model from {args.model_path}")
+        length_prior = [len(seq) for seq in full_ds.seqs]
+        start_prior = [seq[0] for seq in full_ds.seqs]  
+        model.eval()
+        crit = nn.CrossEntropyLoss(ignore_index=0)
+        
+        # a) Next-token on **test** split
+        ntp_loss = evaluate_next_token(model, test_ntp_loader, device, crit)
+        ntp_ppl  = torch.exp(torch.tensor(ntp_loss))
+        wandb.log({"test/ntp_loss": ntp_loss, "test/ntp_ppl": ntp_ppl})        
+
+        # b) Sample unconditional
+        samples = sample_unconditional(
+            model=model,
+            device=device,
+            bpe=bpe,
+            length_prior=length_prior,
+            start_prior=start_prior,
+            num_samples=args.num_samples,
+            temperature=args.temperature,
+        )      
+                
+        # c) Zero-shot probe on **probe_test** (trained on probe_train)
+        if args.labels_path:
+            metrics = evaluate_probe(
+                model,
+                probe_train_loader,
+                probe_test_loader,
+                device,
+                args,
+                num_labels = num_labels,
+                per_residue=(args.task != "remote-homology-detection")
+            )
+            wandb.log({f"test/probe_{key}": metrics[key] for key in metrics})
+        return
+
+    # 6) Training loop
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    crit = nn.CrossEntropyLoss(ignore_index=0)
+    step = 0
+
+    for epoch in range(args.epochs):
+        model.train()
+        for batch in train_loader:
+            optimizer.zero_grad()
+            ids  = batch["input_ids"].to(device)
+            m    = batch["attention_mask"].to(device)
+            lbls = batch["labels"].to(device)
+            logits, _ = model(ids, m)
+            loss = crit(logits.view(-1, vocab_size), lbls.view(-1))
+            loss.backward()
+            optimizer.step()
+
+            step += 1
+            wandb.log({"train/loss": loss.item(), "step": step})
+
+            if step % args.eval_interval == 0:
+                # a) next-token on **val**
+                val_loss = evaluate_next_token(model, val_loader, device, crit)
+                val_ppl  = torch.exp(torch.tensor(val_loss))
+                wandb.log({
+                    "val/ntp_loss": val_loss,
+                    "val/ntp_ppl":  val_ppl,
+                    "step": step
+                })
+
+                # b) zero-shot probe on **probe_val**
+                if args.labels_path:
+                    metrics = evaluate_probe(
+                        model,
+                        probe_train_loader,
+                        probe_val_loader,
+                        device,
+                        args,
+                        num_labels = num_labels,
+                        per_residue=(args.task != "remote-homology-detection")
+                    )
+                    wandb.log({f"val/probe_{key}": metrics[key] for key in metrics} | {"step": step})
+                model.train()
+
+        # end‐of‐epoch checkpoint
+        ckpt = f"{save_dir}/ckpt_epoch{epoch}.pt"
+        torch.save(model.state_dict(), ckpt)
+        wandb.save(ckpt)
+
+    wandb.finish()
 
 if __name__ == "__main__":
-    curr_time = datetime.now().strftime("%y%m%d_%H%M%S")
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[
-            logging.FileHandler(f"training_{curr_time}.log"),
-            logging.StreamHandler(),
-        ],
-    )
-
-    main()
+    args = parse_args()    
+    if args.debug:
+        breakpoint()
+    main(args)

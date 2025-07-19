@@ -387,32 +387,65 @@ def plot(ref_coords, d, output_path, no_iters=500, step_iter=10, ratio=1):
         errs.append(err)
         Ks.append(K)
         Ls.append(L)
+    N = len(bpe.tokenizers)
+    final_iter = t+1        
     Ks = np.array(Ks)
     Ls = np.array(Ls)
     errs = np.array(errs)
-    N = len(Ks)
+    if ratio is None:
+        ratio = N/1000
     # make figure + first (left) axis
     fig, ax1 = plt.subplots(figsize=(8, 5))
-    # plot L vs K on left y-axis
+    # plot the diagonal L = K/ratio
     x_diag = np.linspace(Ks.min(), Ks.max(), 100)
-    ax1.plot(x_diag, x_diag/ratio, linestyle='--', label=f"L=K (K/L={ratio:.1f})")
-    ax1.plot(Ks, Ls, marker='o', label="L vs K", linewidth=2)
+    ax1.plot(x_diag, x_diag/ratio,
+            linestyle='--',
+            label=f"L=K/ratio={ratio:.1f}")
+    # plot L vs K
+    ax1.plot(Ks, Ls,
+            marker='o',
+            label="L vs K",
+            linewidth=2)
+    # annotate intersection
+    diff = np.abs(Ls - Ks/ratio)
+    idx  = np.argmin(diff)        # index of closest approach
+    K_int, L_int = Ks[idx], Ls[idx]
+    # highlight the point
+    ax1.scatter([K_int], [L_int],
+                color='orange',
+                s=100,
+                zorder=5,
+                label="Approx. Intersection")
+    # arrow + text
+    ax1.annotate(
+        f"K≈{K_int}", 
+        xy=(K_int, L_int),
+        xytext=(15, 15),
+        textcoords="offset points",
+        arrowprops=dict(arrowstyle="->", color="orange"),
+        color="orange"
+    )
     ax1.set_xlabel("K (Vocab Size) Each Round")
-    ax1.set_ylabel("L  (#Motif-Tokens Per PDB)")
+    ax1.set_ylabel("L (#Motif-Tokens Per PDB)")
     ax1.set_xticks(Ks)
-    # create a second y-axis that shares the same x
+    # create a second y-axis for errors
     ax2 = ax1.twinx()
-    ax2.plot(Ks, errs, marker='x', linestyle=':', label="Error", linewidth=2, color="tab:red")
+    ax2.plot(Ks, errs,
+            marker='x',
+            linestyle=':',
+            label="Error",
+            linewidth=2,
+            color="tab:red")
     ax2.set_ylabel("Error", color="tab:red")
     ax2.tick_params(axis="y", labelcolor="tab:red")
-    # combine legends from both axes
+    # combined legend
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
-    ax1.set_title(f"L vs K for N={N} w/ {len(Ks)} BPE rounds")
+    ax1.set_title(f"L vs K for N={N} w/ {final_iter} BPE rounds")
     fig.tight_layout()
-    plt.show()  
-    plt.savefig(output_path) 
+    plt.show()
+    plt.savefig(output_path)
 
 
 # bpe = pickle.load(open(f'./ckpts/{d}/bpe_iter=0.pkl', 'rb'))
