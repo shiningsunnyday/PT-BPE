@@ -29,7 +29,8 @@ from biotite.structure.io.pdb import PDBFile
 
 SSE_BACKEND = Literal["dssp", "psea"]
 
-from train import get_train_valid_test_sets
+# deprecated from old foldingdiff bin/train.py
+# from train import get_train_valid_test_sets
 
 from foldingdiff.angles_and_coords import get_pdb_length
 

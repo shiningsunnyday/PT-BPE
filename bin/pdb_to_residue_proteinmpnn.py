@@ -9,7 +9,7 @@ from typing import *
 
 from tqdm.auto import tqdm
 
-PROTEINMPNN_SCRIPT = os.path.expanduser("~/software/ProteinMPNN/protein_mpnn_run.py")
+PROTEINMPNN_SCRIPT = os.path.expanduser("ProteinMPNN/protein_mpnn_run.py")
 assert os.path.isfile(PROTEINMPNN_SCRIPT), f"Expected {PROTEINMPNN_SCRIPT} to exist"
 
 

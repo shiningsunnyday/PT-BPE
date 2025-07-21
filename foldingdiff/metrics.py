@@ -8,6 +8,8 @@ from foldingdiff.algo import *
 from typing import *
 from tqdm import tqdm
 import tempfile
+import shutil
+import subprocess
 from foldingdiff.angles_and_coords import create_new_chain_nerf
 from foldingdiff.tmalign import max_tm_across_refs, run_tmalign_gdt_ts
 from foldingdiff.lddt import lddt
@@ -15,57 +17,12 @@ from foldingdiff.angles_and_coords import canonical_distances_and_dihedrals
 from itertools import groupby
 import biotite.structure as struc
 from biotite.structure.io.pdb import PDBFile
+from bin.pdb_to_residue_proteinmpnn import PROTEINMPNN_SCRIPT, read_fasta, generate_residues_proteinmpnn
+from bin.sample import write_preds_pdb_folder
+from bin.annot_secondary_structures import count_structures_in_pdb
+from bin.omegafold_across_gpus import run_omegafold_with_env
+cwd = Path(__file__).parents[1]
 
-def write_preds_pdb_folder(
-    final_sampled: Sequence[pd.DataFrame],
-    outdir: str,
-    basename_prefix: str = "generated_",
-    threads: int = multiprocessing.cpu_count(),
-) -> List[str]:
-    """
-    Write the predictions as pdb files in the given folder along with information regarding the
-    tm_score for each prediction. Returns the list of files written.
-    """
-    os.makedirs(outdir, exist_ok=True)
-    logging.info(
-        f"Writing sampled angles as PDB files to {outdir} using {threads} threads"
-    )
-    # Create the pairs of arguments
-    arg_tuples = [
-        (os.path.join(outdir, f"{basename_prefix}{i}.pdb"), samp)
-        for i, samp in enumerate(final_sampled)
-    ]
-    # Write in parallel
-    with multiprocessing.Pool(threads) as pool:
-        files_written = pool.starmap(create_new_chain_nerf, arg_tuples)
-
-    return files_written
-    
-
-def generate_residues_proteinmpnn(
-    pdb_fname: str, n_sequences: int = 8, temperature: float = 0.1
-) -> List[str]:
-    """
-    Generates residues for the given pdb_filename using ProteinMPNN
-
-    Trippe et al uses a temperature of 0.1 to sample 8 amino acid sequences per structure
-    """
-    bname = os.path.basename(pdb_fname).replace(".pdb", ".fa")
-    with tempfile.TemporaryDirectory() as tempdir:
-        tempdir = Path(tempdir)
-        cmd = f'python {PROTEINMPNN_SCRIPT} --pdb_path_chains A --out_folder {tempdir} --num_seq_per_target {n_sequences} --seed 1234 --batch_size {n_sequences} --pdb_path {pdb_fname} --sampling_temp "{temperature}" --ca_only'
-        retval = subprocess.call(
-            cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        assert retval == 0, f"Command {cmd} failed with return value {retval}"
-        outfile = tempdir / "seqs" / bname
-        assert os.path.isfile(outfile)
-
-        # Read the fasta file, return the sequences that were generated
-        seqs = read_fasta(outfile)
-        seqs = {k: v for k, v in seqs.items() if k.startswith("T=")}
-    assert len(seqs) == n_sequences
-    return list(seqs.values())
 
 def best_tm_vs_train(pdb, train_pdbs):
     best_tm, _ = max_tm_across_refs(pdb, train_pdbs, parallel=True)
@@ -127,49 +84,6 @@ def compute_gdt_ts_novelty(generated_pdbs: list[str],
 SSE_BACKEND = Literal["dssp", "psea"]
 
 
-def count_structures_in_pdb(
-    fname: str, backend: SSE_BACKEND = "psea"
-) -> Tuple[int, int]:
-    """Count the secondary structures (# alpha, # beta) in the given pdb file"""
-    assert os.path.exists(fname)
-
-    # Get the secondary structure
-    warnings.filterwarnings("ignore", ".*elements were guessed from atom_.*")
-    source = PDBFile.read(fname)
-    if source.get_model_count() > 1:
-        return (-1, -1)
-    source_struct = source.get_structure()[0]
-    chain_ids = np.unique(source_struct.chain_id)
-    assert len(chain_ids) == 1
-    chain_id = chain_ids[0]
-
-    if backend == "psea":
-        # a = alpha helix, b = beta sheet, c = coil
-        ss = struc.annotate_sse(source_struct, chain_id)
-        # https://stackoverflow.com/questions/6352425/whats-the-most-pythonic-way-to-identify-consecutive-duplicates-in-a-list
-        ss_grouped = [(k, sum(1 for _ in g)) for k, g in groupby(ss)]
-        ss_counts = Counter([chain for chain, _ in ss_grouped])
-
-        num_alpha = ss_counts["a"] if "a" in ss_counts else 0
-        num_beta = ss_counts["b"] if "b" in ss_counts else 0
-    elif backend == "dssp":
-        # https://www.biotite-python.org/apidoc/biotite.application.dssp.DsspApp.html#biotite.application.dssp.DsspApp
-        app = dssp.DsspApp(source_struct)
-        app.start()
-        app.join()
-        ss = app.get_sse()
-        ss_grouped = [(k, sum(1 for _ in g)) for k, g in groupby(ss)]
-        ss_counts = Counter([chain for chain, _ in ss_grouped])
-
-        num_alpha = ss_counts["H"] if "H" in ss_counts else 0
-        num_beta = ss_counts["B"] if "B" in ss_counts else 0
-    else:
-        raise ValueError(
-            f"Unrecognized backend for calculating secondary structures: {backend}"
-        )
-    logging.debug(f"From {fname}:\t{num_alpha} {num_beta}")
-    return num_alpha, num_beta
-
 
 def ss_counts(pdb_paths, backend="psea", n_threads=8):
     """
@@ -188,6 +102,7 @@ def ss_counts(pdb_paths, backend="psea", n_threads=8):
     counts = [count_structures_in_pdb(str(p), backend) for p in pdb_paths]
     # drop failed
     return [c for c in counts if c != (-1, -1)]
+
 def ss_kl_divergence(generated_pdbs, train_pdbs,
                     max_bins=8, backend="psea") -> dict:
     """
@@ -272,7 +187,7 @@ def fold_seq_with_omegafold(seq: str, gpu_id: int = 0, weights: str = "") -> str
         fasta.write_text(">Q\n" + seq + "\n")
         outdir = Path(tmp) / "pred"
         outdir.mkdir()
-        run_omegafold(str(fasta), str(outdir), gpu=gpu_id, weights=weights)
+        run_omegafold_with_env(str(fasta), str(outdir), gpu=gpu_id, weights=weights)
         pred_pdb = next(outdir.glob("*.pdb"))
         # move the file out of tmp so it survives
         final = Path(tmp).with_suffix(".pdb")
@@ -423,8 +338,8 @@ def compute_metrics(generated_pdb_paths, train_pdb_paths):
 if __name__ == "__main__":
     refset = [np.random.randn(5, 3), np.random.randn(10, 3)]
     genset = [np.random.randn(5, 3), np.random.randn(10, 3)]    
-    genfile_dir = os.path.abspath("../ckpts/1752523675.4143364/sampled_pdb")
-    trainfile_dir = os.path.abspath("../data/struct_token_bench/interpro/conserved/")
+    genfile_dir = os.path.abspath("ckpts/1752523675.4143364/sampled_pdb")
+    trainfile_dir = os.path.abspath("data/struct_token_bench/interpro/conserved/")
     genfiles = [Path(f"{genfile_dir}/generated_0.pdb"), Path(f"{genfile_dir}/generated_1.pdb")]
     trainfiles = [Path(f"{trainfile_dir}/12ca_A.pdb")]
     breakpoint()

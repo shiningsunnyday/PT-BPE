@@ -19,9 +19,10 @@ from astropy.visualization.mpl_normalize import ImageNormalize
 import torch
 from huggingface_hub import snapshot_download
 
+# deprecated from old foldingdiff bin/
 # Import data loading code from main training script
-from train import get_train_valid_test_sets
-from annot_secondary_structures import make_ss_cooccurrence_plot
+# from train import get_train_valid_test_sets # old foldingdiff train
+# from annot_secondary_structures import make_ss_cooccurrence_plot
 
 from foldingdiff import modelling
 from foldingdiff import sampling

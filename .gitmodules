@@ -4,3 +4,6 @@
 [submodule "StructTokenBench"]
 	path = StructTokenBench
 	url = https://github.com/KatarinaYuan/StructTokenBench.git
+[submodule "ProteinMPNN"]
+	path = ProteinMPNN
+	url = https://github.com/dauparas/ProteinMPNN.git
