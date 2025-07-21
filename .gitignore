@@ -2,7 +2,12 @@
 .vscode/*
 *.pkl
 data/cath/*
+**/*.gz
+*.bz2
+data/struct_token_bench/*
 data/alphafold/*.pdb.gz
+data/funfams/*
+data/interpro/*
 *.png
 *.gif
 *.pt
@@ -16,6 +21,7 @@ ckpts/*
 temp/*
 scripts/temp/*
 *output.tsv
+wandb/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
