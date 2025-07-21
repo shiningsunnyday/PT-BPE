@@ -1,6 +1,5 @@
 from copy import deepcopy
 import numpy as np
-from foldingdiff.tokenizer import *
 
 
 def kabsch(P, Q):

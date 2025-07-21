@@ -41,6 +41,7 @@ def lddt(query: Path, ref: Path) -> float:
         os.chdir(tmpdir)
 
         cmd = f"{DOCKER_OST} {IMAGE} compare-structures -m {os.path.basename(str(query))} -r {os.path.basename(str(ref))} --lddt -o lddt.json"
+        print(cmd)
         subprocess.call(cmd, shell=True)
 
         if not os.path.exists("lddt.json"):

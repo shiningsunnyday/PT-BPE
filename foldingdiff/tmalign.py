@@ -41,7 +41,7 @@ def run_tmalign(query: str, reference: str, fast: bool = False) -> float:
         logging.warning(f"Tmalign failed on {query}|{reference}, returning NaN")
         return np.nan
 
-    # Parse the outpu
+    # Parse the output
     score_lines = []
     for line in output.decode().split("\n"):
         if line.startswith("TM-score"):
@@ -52,6 +52,69 @@ def run_tmalign(query: str, reference: str, fast: bool = False) -> float:
     score_getter = lambda s: float(re.findall(r"=\s+([0-9.]+)", s)[0])
     results_dict = {key_getter(s): score_getter(s) for s in score_lines}
     return results_dict["Chain_2"]  # Normalize by reference length
+
+
+def run_tmalign_gdt_ts(query: str, reference: str, fast: bool = False) -> dict:
+    """
+    Run TMalign on the two given input pdb files and parse TM-score and GDT-TS.
+
+    Returns a dictionary: {
+        "tm_score_chain_1": ...,
+        "tm_score_chain_2": ...,
+        "gdt_ts": ...,
+        "gdt_ha": ...,
+    }
+    """
+    assert os.path.isfile(query)
+    assert os.path.isfile(reference)
+
+    # Check if TMalign is installed
+    exec = shutil.which("TMalign")
+    if not exec:
+        raise FileNotFoundError("TMalign not found in PATH")
+
+    # Build the command
+    cmd = f"{exec} {query} {reference}"
+    if fast:
+        cmd += " -fast"
+    try:
+        output = subprocess.check_output(cmd, shell=True)
+    except subprocess.CalledProcessError:
+        logging.warning(f"Tmalign failed on {query}|{reference}, returning NaN")
+        return {
+            "tm_score_chain_1": np.nan,
+            "tm_score_chain_2": np.nan,
+            "gdt_ts": np.nan,
+            "gdt_ha": np.nan,
+        }
+
+    out = output.decode()
+    # Parse TM-scores
+    tm_scores = {}
+    for line in out.split("\n"):
+        # Example line: "TM-score    = 0.7808 (if normalized by length of Chain_1)"
+        if line.startswith("TM-score"):
+            m = re.search(r"TM-score\s+=\s*([\d\.]+).*?length of (Chain_1|Chain_2)", line)
+            if m:
+                tm_scores[m.group(2)] = float(m.group(1))
+    # Parse GDT-TS and GDT-HA
+    gdt_ts, gdt_ha = np.nan, np.nan
+    for line in out.split("\n"):
+        if "GDT-TS-score" in line:
+            m = re.search(r"GDT-TS-score\s*=\s*([\d\.]+)", line)
+            if m:
+                gdt_ts = float(m.group(1))
+        if "GDT-HA-score" in line:
+            m = re.search(r"GDT-HA-score\s*=\s*([\d\.]+)", line)
+            if m:
+                gdt_ha = float(m.group(1))
+
+    return {
+        "tm_score_chain_1": tm_scores.get("Chain_1", np.nan),
+        "tm_score_chain_2": tm_scores.get("Chain_2", np.nan),
+        "gdt_ts": gdt_ts,
+        "gdt_ha": gdt_ha,
+    }
 
 
 def max_tm_across_refs(
