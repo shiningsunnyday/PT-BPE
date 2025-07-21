@@ -14,7 +14,7 @@ import random
 import logging
 from tqdm import tqdm
 from foldingdiff.tokenizer import *
-
+from foldingdiff.metrics import *
 # -----------------------------
 # 0) ARGPARSE
 # -----------------------------
@@ -60,8 +60,8 @@ def parse_args():
     )    
 
    # sampling‐specific args:
-    parser.add_argument("--num_samples", type=int, default=10,
-                        help="How many unconditional sequences to sample")
+    parser.add_argument("--num_samples", type=int, default=2,
+                        help="How many uncdonditional sequences to sample")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="Sampling softmax temperature")    
 
@@ -102,11 +102,13 @@ class ProteinDataset(Dataset):
             df = None
             self.do_probe = False
         self.seqs = []
+        self.fnames = []
         self.probe = []
         self.probe_split = []
         count = 0
         for t in bpe.tokenizers:
             tokenized = t.tokenize()
+            self.fnames.append(t.fname)
             seq = bpe.quantize(tokenized)
             if self.do_probe:
                 pdb_chain = Path(t.fname).stem.split('_')
@@ -166,6 +168,7 @@ class ProteinDataset(Dataset):
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
+            "idx": idx
         }
         if self.do_probe:
             if self.task == "remote-homology-detection":
@@ -216,11 +219,12 @@ def make_collate_fn(global_max_len: int):
         input_ids      = torch.stack([item["input_ids"][:batch_max]      for item in batch], dim=0)
         attention_mask = torch.stack([item["attention_mask"][:batch_max] for item in batch], dim=0)
         labels         = torch.stack([item["labels"][:batch_max]         for item in batch], dim=0)
-        
+        idxes = [item["idx"] for item in batch]
         out = {
             "input_ids":      input_ids,
             "attention_mask": attention_mask,
             "labels":         labels,
+            "idxes": idxes
         }
         
         # 3) optionally carry through probe_labels
@@ -520,8 +524,7 @@ def sample_unconditional(
     
     vocab_size = model.token_emb.num_embeddings
     model.eval()
-    samples = []
-
+    samples = []    
     with torch.no_grad():
         for _ in range(num_samples):
             # a) pick your length
@@ -555,13 +558,16 @@ def sample_unconditional(
             samples.append(seq.squeeze(0).tolist())
 
     # (optional) decode & visualize
+    tokenizers = []
     for i, sample in enumerate(samples):
         quant = bpe.dequantize(sample)
         repl  = bpe.recover(quant)
         t     = bpe.recover_structure(repl, quant)
+        tokenizers.append(t)
         t.visualize(f"{i}.png")
 
-    return samples
+    return tokenizers
+
 
 # -----------------------------
 # 5) MAIN TRAIN/EVAL LOOP
@@ -579,12 +585,12 @@ def main(args):
         args.eval_interval = 1
 
     # 1) W&B init (disable if debug)
-    wandb.init(
-        entity=args.wandb_team,
-        project=args.wandb_project,
-        config=vars(args),
-        mode="disabled" if args.debug else None
-    )
+    # wandb.init(
+    #     entity=args.wandb_team,
+    #     project=args.wandb_project,
+    #     config=vars(args),
+    #     mode="disabled" if args.debug else None
+    # )
 
     # 2) Load & split
     save_dir = Path(args.checkpoint_path).parent
@@ -642,15 +648,10 @@ def main(args):
         length_prior = [len(seq) for seq in full_ds.seqs]
         start_prior = [seq[0] for seq in full_ds.seqs]  
         model.eval()
-        crit = nn.CrossEntropyLoss(ignore_index=0)
-        
-        # a) Next-token on **test** split
-        ntp_loss = evaluate_next_token(model, test_ntp_loader, device, crit)
-        ntp_ppl  = torch.exp(torch.tensor(ntp_loss))
-        wandb.log({"test/ntp_loss": ntp_loss, "test/ntp_ppl": ntp_ppl})        
+        crit = nn.CrossEntropyLoss(ignore_index=0)       
 
-        # b) Sample unconditional
-        samples = sample_unconditional(
+        # a) Sample unconditional
+        tokenizers = sample_unconditional(
             model=model,
             device=device,
             bpe=bpe,
@@ -658,7 +659,18 @@ def main(args):
             start_prior=start_prior,
             num_samples=args.num_samples,
             temperature=args.temperature,
-        )      
+        )        
+        train_pdb_files = [full_ds.fnames[item["idx"]] for item in train_ds]
+        sampled_dfs = [t._angles_and_dists[["phi", "psi", "omega", "tau", "CA:C:1N", "C:1N:1CA"]] for t in tokenizers]        
+        outdir = Path(args.model_path).parent
+        gen_pdb_files = write_preds_pdb_folder(sampled_dfs, outdir / "sampled_pdb")        
+        metrics = compute_metrics(gen_pdb_files, train_pdb_files)
+        wandb.log(metrics)
+
+        # b) Next-token on **test** split
+        ntp_loss = evaluate_next_token(model, test_ntp_loader, device, crit)
+        ntp_ppl  = torch.exp(torch.tensor(ntp_loss))
+        wandb.log({"test/ntp_loss": ntp_loss, "test/ntp_ppl": ntp_ppl})         
                 
         # c) Zero-shot probe on **probe_test** (trained on probe_train)
         if args.labels_path:
