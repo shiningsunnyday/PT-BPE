@@ -13,6 +13,7 @@ from collections import Counter
 import random
 import logging
 from tqdm import tqdm
+from foldingdiff.datasets import extract_backbone_coords
 from foldingdiff.tokenizer import *
 from foldingdiff.metrics import *
 # -----------------------------
@@ -488,20 +489,25 @@ def sample_unconditional(
     model,
     device,
     bpe,
+    max_len: int,
     length_prior: list[int],
     start_prior: list[int],
     num_samples: int = 1,
-    temperature: float = 1.0,
+    temperature: float = 1.0    
 ):
     """
     Unconditional sampling of `num_samples` sequences of total length K
     (where K is drawn from length_prior and satisfies K%4==1), *without* any
     extra BOS token.  The first token is sampled from start_prior.
     """
+    import logging
     assert bpe.res_init, "BPE must be initialized"
 
+    logging.info(f"Starting sample_unconditional with num_samples={num_samples}, device={device}")
+
     # 1) filter legal lengths
-    legal_lengths = [K for K in length_prior if K % 4 == 1]
+    legal_lengths = [K for K in length_prior if (K % 4 == 1 and K <= max_len)]
+    logging.info(f"Legal lengths: {legal_lengths}")
     assert legal_lengths, "No K in length_prior satisfies K%4==1"
 
     # 2) precompute your 4 ranges
@@ -509,6 +515,7 @@ def sample_unconditional(
     omega_off = bpe.cum_bin_count('omega')
     cac1n_off = bpe.cum_bin_count('C:1N:1CA')
     phi_off   = bpe.cum_bin_count('phi')
+    logging.info(f"n={n} omega_off={omega_off} cac1n_off={cac1n_off} phi_off={phi_off}")
     ranges = {
         0: (0,   n),
         1: (n + omega_off,
@@ -518,56 +525,98 @@ def sample_unconditional(
         3: (n + cac1n_off,
             n + cac1n_off + len(bpe._bin_counts[1]['CA:C:1N'])),
     }
+    logging.info(f"Ranges: {ranges}")
     term_motifs = np.array([i < len(bpe._tokens) \
                    and Tokenizer.num_bonds(list(bpe._tokens.values())[i]) == 2 \
                     for i in range(bpe.vocab_size)])
-    
+    logging.info(f"term_motifs shape: {term_motifs.shape}, bpe.vocab_size: {bpe.vocab_size}")
     vocab_size = model.token_emb.num_embeddings
+    logging.info(f"Model embedding vocab_size: {vocab_size}")
     model.eval()
     samples = []    
+    attempts = 0
+    max_attempts_per_sample = 100  # To avoid infinite loops on totally broken setups
+
     with torch.no_grad():
-        for _ in range(num_samples):
-            # a) pick your length
-            K = random.choice(legal_lengths)
+        for sample_idx in range(num_samples):
+            inner_attempt = 0
+            while True:
+                inner_attempt += 1
+                attempts += 1
+                if inner_attempt > max_attempts_per_sample:
+                    logging.error(f"[Sample {sample_idx}] Reached {max_attempts_per_sample} failed attempts -- giving up!")
+                    raise RuntimeError(f"Could not produce valid sample {sample_idx} after {max_attempts_per_sample} tries.")
+                try:
+                    # a) pick your length
+                    K = random.choice(legal_lengths)
+                    logging.info(
+                        f"[Sample {sample_idx}:{inner_attempt}] Picked length K={K}"
+                    )
 
-            # b) sample the very first token from your empirical start_prior
-            first_tok = random.choice(start_prior)
-            seq = torch.tensor([[first_tok]], dtype=torch.long, device=device)
+                    # b) sample the very first token from your empirical start_prior
+                    first_tok = random.choice(start_prior)
+                    seq = torch.tensor([[first_tok]], dtype=torch.long, device=device)
 
-            # c) generate the remaining K-1 tokens
-            for j in range(1, K):
-                attn_mask = torch.ones_like(seq)
-                logits, _ = model(seq, attn_mask)
-                logits = logits[0, -1]  # last‐position logits
+                    # c) generate the remaining K-1 tokens, catching NaN and index errors
+                    for j in range(1, K):
+                        attn_mask = torch.ones_like(seq)
+                        try:
+                            logits, _ = model(seq, attn_mask)
+                        except Exception as e:
+                            logging.info(
+                                f"[Sample {sample_idx}:{inner_attempt}][Step {j}] Error in model forward: {e}"
+                            )
+                            raise  # Will be caught by outer except
 
-                # apply the j%4 mask
-                lo, hi = ranges[j % 4]
-                block = torch.full((vocab_size,), float("-inf"), device=device)
-                block[lo:hi] = 0.0
-                if j < K-1:
-                    block[term_motifs] = float("-inf")
-                else:
-                    block[~term_motifs] = float("-inf")           
-                logits = logits + block
+                        logits = logits[0, -1]  # last‐position logits
 
-                # sample next
-                probs = F.softmax(logits / temperature, dim=-1)
-                nxt   = torch.multinomial(probs, 1)  # shape (1,)
-                seq   = torch.cat([seq, nxt.unsqueeze(0)], dim=1)
+                        lo, hi = ranges[j % 4]
+                        assert 0 <= lo <= hi <= vocab_size, f"Invalid mask bounds: lo={lo}, hi={hi}, vocab_size={vocab_size}"
+                        block = torch.full((vocab_size,), float("-inf"), device=device)
+                        block[lo:hi] = 0.0
+                        if j < K-1:
+                            block[term_motifs] = float("-inf")
+                        else:
+                            block[~term_motifs] = float("-inf")
+                        logits = logits + block
 
-            samples.append(seq.squeeze(0).tolist())
+                        probs = torch.nn.functional.softmax(logits / temperature, dim=-1)
+
+                        # Check for NaNs or all-0s
+                        if not torch.isfinite(probs).all() or probs.sum() == 0:
+                            logging.info(
+                                f"[Sample {sample_idx}:{inner_attempt}][Step {j}] Probabilities invalid (NaN or all zero)."
+                            )
+                            raise RuntimeError("Probabilities NaN or degenerate")
+
+                        nxt = torch.multinomial(probs, 1)  # shape (1,)
+                        seq = torch.cat([seq, nxt.unsqueeze(0)], dim=1)
+
+                    # If we got here, sample completed successfully
+                    samples.append(seq.squeeze(0).tolist())
+                    logging.info(
+                        f"[Sample {sample_idx}:{inner_attempt}] Finished, sequence length: {len(samples[-1])} (SUCCESS)"
+                    )
+                    break  # Break retry loop for this sample
+
+                except Exception as e:
+                    logging.warning(f"[Sample {sample_idx}:{inner_attempt}] Sampling errored (retrying): {e}")
+                    continue  # Retry this sample attempt
 
     # (optional) decode & visualize
     tokenizers = []
     for i, sample in enumerate(samples):
+        logging.info(f"[Decode] Sample {i}, length: {len(sample)}")
         quant = bpe.dequantize(sample)
         repl  = bpe.recover(quant)
         t     = bpe.recover_structure(repl, quant)
         tokenizers.append(t)
-        t.visualize(f"{i}.png")
+        # try:
+        #     t.visualize(f"{i}.png")
+        # except Exception as e:
+        #     logging.warning(f"[Decode] Visualization failed for sample {i}: {e}")
 
     return tokenizers
-
 
 # -----------------------------
 # 5) MAIN TRAIN/EVAL LOOP
@@ -585,12 +634,12 @@ def main(args):
         args.eval_interval = 1
 
     # 1) W&B init (disable if debug)
-    # wandb.init(
-    #     entity=args.wandb_team,
-    #     project=args.wandb_project,
-    #     config=vars(args),
-    #     mode="disabled" if args.debug else None
-    # )
+    wandb.init(
+        entity=args.wandb_team,
+        project=args.wandb_project,
+        config=vars(args),
+        mode="disabled" if args.debug else None
+    )
 
     # 2) Load & split
     save_dir = Path(args.checkpoint_path).parent
@@ -659,12 +708,17 @@ def main(args):
             start_prior=start_prior,
             num_samples=args.num_samples,
             temperature=args.temperature,
+            max_len=max_len
         )        
         train_pdb_files = [full_ds.fnames[item["idx"]] for item in train_ds]
-        sampled_dfs = [t._angles_and_dists[["phi", "psi", "omega", "tau", "CA:C:1N", "C:1N:1CA"]] for t in tokenizers]        
+        full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
+        pool = mp.Pool(processes=mp.cpu_count())
+        train_coords = pool.map(full_coords_pfunc, tqdm(train_pdb_files, desc="extract coords train"))
+        sampled_dfs = [t._angles_and_dists[["phi", "psi", "omega", "tau", "CA:C:1N", "C:1N:1CA"]] for t in tokenizers]
         outdir = Path(args.model_path).parent
-        gen_pdb_files = write_preds_pdb_folder(sampled_dfs, outdir / "sampled_pdb")        
-        metrics = compute_metrics(gen_pdb_files, train_pdb_files)
+        gen_pdb_files = write_preds_pdb_folder(sampled_dfs, outdir / "sampled_pdb")
+        generated_coords = pool.map(full_coords_pfunc, tqdm(gen_pdb_files, desc="extract coords gen"))
+        metrics = compute_metrics(gen_pdb_files, train_pdb_files, generated_coords, train_coords)
         wandb.log(metrics)
 
         # b) Next-token on **test** split

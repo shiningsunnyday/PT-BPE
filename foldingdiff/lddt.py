@@ -23,7 +23,13 @@ import pandas as pd
 
 from tqdm.auto import tqdm
 
-IMAGE = "2d07309e7a56"  # Docker image from https://git.scicore.unibas.ch/schwede/openstructure/container_registry/
+IMAGE = "openstructure/ost:2.11.0"  # Docker image from https://git.scicore.unibas.ch/schwede/openstructure/container_registry/
+# If docker pull doesn't work, do:
+# git clone https://git.scicore.unibas.ch/schwede/openstructure.git
+# cd openstructure/docker
+# podman build -t openstructure/ost:2.11.0 .
+# podman images | grep openstructure
+# replace IMAGE with the ID
 
 DOCKER_OST = Path(os.path.realpath(__file__)).parent.parent / "scripts/run_docker_ost"
 assert DOCKER_OST.exists(), f"Cannot find docker wrapper script {DOCKER_OST}"

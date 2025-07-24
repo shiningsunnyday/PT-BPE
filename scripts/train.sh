@@ -44,7 +44,7 @@ case "$2" in
     task="CatInt"
     ;;
   5)
-    ckpt_path="./ckpts/1752610090.6529822/bpe_iter=30.pkl"
+    ckpt_path="./ckpts/1752610090.6529822/bpe_iter=30.pkl" # untrained
     task="BindInt"
     ;;
   6)
@@ -64,16 +64,18 @@ case "$2" in
 esac
 
 if [ -n "$3" ]; then
-  extra="--inference --model_path $3"
+  extra="--inference --model_path $3 --num_samples $4"
+  # load docker image for lddt
+  podman load -i ost.tar
 else
   extra=""
 fi
-
 labels_path="./data/struct_token_bench/processed_csvs/${task}.csv"
-python bin/train.py \
-    --checkpoint_path $ckpt_path \
-    --labels_path $labels_path \
-    --batch_size 8 \
-    --eval_interval 100 \
-    --task $task \
-    $extra $debug
+PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
+  /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/esm_env/bin/python -m bin.train \
+  --checkpoint_path $ckpt_path \
+  --labels_path $labels_path \
+  --batch_size 8 \
+  --eval_interval 100 \
+  --task $task \
+  $extra $debug

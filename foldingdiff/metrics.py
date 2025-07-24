@@ -1,5 +1,5 @@
 from pathlib import Path
-import multiprocessing
+import multiprocessing as mp
 import pandas as pd
 import os
 import logging
@@ -7,14 +7,16 @@ import warnings
 from foldingdiff.algo import *
 from typing import *
 from tqdm import tqdm
+from itertools import combinations
 import tempfile
 import shutil
 import subprocess
 from foldingdiff.angles_and_coords import create_new_chain_nerf
-from foldingdiff.tmalign import max_tm_across_refs, run_tmalign_gdt_ts
+from foldingdiff.tmalign import run_tmalign, max_tm_across_refs
 from foldingdiff.lddt import lddt
-from foldingdiff.angles_and_coords import canonical_distances_and_dihedrals
-from itertools import groupby
+from foldingdiff.angles_and_coords import canonical_distances_and_dihedrals, EXHAUSTIVE_ANGLES, EXHAUSTIVE_DISTS
+from itertools import groupby, product
+from collections import defaultdict
 import biotite.structure as struc
 from biotite.structure.io.pdb import PDBFile
 from bin.pdb_to_residue_proteinmpnn import PROTEINMPNN_SCRIPT, read_fasta, generate_residues_proteinmpnn
@@ -28,17 +30,25 @@ def best_tm_vs_train(pdb, train_pdbs):
     best_tm, _ = max_tm_across_refs(pdb, train_pdbs, parallel=True)
     return best_tm
 
+
+def tm_score(p1, p2):
+    res = run_tmalign(p1, p2, fast=True, dual=True)
+    return max(res["Chain_1"], res["Chain_2"])
+
+
 def best_lddt_vs_train(pdb, train_pdbs):
     return max(lddt(pdb, ref) for ref in train_pdbs)
 
 
 def phi_psi_angles(pdb_path):
     # returns (N,2) array of [φ,ψ] in degrees
-    df = canonical_distances_and_dihedrals(str(pdb_path))
+    df = canonical_distances_and_dihedrals(str(pdb_path), distances=EXHAUSTIVE_DISTS, angles=EXHAUSTIVE_ANGLES)
+    if df is None:
+        return None
     return df[["phi", "psi"]].dropna().values
 
 
-def hist2d(dataset):
+def hist2d(dataset, bins):
     H, _x, _y = np.histogram2d(
         x = np.concatenate([d[:,0] for d in dataset]),
         y = np.concatenate([d[:,1] for d in dataset]),
@@ -90,16 +100,15 @@ def ss_counts(pdb_paths, backend="psea", n_threads=8):
     Return a list of (n_alpha, n_beta) tuples for each pdb in pdb_paths,
     skipping multichain structures (count_structures_in_pdb returns (-1,-1)).
     """
-    # from multiprocessing import Pool
-    # with Pool(n_threads) as pool:
-    #     counts = list(
-    #         pool.starmap(
-    #             count_structures_in_pdb,
-    #             [(p, backend) for p in pdb_paths],
-    #             chunksize=10,
-    #         )
-    #     )
-    counts = [count_structures_in_pdb(str(p), backend) for p in pdb_paths]
+    with mp.Pool(n_threads) as pool:
+        counts = list(
+            pool.starmap(
+                count_structures_in_pdb,
+                [(p, backend) for p in pdb_paths],
+                chunksize=10,
+            )
+        )
+    # counts = [count_structures_in_pdb(str(p), backend) for p in pdb_paths]
     # drop failed
     return [c for c in counts if c != (-1, -1)]
 
@@ -180,19 +189,90 @@ def seq_identity(seq1: str, seq2: str) -> float:
 # ---------------------------------------------------------------------
 # a tiny wrapper to fold ONE sequence with OmegaFold & return PDB path
 # ---------------------------------------------------------------------
-def fold_seq_with_omegafold(seq: str, gpu_id: int = 0, weights: str = "") -> str:
-    """Write `seq` to a temp fasta, fold with OmegaFold, return PDB filename."""
+def fold_seqs_with_omegafold(
+    seqs: list[str],
+    gpu_id: int = 0,
+    weights: str = "",
+    env_name: str = "omegafold_env",
+) -> list[str]:
+    """
+    Fold a list of sequences with OmegaFold as a batch. 
+    Returns: list of output PDB filenames (in order matching input seqs).
+    """
     with tempfile.TemporaryDirectory() as tmp:
-        fasta = Path(tmp) / "q.fasta"
-        fasta.write_text(">Q\n" + seq + "\n")
+        fasta = Path(tmp) / "batch.fasta"
+        # Write all sequences to a single fasta
+        fasta.write_text(
+            "".join([f">Q{i}\n{s}\n" for i, s in enumerate(seqs)])
+        )
         outdir = Path(tmp) / "pred"
         outdir.mkdir()
-        run_omegafold_with_env(str(fasta), str(outdir), gpu=gpu_id, weights=weights)
-        pred_pdb = next(outdir.glob("*.pdb"))
-        # move the file out of tmp so it survives
-        final = Path(tmp).with_suffix(".pdb")
-        shutil.copy(str(pred_pdb), final)
-        return str(final)
+        # Run OmegaFold once for all sequences
+        run_omegafold_with_env(str(fasta), str(outdir), gpu=gpu_id, weights=weights, env_name=env_name)
+        pdbs = sorted(outdir.glob("*.pdb"))   # sorted by filename = by index
+        # Move all pdbs out of tmp so they survive context exit
+        finals = []
+        for i, pdb in enumerate(pdbs):
+            final = Path(tmp).with_suffix(f".{i}.pdb")
+            shutil.copy(str(pdb), final)
+            finals.append(str(final))
+        return finals
+
+
+def run_esmfold_batch(
+    generated_seqs, 
+    batch_size=2, 
+    esmfold_env="esmfold", 
+    out_type="pdb"  # or "plddt", etc., depending on your downstream use
+):
+    """
+    Batch-predict structures or confidences for sequences via esmfold external script.
+    Returns: (ids, outputs)
+    """
+    # 1. Assign unique IDs
+    ids = [f"sample_{i}" for i in range(len(generated_seqs))]
+
+    # 2. Write sequences to temp input
+    with tempfile.NamedTemporaryFile(mode='w+', suffix='.txt', delete=False) as in_f:
+        for seq in generated_seqs:
+            in_f.write(seq + '\n')
+        in_path = in_f.name
+
+    # 3. Prepare output file path
+    out_fd, out_path = tempfile.mkstemp(suffix='.pt' if out_type == "plddt" else '.txt')
+    os.close(out_fd)
+
+    # 4. Find the script (as in previous code, assumed at scripts/get_plddt.py)
+    script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "get_plddt.py")
+
+    # 5. Run ESMFold in the conda environment
+    try:
+        subprocess.run([
+            "conda", "run", "-n", esmfold_env,
+            "python", script_path,
+            "--in-file", in_path,
+            "--out-file", out_path
+        ], check=True)
+        # 6. Read output
+        if out_type == "plddt":
+            outputs = torch.load(out_path)
+        else:
+            # For PDB/text output, read as appropriate
+            with open(out_path, "r") as f:
+                outputs = f.read()
+    except subprocess.CalledProcessError as e:
+        print("Command failed with exit code", e.returncode)
+        print("=== STDOUT ===")
+        print(e.stdout)
+        print("=== STDERR ===")
+        print(e.stderr)
+        outputs = None
+    finally:
+        # 7. Clean up
+        os.remove(in_path)
+        os.remove(out_path)
+
+    return ids, outputs   
 
 # ---------------------------------------------------------------------
 # scTM computation
@@ -206,7 +286,7 @@ def sctm_designability(
     """
     For each backbone PDB:
       1. design N sequences with ProteinMPNN
-      2. fold each with OmegaFold
+      2. batch fold with OmegaFold
       3. compute TM‑score (via TM‑align) vs. original backbone
       4. keep the max TM‑score  ->  scTM
     Returns dict {basename : scTM}.
@@ -218,12 +298,13 @@ def sctm_designability(
             bb, n_sequences=n_designs, temperature=0.1
         )
 
+        # 2) Fold in batch (new)
+        pred_pdbs = fold_seqs_with_omegafold(seqs, gpu_id=gpu_id)
+
+        # 3) Score
         best_tm = 0.0
-        for seq in seqs:
-            pred_pdb = fold_seq_with_omegafold(seq, gpu_id=gpu_id)
-            tm_res = run_tmalign_gdt_ts(pred_pdb, bb, fast=True)
-            tm_score = max(tm_res["tm_score_chain_1"], tm_res["tm_score_chain_2"])
-            best_tm = max(best_tm, tm_score)
+        for pred_pdb in pred_pdbs:
+            best_tm = max(best_tm, tm_score(pred_pdb, bb))
 
         results[Path(bb).stem] = best_tm
     return results
@@ -238,76 +319,74 @@ def summarize_sctm(sc_tm_dict: Dict[str, float], cutoff: float = 0.5) -> Dict[st
     }
 
 
-def compute_metrics(generated_pdb_paths, train_pdb_paths):
-    # tm_vals = [
-    #     best_tm_vs_train(gen_pdb, train_pdb_paths)
-    #     for gen_pdb in generated_pdb_paths
-    # ]
-    # mean_best_tm = float(np.mean(tm_vals))   
-    # tm_vals = [
-    #     best_tm_vs_train(gen_pdb, train_pdb_paths)
-    #     for gen_pdb in generated_pdb_paths
-    # ]
-    # mean_best_tm = float(np.mean(tm_vals))    
-    # # --- Novelty (min‑RMSD to train) ---
-    # novelty_vals = [
-    #     min(compute_rmsd(g, t) for t in train_coords)
-    #     for g in generated_coords
-    # ]
-    # mean_novelty = float(np.mean(novelty_vals))
-    # # --- Diversity (mean pairwise RMSD) ---
-    # pair_vals = [
-    #     compute_rmsd(gi, gj)
-    #     for gi, gj in itertools.combinations(generated_coords, 2)
-    # ]
-    # mean_diversity = float(np.mean(pair_vals))
-    # # --- Uniqueness (fraction with nearest‑neighbor RMSD > τ) ---
-    # τ = 1.0  # Å
-    # unique = []
-    # for g in generated_coords:
-    #     if not unique:                      # first sample
-    #         unique.append(g); continue
-    #     if min(compute_rmsd(g,u) for u in unique) > τ:
-    #         unique.append(g)
-    # fraction_unique = len(unique) / len(generated_coords)    
-    # lddt_vals = [
-    #     best_lddt_vs_train(gen_pdb, train_pdb_paths)
-    #     for gen_pdb in generated_pdb_paths
-    # ]
+def compute_metrics(generated_pdb_paths, train_pdb_paths, generated_coords, train_coords):
+    tm_vals = [
+        best_tm_vs_train(gen_pdb, train_pdb_paths)
+        for gen_pdb in generated_pdb_paths
+    ]
+    mean_best_tm = float(np.mean(tm_vals))    
+    logging.info(f"mean_best_tm: {mean_best_tm}")
+    # --- Novelty (min‑RMSD to train) ---
+    pairs = list(product(generated_pdb_paths, train_pdb_paths))
+    with mp.Pool(mp.cpu_count()) as pool:
+        scores = pool.starmap(tm_score, tqdm(pairs, desc="novelty"), chunksize=1)    
+    scores_by_g = defaultdict(list)
+    for (g, t), s in zip(pairs, scores):
+        scores_by_g[g].append(s)
+    novelty_vals = [min(scores_by_g[g]) for g in generated_pdb_paths]
+    mean_novelty_tm = float(np.mean(novelty_vals))
+    logging.info(f"mean_novelty_tm: {mean_novelty_tm}")
+    # --- Diversity (mean pairwise RMSD) ---
+    pairs = list(combinations(generated_pdb_paths, 2))
+    with mp.Pool(mp.cpu_count()) as pool:
+        div_vals = pool.starmap(tm_score, tqdm(pairs, desc="diversity"), chunksize=1)
+    mean_diversity_tm = float(np.mean(div_vals))
+    logging.info(f"mean_diversity_tm: {mean_diversity_tm}")
+    # --- Uniqueness (fraction with nearest‑neighbor RMSD > τ) ---
+    unique = []
+    for g in generated_pdb_paths:
+        if not unique: unique.append(g); continue
+        best_tm = max(tm_score(g, u) for u in unique)
+        if best_tm < 0.5:          # below fold‑level similarity
+            unique.append(g)
+    fraction_unique_tm = len(unique) / len(generated_pdb_paths)
+    logging.info(f"fraction_unique_tm: {fraction_unique_tm}")
+    # --- LDDT ---
+    # pairs = list(product(generated_pdb_paths, train_pdb_paths))
+    # with mp.Pool(mp.cpu_count()) as pool:
+    #     lddt_scores = pool.starmap(lddt, tqdm(pairs, desc="lddt"), chunksize=1)
+    # lddt_by_gen = defaultdict(list)
+    # for (gen, train), sc in zip(pairs, lddt_scores):
+    #     lddt_by_gen[gen].append(sc)
+    # lddt_vals = [max(lddt_by_gen[g]) for g in generated_pdb_paths]
     # mean_best_lddt = float(np.mean(lddt_vals)) 
+    # logging.info(f"mean_best_lddt: {mean_best_lddt}")
     # # generated_seqs : list[str]  (amino‑acid sequences for the sampled backbones)
-    # plddt_vecs = get_plddt_esmfold_batched(generated_seqs, batch_size=2)
+    # plddt_vecs = run_esmfold_batch(generated_seqs)
     # mean_plddt = float(np.mean([v.mean().item() for v in plddt_vecs]))
     # histograms for generated vs. train  (2D 36×36 bins → 10° resolution)
-    # bins = [np.linspace(-180, 180, 37), np.linspace(-180, 180, 37)]
-    # gen_hist  = hist2d([phi_psi_angles(p) for p in generated_pdb_paths])
-    # train_hist= hist2d([phi_psi_angles(p) for p in train_pdb_paths])
-    # # symmetric KL divergence (bits)
-    # kl = 0.5 * (
-    #     np.sum(gen_hist * np.log(gen_hist/train_hist)) +
-    #     np.sum(train_hist * np.log(train_hist/gen_hist))
-    # )
-    # ramach_kl = float(kl)  
-    # ------------------------------------------------------------------
-    # example usage
-    # ------------------------------------------------------------------
-    gdt_metrics = compute_gdt_ts_novelty(
-        generated_pdbs   = generated_pdb_paths,   # list[str]
-        train_pdbs       = train_pdb_paths,       # list[str]
-        fast             = True                  # use TMalign -fast
-    )  
-    # -------------------------------------------------------------
-    # example usage
-    # -------------------------------------------------------------
+    bins = [np.linspace(-180, 180, 37), np.linspace(-180, 180, 37)]
+    gen_hist  = hist2d([res for res in (phi_psi_angles(p) for p in generated_pdb_paths) if res is not None], bins=bins)
+    train_hist= hist2d([res for res in (phi_psi_angles(p) for p in train_pdb_paths) if res is not None], bins=bins)
+    # symmetric KL divergence (bits)
+    kl = 0.5 * (
+        np.sum(gen_hist * np.log(gen_hist/train_hist)) +
+        np.sum(train_hist * np.log(train_hist/gen_hist))
+    )
+    ramach_kl = float(kl)  
+    logging.info(f"ramach_kl: {ramach_kl}")
+    # gdt_metrics = compute_gdt_ts_novelty(
+    #     generated_pdbs   = generated_pdb_paths,   # list[str]
+    #     train_pdbs       = train_pdb_paths,       # list[str]
+    #     fast             = True                  # use TMalign -fast
+    # )  
     ss_metrics = ss_kl_divergence(
         generated_pdbs = generated_pdb_paths,   # list[str]
         train_pdbs     = train_pdb_paths,       # list[str]
         max_bins       = 8,                     # same binning as make_ss_cooccurrence_plot
         backend        = "psea",
     )    
-    # -----------------------------------------------------------
-    # Example usage
-    # -----------------------------------------------------------
+    logging.info(f"ss_metrics: {ss_metrics}")
     # best_identity = designability_sequence_recovery(
     #     pdb_paths       = generated_pdb_paths,     # list of generated backbones
     #     sampler         = generate_residues,       # or generate_residues_proteinmpnn
@@ -322,17 +401,22 @@ def compute_metrics(generated_pdb_paths, train_pdb_paths):
         tm_cutoff     = 0.5,
         n_designs     = 8,
     )
+    sctm_metrics = summarize_sctm(sc_tm_per_backbone)
+    logging.info(f"sctm_metrics: {sctm_metrics}")
     metrics = {
-        "novelty_rmsd"     : mean_novelty,
-        "diversity_rmsd"   : mean_diversity,
-        "uniqueness_frac"  : fraction_unique,
+        "novelty_tm"     : mean_novelty_tm,
+        "diversity_tm"   : mean_diversity_tm,
+        "uniqueness_frac_tm"  : fraction_unique_tm,
         "best_tm_mean"     : mean_best_tm,
-        "best_lddt_mean"   : mean_best_lddt,
-        "mean_plddt"       : mean_plddt,
+        # "best_lddt_mean"   : mean_best_lddt,
+        # "mean_plddt"       : mean_plddt,
         "ramach_kl_bits"   : ramach_kl,
-        "gdt_ts_mean_best": gdt_metrics["gdt_ts_mean_best"]
-    } | ss_metrics | sc_tm_per_backbone
+        # "gdt_ts_mean_best": gdt_metrics["gdt_ts_mean_best"]
+    }
+    metrics.update(ss_metrics)
+    metrics.update(sctm_metrics)
     # metrics["seq_recovery_best_mean"] = mean_best_identity
+    return metrics
 
 
 if __name__ == "__main__":
@@ -340,7 +424,8 @@ if __name__ == "__main__":
     genset = [np.random.randn(5, 3), np.random.randn(10, 3)]    
     genfile_dir = os.path.abspath("ckpts/1752523675.4143364/sampled_pdb")
     trainfile_dir = os.path.abspath("data/struct_token_bench/interpro/conserved/")
-    genfiles = [Path(f"{genfile_dir}/generated_0.pdb"), Path(f"{genfile_dir}/generated_1.pdb")]
-    trainfiles = [Path(f"{trainfile_dir}/12ca_A.pdb")]
+    genfiles = [f"{genfile_dir}/generated_0.pdb", f"{genfile_dir}/generated_1.pdb"]
+    trainfiles = [f"{trainfile_dir}/12ca_A.pdb", f"{trainfile_dir}/1a03_A.pdb"]
     breakpoint()
-    compute_metrics(genfiles, trainfiles)
+    metrics = compute_metrics(genfiles, trainfiles, refset, genset)
+    print(metrics)

@@ -7,7 +7,7 @@ import json
 import pickle
 import hashlib
 import functools
-import multiprocessing
+import multiprocessing as mp
 import os
 import glob
 import logging
@@ -93,6 +93,66 @@ def extract_pdb_code_and_chain(dataset_id):
     pdb_code = dataset_id[1:5].upper()  # characters 1-4 form the PDB code
     chain = dataset_id[5].upper()       # the 5th character is the chain identifier
     return pdb_code, chain
+
+
+def featurize_one(
+    fname,
+    pfunc,
+    coords_pfunc,
+    full_coord_pfunc,
+    full_atom_idx_map,
+    side_chain_coords_pfunc,
+    aa_seq_func,
+    c_beta_func,
+    secondary_pfunc=None,
+):
+    try:
+        s = pfunc(fname)
+        if s is None:
+            logging.warning(f"Angles is None: {fname}")
+            return None
+        c = coords_pfunc(fname)
+        if c is None:
+            logging.warning(f"Coords is None: {fname}")
+            return None
+        c_full = full_coord_pfunc(fname)
+        if c_full is None:
+            logging.warning(f"Full coords is None: {fname}")
+            return None
+        idxes = full_atom_idx_map(fname)
+        if idxes is None:
+            logging.warning(f"Full idxes is None: {fname}")
+            return None
+        sc = side_chain_coords_pfunc(fname)
+        aa = aa_seq_func(fname)
+        if aa is None or len(aa) != len(s):
+            logging.warning(f"AA sequence error (length mismatch or None): {fname}")
+            return None
+        c_beta = c_beta_func(fname)
+        if c_beta is None or len(c_beta) != len(aa):
+            logging.warning(f"C_beta error (length mismatch or None): {fname}")
+            return None
+        d = {
+            "angles": s,
+            "coords": c,
+            "c_beta": c_beta,
+            "full_coords": c_full,
+            "full_idxes": idxes,
+            "side_chain": sc,
+            "aa": aa,
+            "fname": fname,
+        }
+        if secondary_pfunc:
+            try:
+                sec = secondary_pfunc(fname)
+                d["sec"] = sec
+            except Exception as e:
+                logging.warning(f"Secondary structure failed for {fname}: {e}")
+        return d
+    except Exception as e:
+        logging.warning(f"Featurization failed for {fname}: {e}", exc_info=True)
+        return None
+
     
 
 class CathCanonicalAnglesDataset(Dataset):
@@ -370,11 +430,11 @@ class CathCanonicalAnglesDataset(Dataset):
         coords_pfunc = functools.partial(extract_backbone_coords, atoms=["CA"])
     
         logging.info(
-            f"Computing full dataset of {len(fnames)} with {multiprocessing.cpu_count()} threads"
+            f"Computing full dataset of {len(fnames)} with {mp.cpu_count()} threads"
         )
         # Generate dihedral angles
         if not self.debug:
-            pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
+            pool = mp.Pool(processes=mp.cpu_count())
             struct_arrays = list(pool.map(pfunc, fnames, chunksize=250))
             coord_arrays = list(pool.map(coords_pfunc, fnames, chunksize=250))
             pool.close()
@@ -579,93 +639,36 @@ class FullCathCanonicalCoordsDataset(CathCanonicalAnglesDataset):
 
 
     # due to name mangling
-    def _CathCanonicalAnglesDataset__compute_featurization(
-        self, fnames: Sequence[str]
-    ) -> List[Dict[str, np.ndarray]]:
-        """Get the featurization of the given fnames"""
-        pfunc = functools.partial(
-            canonical_distances_and_dihedrals,
-            distances=EXHAUSTIVE_DISTS,
-            angles=EXHAUSTIVE_ANGLES,
+    def _CathCanonicalAnglesDataset__compute_featurization(self, fnames):
+        import functools
+        import multiprocessing
+
+        # Build partial with parameters
+        featurizer = functools.partial(
+            featurize_one,
+            pfunc=functools.partial(
+                canonical_distances_and_dihedrals, distances=EXHAUSTIVE_DISTS, angles=EXHAUSTIVE_ANGLES
+            ),
+            coords_pfunc=functools.partial(extract_backbone_coords, atoms=["CA"]),
+            full_coord_pfunc=functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"]),
+            full_atom_idx_map=functools.partial(extract_backbone_residue_idxes, atoms=["N", "CA", "C"]),
+            side_chain_coords_pfunc=extract_side_chain_coords,
+            aa_seq_func=extract_aa_seq,
+            c_beta_func=extract_c_beta_coords,
+            secondary_pfunc=find_secondary_structures if (hasattr(self, "secondary") and self.secondary) else None
         )
-        coords_pfunc = functools.partial(extract_backbone_coords, atoms=["CA"])
-        full_atom_idx_map = functools.partial(extract_backbone_residue_idxes, atoms=["N", "CA", "C"])
-        full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
-        side_chain_coords_pfunc = extract_side_chain_coords
-        aa_seq_func = extract_aa_seq
-        c_beta_func = extract_c_beta_coords
-        if hasattr(self, "secondary") and self.secondary:
-            secondary_pfunc = find_secondary_structures        
-        logging.info(
-            f"Computing full dataset of {len(fnames)} with {multiprocessing.cpu_count()} threads"
-        )
-        # Generate dihedral angles
+
+        logging.info(f"Computing full dataset of {len(fnames)} with {multiprocessing.cpu_count()} threads")
         if not self.debug:
-            pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
-            struct_arrays = list(pool.map(pfunc, fnames, chunksize=250))
-            coord_arrays = list(pool.map(coords_pfunc, fnames, chunksize=250))
-            full_coord_arrays = list(pool.map(full_coords_pfunc, fnames, chunksize=250))
-            full_atom_idxes = list(pool.map(full_atom_idx_map, fnames, chunksize=250))
-            if hasattr(self, "secondary") and self.secondary:
-                secondary_strucs = list(pool.map(secondary_pfunc, fnames, chunksize=250))
-            side_chain_arrays = list(pool.map(extract_side_chain_coords, fnames, chunksize=250))
-            aa_arrays = list(pool.map(extract_aa_seq, fnames, chunksize=250))
-            c_beta_arrays = list(pool.map(c_beta_func, fnames, chunksize=250))
-            pool.close()
-            pool.join()            
+            with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
+                structures = list(filter(None, pool.map(featurizer, fnames, chunksize=50)))
         else:
-            struct_arrays = []
+            structures = []
             for fname in fnames:
-                try:
-                    r = pfunc(fname)
-                except:
-                    print(fname)
-                    raise
-                struct_arrays.append(r)
-            coord_arrays = [coords_pfunc(fname) for fname in fnames]
-            full_coord_arrays = [full_coords_pfunc(fname) for fname in fnames]
-            full_atom_idxes = [full_atom_idx_map(fname) for fname in fnames]
-            if hasattr(self, "secondary") and self.secondary:
-                secondary_strucs = [secondary_pfunc(fname) for fname in fnames]
-            side_chain_arrays = [extract_side_chain_coords(fname) for fname in fnames]
-            aa_arrays = [extract_aa_seq(fname) for fname in fnames]
-            c_beta_arrays = [c_beta_func(fname) for fname in fnames]
-        
-        # Contains only non-null structures
-        structures = []
-        args = [fnames, struct_arrays, coord_arrays, full_coord_arrays, full_atom_idxes, side_chain_arrays, aa_arrays, c_beta_arrays]
-        if hasattr(self, "secondary") and self.secondary:
-            args += [secondary_strucs]
-        pargs = zip(*args)
-        for parg in pargs:
-            if hasattr(self, "secondary") and self.secondary:
-                fname, s, c, c_full, idxes, sc, aa, c_beta, sec = parg
-            else:
-                fname, s, c, c_full, idxes, sc, aa, c_beta = parg
-            if s is None:
-                print("s is None", fname)
-                continue
-            if idxes is None:
-                print("idxes is None", fname)
-                continue
-            if len(aa) != len(s):
-                breakpoint()    
-            if len(c_beta) != len(aa):
-                breakpoint()
-            structure = {
-                "angles": s,
-                "coords": c,
-                "c_beta": c_beta,
-                "full_coords": c_full,
-                "full_idxes": idxes,
-                "side_chain": sc,
-                "aa": aa,
-                "fname": fname,
-            }
-            if hasattr(self, "secondary") and self.secondary:
-                structure['sec'] = sec
-            structures.append(structure)
-        return structures        
+                out = featurizer(fname)
+                if out is not None:
+                    structures.append(out)
+        return structures
 
     def __getitem__(
         self, index, ignore_zero_center: bool = True

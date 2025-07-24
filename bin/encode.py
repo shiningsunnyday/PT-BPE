@@ -5,6 +5,7 @@ import os
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
 from foldingdiff.bpe import *
 from foldingdiff.plotting import *
+from foldingdiff.utils import load_args_from_txt, validate_args_match
 import scipy.io
 import numpy as np
 import subprocess
@@ -135,14 +136,13 @@ def parse_args():
     # folder
     parser.add_argument("--auto", action='store_true', help='auto set folders')
     parser.add_argument("--base-dir", type=str, default="./")
-    parser.add_argument("--save-dir", type=str, default="plots/bpe", 
+    parser.add_argument("--save-dir", type=str, 
                         help="Directory to save output files (images, pdb files, plots, etc.).")
     parser.add_argument("--log-dir", type=str, default="logs", 
                         help="Directory where log files will be saved.")
     parser.add_argument("--data-dir", type=str, default="cath", help="""Which dataset. Suggested choices:  \
                         'cath', 'homo', 'ec', 'bindint', 'bindbio', 'repeat', 'catint', 'catbio', 'conserved'
                         """)
-    parser.add_argument("--ckpt-dir", type=str, help="continue from bpe.pkl")
     parser.add_argument("--toy", type=int, default=0, 
                             help="Number of PDB files. 0 for all.")    
     parser.add_argument("--pad", type=int, default=512, help="Max protein size")
@@ -192,15 +192,13 @@ def amino_acid_sequence(fname):
 
 def main():
     args = parse_args()  
-    if args.ckpt_dir:
-        ckpt_dir = Path(args.ckpt_dir)
-        _dir = ckpt_dir
-        name = _dir.name
+    if args.save_dir:
+        save_dir = Path(args.save_dir)
+        name = save_dir.name
         plot_dir = os.path.join(args.base_dir, f'./plots/learn/{name}')
         assert os.path.exists(plot_dir)
-        assert os.path.exists(_dir)
+        assert os.path.exists(save_dir)
         setattr(args, 'plot_dir', plot_dir)
-        setattr(args, 'save_dir', _dir)            
     elif args.auto:
         cur_time = time.time()
         setattr(args, 'plot_dir', os.path.join(args.base_dir, f'./plots/learn/{cur_time}'))
@@ -214,7 +212,7 @@ def main():
         validate_args_match(
             current   = args,
             loaded    = loaded_args,
-            skip      = ["ckpt_dir"],   # fields you don’t need to compare
+            skip      = ["ckpt_dir", "auto"],   # fields you don’t need to compare
         )
     else:
         with open(args_path, "w") as f:
@@ -234,22 +232,6 @@ def main():
     #     if f:
     #         logger.info("Processing file: %s", f)
     #         all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
-    dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
-                                             use_cache=args.cache, 
-                                             debug=False, 
-                                             zero_center=False, 
-                                             toy=args.toy, 
-                                             pad=args.pad, 
-                                             secondary=args.sec)     
-    cleaned_structures = []
-    for i, struc in enumerate(dataset.structures):
-        if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
-            print(f"skipping {i}, {struc['fname']} because of missing dihedrals")
-        else:
-            cleaned_structures.append(struc)
-    logger.info(f"Removed {len(dataset.structures)-len(cleaned_structures)}/{len(dataset.structures)} structures with nan dihedrals.")
-    N = len(cleaned_structures)
-    dataset.structures = cleaned_structures
     _iter, ckpt = -1, ""
     for f in glob.glob(f"{args.save_dir}/bpe_iter=*.pkl"):
         f = Path(f).name
@@ -266,10 +248,27 @@ def main():
         logger.info(f"loading {ckpt} at iter={_iter}")
         bpe = pickle.load(open(ckpt, 'rb'))
         if os.path.exists(ref_path):
-            ref_coords = np.load(ref_path)
+            ref_coords = np.load(ref_path, allow_pickle=True)
         else:
             ref_coords = None
+        N = len(bpe.tokenizers)
     else:
+        dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
+                                                use_cache=args.cache, 
+                                                debug=False, 
+                                                zero_center=False, 
+                                                toy=args.toy, 
+                                                pad=args.pad, 
+                                                secondary=args.sec)     
+        cleaned_structures = []
+        for i, struc in enumerate(dataset.structures):
+            if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
+                print(f"skipping {i}, {struc['fname']} because of missing dihedrals")
+            else:
+                cleaned_structures.append(struc)
+        logger.info(f"Removed {len(dataset.structures)-len(cleaned_structures)}/{len(dataset.structures)} structures with nan dihedrals.")
+        N = len(cleaned_structures)
+        dataset.structures = cleaned_structures        
         bpe = BPE(dataset.structures, 
                   bins=args.bins, 
                   bin_strategy=args.bin_strategy, 
@@ -279,6 +278,7 @@ def main():
                   compute_sec_structs=args.sec, 
                   plot_iou_with_sec_structs=args.sec_eval,                  
                   res_init=args.res_init)
+        pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_init.pkl'), 'wb+'))
         ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
         np.save(ref_path, ref_coords)
         # use this for sanity check
@@ -321,13 +321,13 @@ def main():
                 bpe.plot_iou(iou_path)
         if t % args.plot_every == 0:
             run_path = os.path.join(args.save_dir, f"run_iter={t}.png")            
-            if ref_coords:
+            if ref_coords is not None:
                 plot(ref_coords, 
                     Path(args.save_dir).name,
                     run_path, 
                     no_iters=t, 
                     step_iter=args.save_every, 
-                    ratio=N/1000)            
+                    ratio=N/1000)
         if args.debug: 
             bpe_debug.old_step()
             for i in range(bpe.n):

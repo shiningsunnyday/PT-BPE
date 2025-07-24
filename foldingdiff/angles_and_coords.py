@@ -444,7 +444,10 @@ def extract_backbone_coords(
     chain = structure.get_structure(1)
     backbone = chain[struc.filter_backbone(chain)]
     ca = [c for c in backbone if c.atom_name in atoms]
-    coords = np.vstack([c.coord for c in ca])
+    coords = [c.coord for c in ca]
+    if len(coords) == 0:
+        return None
+    coords = np.vstack(coords)
     return coords
 
 
