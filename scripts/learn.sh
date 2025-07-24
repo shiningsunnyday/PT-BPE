@@ -21,9 +21,11 @@ cd "/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff"
 
 if [ $1 -eq 1 ]; then
   debug="--debug"
+  runner="python"
   echo "debug"
 else
   debug=""
+  runner="torchrun --nproc_per_node=$NGPU"
 fi
 
 if [ -n "$7" ]; then
@@ -42,7 +44,7 @@ rsync -av --ignore-existing "${SRC}"*.pkl "$DST"
 export NGPU=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 case "$2" in
   1)
-    torchrun --nproc_per_node=$NGPU bin/learn.py --data-dir $3 --config config.json --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" --max-seg-len 10000000000 --l1 $6 $extra $debug;;
+    $runner bin/learn.py --data-dir $3 --config config.json --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" --max-seg-len 10000000000 --l1 $6 $extra $debug;;
   *)
-    torchrun --nproc_per_node=$NGPU bin/learn.py --data-dir $3 --config config.json --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" --edge --max-seg-len 20 --l1 $6 $extra $debug
+    $runner bin/learn.py --data-dir $3 --config config.json --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" --edge --max-seg-len 20 --l1 $6 $extra $debug
 esac
