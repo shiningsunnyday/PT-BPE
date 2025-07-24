@@ -3,6 +3,7 @@ from foldingdiff.modelling import *
 from foldingdiff.tokenizer import Tokenizer
 from foldingdiff.plotting import plot_feature_importance
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
+from foldingdiff.utils import validate_args_match
 import torch
 import os
 import torch.distributed as dist
@@ -40,7 +41,7 @@ def get_default_args(func):
 def parse_args():    
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
     parser.add_argument("--data-dir", type=str, default="cath", choices=[
-         'cath', 'homo', 'ec', "bindint", "bindbio", "repeat", "catint", "catbio", "conserved",
+         'cath', 'homo', 'ec', "bindint", "bindbio", "repeat", "catint", "catbio", "conserved", "test"
          ], help="Which dataset.")    
     parser.add_argument("--toy", type=int, default=10, 
                             help="Number of PDB files.")
@@ -53,15 +54,15 @@ def parse_args():
     parser.add_argument("--auto", action='store_true', help='auto set folders')
     parser.add_argument("--config", help='file to config compute_feats')
     parser.add_argument("--batch_size", help='batch size for feat computation checkpointing', type=int, default=100)
-    parser.add_argument("--save_dir", default="./ckpts")
-    parser.add_argument("--plot_dir", default="./plots/learn")
+    parser.add_argument("--save-dir", default="./ckpts")
+    parser.add_argument("--plot-dir", default="./plots/learn")
     # model params
     parser.add_argument("--model", default="bert", choices=["bert", "transformer", "feats"])
     # hparams
-    parser.add_argument("--edge", action='store_true', help="define potential function on edges")
+    parser.add_argument("--mode", help="potential function mode, unary: 1D semi-CRF, binary: 2D, recursive: decomposition", choices=["unary", "binary", "recursive"])
     parser.add_argument("--gamma", type=float, default=0.)
     parser.add_argument("--l1", type=float, default=0.01)
-    parser.add_argument("--max-seg-len", type=int, default=50, help="Max length of segment")
+    parser.add_argument("--max-seg-len", type=int, default=10000000000, help="Max length of segment")
     return parser.parse_args()
 
 
@@ -176,6 +177,68 @@ def semi_crf_dp_and_map_2d(
     return log_alpha, map_alpha, backpointer
 
 
+def hierarchical_dp_and_map(
+    unary_scores: torch.Tensor,
+    split_scores: torch.Tensor,
+    N: int,
+    Lmax: int = None
+):
+    """
+    CKY‐style DP to compute MAP scores over hierarchical decompositions.
+
+    Assumptions:
+      unary_scores: Tensor of shape (N, Lmax+1)
+         unary_scores[i][l] = log‑score for span [i, i+l-1], for l=1..N-i (all other entries are 0)
+      split_scores:  Tensor of shape (N, Lmax+1, Lmax+1)
+         split_scores[i][l1][l2] scores a split at index i covering a left segment of length l1 and a right segment of length l2
+      N:            sequence length
+      Lmax:         optional cap on span length; only consider spans of length <= Lmax
+
+    Returns:
+      dp:        Tensor[N+1, N+1], best score for span [i,j)
+      backptr:   LongTensor[N+1, N+1], stores best split k or -1 for leaf
+    """
+    device = unary_scores.device
+
+    # Initialize DP tables
+    dp = torch.full((N+1, N+1), -float('inf'), device=device)
+    backptr = torch.full((N+1, N+1), -1, dtype=torch.long, device=device)
+
+    # Base case: empty spans (i,i)
+    for i in range(N+1):
+        dp[i, i] = 0.0
+        backptr[i, i] = -1
+
+    # Recursion over span width d=1..N
+    for d in range(1, N+1):
+        if Lmax is not None and d > Lmax:
+            continue
+        for i in range(0, N-d+1):
+            j = i + d
+
+            # Option 1: treat [i,j) as a leaf using the unary score for length d
+            best_score = unary_scores[i, d]
+            best_k = -1
+
+            # Option 2: split at k (i<k<j)
+            for k in range(i+1, j):
+                if Lmax is not None and ((k - i) > Lmax or (j - k) > Lmax):
+                    continue
+                score = (
+                    split_scores[i, k-i, j-k]
+                    + dp[i, k]
+                    + dp[k, j]
+                )
+                if score > best_score:
+                    best_score = score
+                    best_k = k
+
+            dp[i, j] = best_score
+            backptr[i, j] = best_k
+
+    return dp, backptr
+
+
 def backtrace_map_segmentation(best_lens, N):
     """
     Given backpointer (best_lens), recover the MAP segmentation from k=N down to k=0.
@@ -226,6 +289,32 @@ def backtrace_map_segmentation_2d(
         l = prev_l
 
     return list(reversed(segs))
+
+
+def backtrace_hierarchy(
+    backptr: torch.Tensor,
+    i: int,
+    j: int
+):
+    """
+    Recursively backtrace the best hierarchical decomposition for span [i,j).
+
+    Args:
+      backptr: LongTensor from hierarchical_dp_and_map
+      i, j:    span boundaries
+
+    Returns:
+      List of tuples (start, end) for leaf spans in the final tree, in pre-order.
+    """
+    k = backptr[i, j].item()
+    # If k == -1, it's a leaf
+    if k < 0:
+        return [(i, j)]
+
+    # Otherwise split into two children
+    left = backtrace_hierarchy(backptr, i, k)
+    right = backtrace_hierarchy(backptr, k, j)
+    return left + right
 
 
 def obtain_span(t, a, b, bert=False):
@@ -333,18 +422,7 @@ def get_model(args, device, max_len):
     seg_mlp  = SegmentPotentialMLP(agg.out_dim, hidden=64)
     seg_pair_mlp = SegmentPairPotentialMLP(agg_pair.out_dim, hidden=64)
     # Wrap everything in a single object (lightweight example)
-    if args.edge:
-        model = SemiCRF2DModel(
-            res_featurizer=res_feat,
-            seg_aggregator=agg,
-            seg_pair_aggregator=agg_pair,
-            seg_potential=seg_mlp,
-            seg_pair_potential=seg_pair_mlp,
-            length_bias=args.gamma,          # γ from your DP
-            max_seg_len=args.max_seg_len,
-            device=device
-        )
-    else:
+    if args.mode == "unary":
         model = SemiCRFModel(
             encoder=encoder,
             res_featurizer=res_feat,
@@ -354,6 +432,17 @@ def get_model(args, device, max_len):
             max_seg_len=args.max_seg_len,
             device=device
         )
+    else:
+        model = SemiCRF2DModel(
+            res_featurizer=res_feat,
+            seg_aggregator=agg,
+            seg_pair_aggregator=agg_pair,
+            seg_potential=seg_mlp,
+            seg_pair_potential=seg_pair_mlp,
+            length_bias=args.gamma,          # γ from your DP
+            max_seg_len=args.max_seg_len,
+            device=device
+        )    
     return model.to(device)
 
 
@@ -413,16 +502,33 @@ def main(args) -> None:
     logging.info(args)
 
     # ---------------- output folders ---------------------------------
-    if args.auto:
-        cur_time   = time.time()
-        args.plot_dir = f'./plots/learn/{cur_time}'
-        args.save_dir = f'./ckpts/{cur_time}'
+    if args.save_dir:
+        save_dir = Path(args.save_dir)
+        name = save_dir.name
+        plot_dir = f'./plots/learn/{name}'
+        assert os.path.exists(plot_dir)
+        assert os.path.exists(save_dir)
+        setattr(args, 'plot_dir', plot_dir)
+    elif args.auto:
+        cur_time = time.time()
+        setattr(args, 'plot_dir', f'./plots/learn/{cur_time}')
+        setattr(args, 'save_dir', f'./ckpts/{cur_time}')
         os.makedirs(args.plot_dir, exist_ok=True)
-        os.makedirs(args.save_dir,  exist_ok=True)
+        os.makedirs(args.save_dir, exist_ok=True)        
         logging.info(f"plots : {args.plot_dir}")
-        logging.info(f"ckpts : {args.save_dir}")
+        logging.info(f"ckpts : {args.save_dir}")        
     
-    json.dump(args.__dict__, open(os.path.join(args.save_dir, 'args.json'), 'w+'))
+    args_path = os.path.join(args.save_dir, 'args.json')
+    if os.path.exists(args_path):
+        print(f"loading args from {args_path}")
+        loaded_args = json.load(open(args_path))
+        validate_args_match(
+            current   = args,
+            loaded    = loaded_args,
+            skip      = ["auto"],   # fields you don’t need to compare
+        )
+    else:        
+        json.dump(args.__dict__, open(args_path), 'w+')
     logging.info(f"CUDA available : {torch.cuda.is_available()}")    
 
     # ---------------- load data --------------------------------------
@@ -467,10 +573,9 @@ def main(args) -> None:
             obj = model.module
         else:
             obj = model
-        obj.compute_batch_feats(dataset, config, save_dir=args.save_dir, batch_size=args.batch_size)
+        obj.compute_batch_feats(dataset, config, save_dir=args.save_dir, batch_size=args.batch_size)        
         dataset = FeatDataset(dataset, args.save_dir)
         # dataset = DataLoader(dataset, collate_fn=collate_fn, batch_size=1, num_workers=4, prefetch_factor=1, persistent_workers=True, pin_memory=True)
-        sampler = DistributedSampler(dataset)
         if is_ddp:
             sampler = DistributedSampler(dataset)
             shuffle = False
@@ -519,7 +624,13 @@ def main(args) -> None:
                 assert t.n == len(t.aa), "number of residues != length of amino acid sequence"
                 coords = t.compute_coords()
                 # --------- call SemiCRFModel.precompute -------------------
-                if args.edge:
+                if args.mode == "unary":
+                    out, attn_scores = obj.precompute(
+                        feats         = feats,
+                        aa_seq        = t.aa,              # Tokenizer stores AA sequence
+                        coords_tensor = coords
+                    )    
+                elif args.mode == "binary":
                     try:
                         unary_out, unary_attn_scores, edge_out, edge_attn_scores = obj.precompute(
                             feats         = feats,
@@ -528,13 +639,17 @@ def main(args) -> None:
                     except Exception as e:
                         print(e)
                         print(t.fname)
-                        raise
+                        raise                                                       # out[i][l] ready for DP
                 else:
-                    out, attn_scores = obj.precompute(
-                        feats         = feats,
-                        aa_seq        = t.aa,              # Tokenizer stores AA sequence
-                        coords_tensor = coords
-                    )                                       # out[i][l] ready for DP
+                    try:
+                        unary_out, unary_attn_scores, edge_out, edge_attn_scores = obj.precompute(
+                            feats         = feats,
+                            aa_seq        = t.aa              # Tokenizer stores AA sequence
+                        )  
+                    except Exception as e:
+                        print(e)
+                        print(t.fname)
+                        raise    
             else:
                 N = 3 * t.n - 1 # bond level        
                 bert_flag = args.model == "bert"
@@ -559,36 +674,63 @@ def main(args) -> None:
                 )                                       # out[i][l] ready for DP
 
             # ---------- forward + Viterbi on semi‑CRF -----------------
-            if args.edge:
-                log_alpha, map_alpha, backpointer = semi_crf_dp_and_map_2d(unary_out, edge_out, N, args.max_seg_len, args.gamma)
-                best_seg = backtrace_map_segmentation_2d(backpointer, map_alpha, N)
-                attn_stack = torch.stack([unary_attn_scores[start][end-start] for start, end in best_seg], axis=0)
-                attn_agg = attn_stack.mean(axis=0)                            
-            else:
+            if args.mode == "unary":
                 log_a, map_a, best_lens = semi_crf_dp_and_map(out, N, gamma=args.gamma)
                 best_seg = backtrace_map_segmentation(best_lens, N)
                 attn_stack = torch.stack([attn_scores[start][end-start] for start, end in best_seg], axis=0)
                 attn_agg = attn_stack.mean(axis=0)            
+            elif args.mode == "binary":
+                log_alpha, map_alpha, backpointer = semi_crf_dp_and_map_2d(unary_out, edge_out, N, args.max_seg_len, args.gamma)
+                best_seg = backtrace_map_segmentation_2d(backpointer, map_alpha, N)
+                attn_stack = torch.stack([unary_attn_scores[start][end-start] for start, end in best_seg], axis=0)
+                attn_agg = attn_stack.mean(axis=0)                                            
+            else:
+                dp, backptr = hierarchical_dp_and_map(unary_out, edge_out, N, args.max_seg_len)
+                best_tree = backtrace_hierarchy(backptr, 0, N)
             
             if args.model == "feats":
                 # store segmentation in Tokenizer (as before)
                 t.bond_to_token = {3*start: (3*start, 3*seg_idx, min(3*(end-start), 3*t.n-1-3*start))
                                 for seg_idx, (start, end) in enumerate(best_seg)}                
+                # todo: implement the hierarchy
+                breakpoint()
             else:
                 # store segmentation in Tokenizer (as before)
                 t.bond_to_token = {start: (start, seg_idx, end - start)
                                 for seg_idx, (start, end) in enumerate(best_seg)}
 
             # --------------- loss & optimisation ----------------------
-            if args.edge:
+            if args.mode == "unary":
+                loss   = -log_a[N]                       # negative log‑partition
+            elif args.mode == "binary":
                 # 1) The log‐partition Z(x) = log ∑ₗ exp(log_alpha[N, ℓ])
                 logZ = torch.logsumexp(log_alpha[N], dim=0)          # scalar
 
                 # 2) The best MAP score = maxₗ map_alpha[N, ℓ]
                 best_map, _ = torch.max(map_alpha[N], dim=0)         # scalar
-                loss = -logZ
+                loss = -logZ                
             else:
-                loss   = -log_a[N]                       # negative log‑partition
+                # Compute log-partition Z(x) using a CKY-style DP with logsumexp,
+                # where dpZ[i,j] = log(sum of scores for span [i,j))
+                dpZ = torch.full((N+1, N+1), -float('inf'), device=dp.device)
+                for i in range(N+1):
+                    dpZ[i, i] = 0.0
+                for d in range(1, N+1):
+                    if Lmax is not None and d > Lmax:
+                        continue
+                    for i in range(0, N-d+1):
+                        j = i + d
+                        # Start with the score for treating [i,j) as a leaf.
+                        scores = [unary_scores[i, d]]
+                        # Sum contributions from all splits at k (i < k < j)
+                        for k in range(i+1, j):
+                            if Lmax is not None and ((k-i) > Lmax or (j-k) > Lmax):
+                                continue
+                            scores.append(split_scores[i, k-i, j-k] + dpZ[i, k] + dpZ[k, j])
+                        # Compute log-sum-exp over all valid scores.
+                        dpZ[i, j] = torch.logsumexp(torch.stack(scores), dim=0)
+                logZ = dpZ[0, N]
+                loss = -logZ
             loss   = loss + args.l1 * l1_penalty(model) # optional L1 reg
             loss.backward()
             opt.step()
@@ -607,11 +749,15 @@ def main(args) -> None:
                 logging.info(f"E{epoch} I{idx}  CPU MB {cpu_mem:.1f}")
 
             # segmentation probability
-            if args.edge:
-                # 3) Probability of that MAP segmentation:
-                prob = torch.exp(best_map - logZ)                # scalar in [0,1]
-            else:                
+            if args.mode == "unary":                
                 prob = torch.exp(map_a[N] - log_a[N]).item()
+            elif args.mode == "binary":
+                # 3) Probability of that MAP segmentation:
+                prob = torch.exp(best_map - logZ)                # scalar in [0,1]                
+            else:
+                # Use dp for the MAP segmentation probability
+                best_dp = dp[0, N]
+                prob = torch.exp(best_dp - logZ).item()
             if prob > 0.5:   # arbitrary threshold for visualisation
                 path = Path(os.path.join(args.save_dir, f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"))
                 attn_path = path.with_name(path.stem + "_attn" + path.suffix)

@@ -34,20 +34,35 @@ def load_args_from_txt(args_path: str) -> Namespace:
             setattr(ns, name, val)
     return ns
 
-def validate_args_match(current: Namespace, loaded: Namespace, skip: list = None):
+def validate_args_match(current: Union[Namespace, Dict[str, Any]], loaded: Union[Namespace, Dict[str, Any]], skip: list = None):
     """
-    Compare every attribute in `loaded` to the same attr in `current`,
+    Compare every attribute/key in `loaded` to the same in `current`,
     raising an AssertionError if any differ (except those in skip).
+    Supports both Namespace and dict as input.
     """
     skip = set(skip or [])
-    for name, loaded_val in vars(loaded).items():
+
+    def get_item(obj, name):
+        if isinstance(obj, dict):
+            return obj[name]
+        else:
+            return getattr(obj, name)
+
+    def has_item(obj, name):
+        if isinstance(obj, dict):
+            return name in obj
+        else:
+            return hasattr(obj, name)
+
+    loaded_items = loaded.items() if isinstance(loaded, dict) else vars(loaded).items()
+    for name, loaded_val in loaded_items:
         if name in skip:
             continue
 
-        if not hasattr(current, name):
+        if not has_item(current, name):
             raise AssertionError(f"Current args has no field '{name}'")
 
-        cur_val = getattr(current, name)
+        cur_val = get_item(current, name)
         # normalize directories to absolute paths
         if name.endswith("_dir") or name.endswith("_path"):
             loaded_val = os.path.abspath(loaded_val)

@@ -10,6 +10,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 import math
 import numpy as np
 from collections import defaultdict
+from functools import partial
 from tqdm import tqdm
 from pathlib import Path
 from pyzernike import ZernikeDescriptor
@@ -423,7 +424,7 @@ class SemiCRFModel(nn.Module):
 
     @staticmethod
     # Top‐level helper must be importable (no self):
-    def _compute_protein_plddt(args):
+    def _compute_protein_plddt(args, batch_size):
         """
         Compute all pLDDT confidences for a batch of proteins.
         Returns (prot_ids, [torch.Tensor(confidences)])
@@ -449,7 +450,8 @@ class SemiCRFModel(nn.Module):
                 "conda", "run", "-n", "esmfold",
                 "python", python_path,
                 "--in-file",  in_path,
-                "--out-file", out_path
+                "--out-file", out_path,
+                "--batch-size", str(batch_size)
             ], check=True)
             plddts = torch.load(out_path)
         except subprocess.CalledProcessError as e:
@@ -524,7 +526,7 @@ class SemiCRFModel(nn.Module):
 
 
     @staticmethod
-    def _compute_protein_embedding(args):
+    def _compute_protein_embedding(args, batch_size):
         """
         Compute all embeddings for a batch of proteins.
         Returns (prot_ids, [list of embeddings scores])
@@ -550,7 +552,8 @@ class SemiCRFModel(nn.Module):
                 "conda", "run", "-n", "esmfold",
                 "python", python_path,
                 "--in-file",  in_path,
-                "--out-file", out_path
+                "--out-file", out_path,
+                "--batch-size", str(batch_size)
             ], check=True)
             embeddings = torch.load(out_path)
         except subprocess.CalledProcessError as e:
@@ -729,17 +732,18 @@ class SemiCRFModel(nn.Module):
 
     def compute_plddt(self,
                     dataset,
-                    max_workers=0, batch_size=1000):
+                    max_workers=0, batch_size=1000, model_batch_size=10):
         """
         Parallelize at the protein level.  Uses one process per protein
         and shows a tqdm bar as each finishes.
         """
+        func = partial(SemiCRFModel._compute_protein_plddt, batch_size=model_batch_size)
         if max_workers:
             args_list = [dataset[i*batch_size:(i+1)*(batch_size)] for i in range((len(dataset)+batch_size-1)//batch_size)]
             ctx = mp.get_context('spawn')
             with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
                 futures = {
-                    executor.submit(SemiCRFModel._compute_protein_plddt, args): args[0]
+                    executor.submit(func, args): args[0]
                     for args in args_list
                 }
                 for fut in tqdm(as_completed(futures),
@@ -751,7 +755,7 @@ class SemiCRFModel(nn.Module):
                         plddt = plddt[plddt==plddt]
                         self.feats[prot_id]['plddt'] = plddt.cpu().numpy()
         else:
-            prot_ids, plddts = SemiCRFModel._compute_protein_plddt(dataset)
+            prot_ids, plddts = func(dataset)
             for i, prot_id in enumerate(prot_ids):
                 plddt = plddts[i]
                 plddt[plddt!=plddt] = 0.
@@ -765,12 +769,13 @@ class SemiCRFModel(nn.Module):
         Parallelize at the protein level.  Uses one process per protein
         and shows a tqdm bar as each finishes.
         """
+        func = partial(SemiCRFModel._compute_protein_disorder)
         if max_workers:
             args_list = [dataset[i*batch_size:(i+1)*(batch_size)] for i in range((len(dataset)+batch_size-1)//batch_size)]
             ctx = mp.get_context('spawn')            
             with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
                 futures = {
-                    executor.submit(SemiCRFModel._compute_protein_disorder, args): args[0]
+                    executor.submit(func, args): args[0]
                     for args in args_list
                 }
                 for fut in tqdm(as_completed(futures),
@@ -780,25 +785,26 @@ class SemiCRFModel(nn.Module):
                     for i, prot_id in enumerate(prot_ids):
                         self.feats[prot_id]['disorder'] = np.array(disorders[i])
         else:
-            prot_ids, disorders = SemiCRFModel._compute_protein_disorder(dataset)
+            prot_ids, disorders = func(dataset)
             for i, prot_id in enumerate(prot_ids):
                 self.feats[prot_id]['disorder'] = np.array(disorders[i])                
 
 
     def compute_embeddings(self,
                     dataset,
-                    max_workers=0, batch_size=1000):
+                    max_workers=0, batch_size=1000, model_batch_size=10):
         """
         Parallelize at the protein level.  Uses one process per protein
         and shows a tqdm bar as each finishes.
         """
+        func = partial(SemiCRFModel._compute_protein_embedding, batch_size=model_batch_size)
         if max_workers:
             args_list = [dataset[i*batch_size:(i+1)*(batch_size)] for i in range((len(dataset)+batch_size-1)//batch_size)]
             ctx = mp.get_context('spawn')
             # embeddings = SemiCRFModel._compute_protein_embedding(dataset)        
             with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
                 futures = {
-                    executor.submit(SemiCRFModel._compute_protein_embedding, args): args[0]
+                    executor.submit(func, args): args[0]
                     for args in args_list
                 }
                 for fut in tqdm(as_completed(futures),
@@ -808,7 +814,7 @@ class SemiCRFModel(nn.Module):
                     for i, prot_id in enumerate(prot_ids):
                         self.feats[prot_id]['embedding'] = embeddings[i].cpu().numpy()
         else:
-            prot_ids, embeddings = SemiCRFModel._compute_protein_embedding(dataset)
+            prot_ids, embeddings = func(dataset)
             for i, prot_id in enumerate(prot_ids):
                 self.feats[prot_id]['embedding'] = embeddings[i].cpu().numpy()                
 
@@ -1071,11 +1077,23 @@ class SemiCRF2DModel(SemiCRFModel):
         self,
         feats: Dict,
         aa_seq: str
-    ) -> List[List[torch.Tensor]]:
+    ) -> Tuple[
+        torch.Tensor,                              # unary_out, shape (L, max_seg_len+1)
+        List[List[torch.Tensor]],                  # unary_attn_out, shape (L, max_seg_len+1)
+        torch.Tensor,                              # edge_out, shape (L, max_seg_len+1, max_seg_len+1)
+        List[List[List[torch.Tensor]]]             # edge_attn_out, shape (L, max_seg_len+1, max_seg_len+1)
+    ]:
         """
+        Compute unary and pairwise segment scores for a protein sequence.
+        Args:
+            feats (Dict): Dictionary of per-protein features, including 'plddt', 'disorder', 'sec', 'embedding', 'fp', 'foldseek'.
+            aa_seq (str): Amino acid sequence string for the protein.
+
         Returns:
-            out[i][l]   scalar (log‑)score for span [i, i+l-1]
-                        i in 0…L-1, l in 1…L-i
+            unary_out (torch.Tensor): Segment unary scores, shape (L, max_seg_len+1), where unary_out[i][l] is the score for span [i, i+l-1].
+            unary_attn_out (List[List[torch.Tensor]]): Unary attention weights per span [[attn_vec for l in 0..max_seg_len] for i in 0..L-1].
+            edge_out (torch.Tensor): Pairwise segment scores, shape (L, max_seg_len+1, max_seg_len+1), where edge_out[i][l1][l2] scores split at i.
+            edge_attn_out (List[List[List[torch.Tensor]]]): Pairwise attention weights per span/split [[[attn_vec for l2] for l1] for i].
         """
         # 1) token‑level encoder
         #    -> per‑token hidden (batch, L, hidden)
@@ -1094,9 +1112,9 @@ class SemiCRF2DModel(SemiCRFModel):
         ).to(self.device)                        # (L, feat_dim)
 
         # 3) build unary_out[i][l] and edge_out[i][l1][l2]
-        unary_out: List[List[torch.Tensor]] = torch.tensor([[0.0]*(self.max_seg_len+1) for _ in range(L)], device=self.device)
+        unary_out: torch.Tensor = torch.tensor([[0.0]*(self.max_seg_len+1) for _ in range(L)], device=self.device)
         unary_attn_out: List[List[torch.Tensor]] = [[0.0]*(self.max_seg_len+1) for _ in range(L)]
-        edge_out: List[List[List[torch.Tensor]]] = torch.tensor([[[0.0]*(self.max_seg_len+1)]*(self.max_seg_len+1) for _ in range(L)], device=self.device)
+        edge_out: torch.Tensor = torch.tensor([[[0.0]*(self.max_seg_len+1)]*(self.max_seg_len+1) for _ in range(L)], device=self.device)
         edge_attn_out: List[List[List[torch.Tensor]]] = [[[0.0]*(self.max_seg_len+1)]*(self.max_seg_len+1) for _ in range(L)]
         
         # a) compute bio_scores, in batches
@@ -1122,12 +1140,6 @@ class SemiCRF2DModel(SemiCRFModel):
                     pair_span_feat = torch.cat((span_feat1, span_feat2))
                     agg_vec_pairs.append(pair_span_feat)
 
-                
-        # bio_scores = []
-        # for i in range((len(agg_vecs)+batch_size-1)//batch_size):
-        #     batch = torch.stack(agg_vecs[batch_size*i:batch_size*(i+1)], axis=0)
-        #     scores, _ = self.seg_mlp(batch)
-        #     bio_scores
         bio_scores, attn_scores = self.seg_mlp(torch.stack(agg_vecs, axis=0))
         bio_pair_scores, attn_pair_scores = self.seg_pair_mlp(torch.stack(agg_vec_pairs, axis=0))
 

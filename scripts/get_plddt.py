@@ -66,9 +66,10 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--in-file")
   parser.add_argument("--out-file")
+  parser.add_argument("--batch-size", type=int, default=2)
   args = parser.parse_args()  
   seqs = [l.rstrip('\n') for l in open(args.in_file).readlines()]
   # seqs = [sequence, sequence[:100]]
-  out = get_plddt_esmfold_batched(seqs)
+  out = get_plddt_esmfold_batched(seqs, batch_size=args.batch_size)
   torch.save(out, args.out_file)
   # get_plddt_with_esmfold([sequence])

@@ -6,23 +6,23 @@
     },
     "disorder": {
         "batch_size": 100,
-        "max_workers": 10        
+        "max_workers": 0
     },
     "sec": {
         "batch_size": 100,
-        "max_workers": 10
+        "max_workers": 0
     },
     "plddt": {
         "batch_size": 10000000000000,
         "max_workers": 0,
-        "model_batch_size": 10
+        "model_batch_size": 5
     },
     "fps": {
-        "max_workers": 16,
+        "max_workers": 0,
         "grid_size": 32,
         "order": 4
     },
     "foldseek": {
-        "max_workers": 16
+        "max_workers": 10
     }
 }

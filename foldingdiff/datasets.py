@@ -346,6 +346,11 @@ class CathCanonicalAnglesDataset(Dataset):
                 num_uniq = len(set([Path(f).name for f in files]))                     
                 logging.info(f"{num_uniq} unique")
                 fnames = files
+            elif pdbs == "test": # debug
+                ext = ".pdb"
+                pat = os.path.join(LOCAL_DATA_DIR, "**/*.pdb")
+                files = glob.glob(pat, recursive=True)
+                fnames = sorted(files)[:10]
             elif pdbs == "cath":
                 fnames = glob.glob(os.path.join(CATH_DIR, "dompdb", "*"))
                 assert fnames, f"No files found in {CATH_DIR}/dompdb"

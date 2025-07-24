@@ -21,30 +21,38 @@ cd "/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff"
 
 if [ $1 -eq 1 ]; then
   debug="--debug"
+  config="--config config_debug.json"
   runner="python"
   echo "debug"
 else
   debug=""
+  config="--config config.json"
   runner="torchrun --nproc_per_node=$NGPU"
 fi
 
 if [ -n "$7" ]; then
-  extra="--save_dir $7"
+  SAVE_DIR=$7
+  # ID="${SAVE_DIR##*/}"
+  # SRC="/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff/ckpts/$ID/"
+  # DST="/n/netscratch/mzitnik_lab/Lab/${USER}/$ID/"
+  # mkdir -p "$DST"
+  # rsync -av --ignore-existing "${SRC}"*.pkl "$DST"
+  extra="--save-dir $7"
 else
   extra="--auto"
 fi
 
-SAVE_DIR=$7
-ID="${SAVE_DIR##*/}"
-SRC="/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff/ckpts/$ID/"
-DST="/n/netscratch/mzitnik_lab/Lab/${USER}/$ID/"
-mkdir -p "$DST"
-rsync -av --ignore-existing "${SRC}"*.pkl "$DST"
-
 export NGPU=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 case "$2" in
   1)
-    $runner bin/learn.py --data-dir $3 --config config.json --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" --max-seg-len 10000000000 --l1 $6 $extra $debug;;
+    mode="--mode unary"
+    ;;
+  2)
+    mode="--mode edge --max-seg-len 20"
+    ;;
   *)
-    $runner bin/learn.py --data-dir $3 --config config.json --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" --edge --max-seg-len 20 --l1 $6 $extra $debug
+    mode="--mode recursive --max-seg-len 20"
+    ;;
 esac
+
+$runner bin/learn.py --data-dir $3 $config --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" $mode --l1 $6 $extra $debug

@@ -212,7 +212,7 @@ def main():
         validate_args_match(
             current   = args,
             loaded    = loaded_args,
-            skip      = ["ckpt_dir", "auto"],   # fields you don’t need to compare
+            skip      = ["auto"],   # fields you don’t need to compare
         )
     else:
         with open(args_path, "w") as f:
