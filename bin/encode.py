@@ -147,7 +147,7 @@ def parse_args():
                             help="Number of PDB files. 0 for all.")    
     parser.add_argument("--pad", type=int, default=512, help="Max protein size")
     parser.add_argument("--debug", action='store_true')
-    parser.add_argument("--vis", action='store_true')
+    parser.add_argument("--vis", type=str2bool, default=False)
     # hparams
     parser.add_argument("--res-init", type=str2bool, default=False, help="base token type, residue vs bond (default bond)")
     parser.add_argument("--bin-strategy", help="how to bin values", default="histogram", choices=["histogram", "uniform"])
@@ -212,7 +212,7 @@ def main():
         validate_args_match(
             current   = args,
             loaded    = loaded_args,
-            skip      = ["auto"],   # fields you don’t need to compare
+            skip      = ["auto", "ckpt_dir", "vis"],   # fields you don’t need to compare
         )
     else:
         with open(args_path, "w") as f:
@@ -281,6 +281,8 @@ def main():
         pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_init.pkl'), 'wb+'))
         ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
         np.save(ref_path, ref_coords)
+        visual_path = os.path.join(args.save_dir, f"backbone_0_iter=-1.png")
+        res = bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False)
         # use this for sanity check
         bpe.initialize()
         bpe.bin()    
@@ -352,4 +354,5 @@ def main():
 
 
 if __name__ == "__main__":
+    breakpoint()
     main()

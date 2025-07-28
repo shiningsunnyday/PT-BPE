@@ -30,14 +30,14 @@ else
   runner="torchrun --nproc_per_node=$NGPU"
 fi
 
-if [ -n "$7" ]; then
-  SAVE_DIR=$7
+if [ -n "$8" ]; then
+  SAVE_DIR=$8
   # ID="${SAVE_DIR##*/}"
   # SRC="/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff/ckpts/$ID/"
   # DST="/n/netscratch/mzitnik_lab/Lab/${USER}/$ID/"
   # mkdir -p "$DST"
   # rsync -av --ignore-existing "${SRC}"*.pkl "$DST"
-  extra="--save-dir $7"
+  extra="--save-dir $8"
 else
   extra="--auto"
 fi
@@ -55,4 +55,4 @@ case "$2" in
     ;;
 esac
 
-$runner bin/learn.py --data-dir $3 $config --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" $mode --l1 $6 $extra $debug
+$runner bin/learn.py --data-dir $3 $config --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" $mode --l1 $6 --gamma $7 $extra $debug

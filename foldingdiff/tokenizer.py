@@ -1,6 +1,7 @@
 import numpy as np
 from foldingdiff.angles_and_coords import *
 from foldingdiff.data_structures import *
+from foldingdiff.algo import compute_rmsd
 from foldingdiff.nerf import *
 from foldingdiff.plotting import plot_backbone
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ import tempfile
 import imageio
 import time
 import logging
+import pickle
 from pathlib import Path
 logger = logging.getLogger(__name__)
 
@@ -197,16 +199,18 @@ class Tokenizer:
             ans[di] = ans.get(di, []) + [self._dihedral_angle(j)]
         return ans
     
-    def visualize_bonds(self, i1, length, output_path):
+    def visualize_bonds(self, i1, length, output_path, **kwargs):
         coords = self.compute_coords(i1, length)
         # ATOM_TYPES[i1%3], ATOM_TYPES[i1%3+1], ..., ATOM_TYPES[i1%3+length]
         bts = [Tokenizer.ATOM_TYPES[(i1%3+i)%3] for i in range(length+1)]
-        tokens = [self.bond_to_token[i] for i in sorted(self.bond_to_token) if i >= i1 and i < i1+length]
-        plot_backbone(coords, output_path, bts, title=f"{Path(self.fname).stem} bonds {i1}-{i1+length-1}", zoom_factor=1.0)        
+        plot_backbone(coords, output_path, bts, title=f"{Path(self.fname).stem} bonds {i1}-{i1+length-1}", zoom_factor=1.0, **kwargs)
     
     def visualize(self, output_path, **kwargs):
         coords = self.compute_coords()
-        tokens = [self.bond_to_token[i] for i in sorted(self.bond_to_token)]
+        if self.bond_to_token:
+            tokens = [self.bond_to_token[i] for i in sorted(self.bond_to_token)]
+        else:
+            tokens = None
         return plot_backbone(coords, output_path, atom_types=np.tile(Tokenizer.ATOM_TYPES, len(coords)//3), tokens=tokens, **kwargs)
         
 
@@ -346,3 +350,75 @@ class Tokenizer:
                 bt = Tokenizer.BOND_ANGLES[(b-1)%3]
                 tokenized.append(("BOND_ANGLE", bt, self._bond_angle(b-1)))
         return tokenized
+
+    @staticmethod
+    def init_structure(n):
+        angles = {
+            "0C:1N": [0. for _ in range(n)],
+            "N:CA": [0. for _ in range(n)],
+            "CA:C": [0. for _ in range(n)],
+            "phi": [np.nan for _ in range(n)],
+            "psi": [np.nan for _ in range(n)],
+            "omega": [np.nan for _ in range(n)],
+            "tau": [np.nan for _ in range(n)],
+            "CA:C:1N": [np.nan for _ in range(n)],
+            "C:1N:1CA": [np.nan for _ in range(n)]
+        }
+        idxes = sum([[i,i,i] for i in range(1, n+1)], [])
+        return {
+            "angles": pd.DataFrame(angles),
+            "coords": None,
+            "c_beta": None,
+            "full_idxes": idxes,
+            "full_coords": None,
+            "side_chain": None,
+            "aa": None,
+            "fname": None
+        }
+
+
+
+def debug():
+    bpe = pickle.load(open("./ckpts/1753714998.318021/bpe_init.pkl", "rb"))
+    t1 = bpe.tokenizers[0]
+    df = t1.angles_and_dists.iloc[(t1.n-9):]
+    n = len(df)
+    # remove rows 0 through 173 in this df
+    struc = Tokenizer.init_structure(n)
+    struc["angles"] = df.reset_index()
+    t1 = Tokenizer(struc|{"fname":t1.fname})
+    t1.visualize("./ckpts/1753714998.318021/test1.png", vis_dihedral=False)
+
+    t2 = bpe.tokenizers[6]
+    df = t2.angles_and_dists.iloc[(t2.n-9):]
+    n = len(df)
+    # remove rows 0 through 173 in this df
+    struc = Tokenizer.init_structure(n)
+    struc["angles"] = df.reset_index()
+    t2 = Tokenizer(struc|{"fname":t2.fname})
+    t2.visualize("./ckpts/1753714998.318021/test2.png", vis_dihedral=False)
+    
+    # for start in range(0, 3*t1.n, 3):
+    #     for length in range(3, 3*t1.n - start - 1, 3):
+    #         t1.visualize_bonds(start, length, f"./ckpts/1753714998.318021/test1_{start}-{start+length}.png", vis_dihedral=False)
+
+    # # Visualize all subspans for t2
+    # for start in range(0, 3*t2.n, 3):
+    #     for length in range(3, 3*t2.n - start - 1, 3):
+    #         t2.visualize_bonds(start, length, f"./ckpts/1753714998.318021/test2_{start}-{start+length}.png", vis_dihedral=False)
+
+    # GOAL: replace 3-12 from t2 into 3-12 from t1
+    orig_coords = t1.compute_coords()
+    t1_copy = deepcopy(t1)
+    t1.set_token_geo(3, 9, t2.token_geo(3, 9))
+    t1.visualize("./ckpts/1753714998.318021/test1_after.png", vis_dihedral=False)
+    after_coords = t1.compute_coords()
+    error = compute_rmsd(orig_coords, after_coords)
+
+    t1 = t1_copy
+    breakpoint()
+
+
+if __name__ == "__main__":
+    breakpoint()
+    debug()

@@ -777,7 +777,6 @@ class BPE():
             assert count == len(self._geo_dict[key])
             logger.info(f"Pop {key} as most frequent key, {count} times")  
             # TODO: Should never pop again
-
         # visualizations
         vis_start_time = time.time()
         # tokens_by_freq = sorted(self._geo_dict.items(), key=lambda t: len(t[1]))
@@ -795,7 +794,9 @@ class BPE():
         self.visualize(key, key_vis_path)
         vis_time = time.perf_counter()-vis_start_time
         # --- Step 0: Do RMSD packing if |token| >= rmsd_partition_min_size ---
-        if Tokenizer.num_bonds(key_dict) >= self.rmsd_partition_min_size and key not in self._sphere_dict and len(self._geo_dict[key]) > self.num_partitions:
+        if Tokenizer.num_bonds(key_dict) >= self.rmsd_partition_min_size \
+        and key not in self._sphere_dict \
+        and len(self._geo_dict[key]) > self.num_partitions:
             # Step 0.1: populate _sphere_dict
             # Step 0.2: update geo
             # Step 0.3: update _geo_dict
@@ -915,7 +916,8 @@ class BPE():
             if rmsd_key is not None:
                 start_time = time.perf_counter()
                 i1 = t.token_pos[index-1]
-                if not self.rmsd_only: # don't set if rmsd_only
+                if not self.rmsd_only: # don't set if rmsd_only                    
+                    breakpoint()
                     t.set_token_geo(i1, length, self._sphere_dict[key][p])
                 step_times["step6"] += time.perf_counter() - start_time    
             

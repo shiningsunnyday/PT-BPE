@@ -177,66 +177,79 @@ def semi_crf_dp_and_map_2d(
     return log_alpha, map_alpha, backpointer
 
 
-def hierarchical_dp_and_map(
+def hierarchical_inside_and_map(
     unary_scores: torch.Tensor,
     split_scores: torch.Tensor,
     N: int,
-    Lmax: int = None
+    Lmax: int = None,
+    gamma: float = 0.0
 ):
     """
-    CKY‐style DP to compute MAP scores over hierarchical decompositions.
-
-    Assumptions:
-      unary_scores: Tensor of shape (N, Lmax+1)
-         unary_scores[i][l] = log‑score for span [i, i+l-1], for l=1..N-i (all other entries are 0)
-      split_scores:  Tensor of shape (N, Lmax+1, Lmax+1)
-         split_scores[i][l1][l2] scores a split at index i covering a left segment of length l1 and a right segment of length l2
-      N:            sequence length
-      Lmax:         optional cap on span length; only consider spans of length <= Lmax
-
     Returns:
-      dp:        Tensor[N+1, N+1], best score for span [i,j)
-      backptr:   LongTensor[N+1, N+1], stores best split k or -1 for leaf
+      dp_map[i,j]      = max score (Viterbi) for span [i,j)
+      backptr[i,j]     = best split or -1 for leaf
+      dp_inside[i,j]   = log-partition (sum-product) for span [i,j)
     """
     device = unary_scores.device
 
-    # Initialize DP tables
-    dp = torch.full((N+1, N+1), -float('inf'), device=device)
-    backptr = torch.full((N+1, N+1), -1, dtype=torch.long, device=device)
+    # allocate
+    dp_map    = torch.full((N+1, N+1), -float('inf'), device=device)
+    dp_inside = torch.full((N+1, N+1), -float('inf'), device=device)
+    backptr   = torch.full((N+1, N+1), -1,        dtype=torch.long, device=device)
 
-    # Base case: empty spans (i,i)
+    # base case: empty span
     for i in range(N+1):
-        dp[i, i] = 0.0
-        backptr[i, i] = -1
+        dp_map[i,i]    = 0.0
+        dp_inside[i,i] = 0.0  # log(1) = 0
 
-    # Recursion over span width d=1..N
+    # fill spans by increasing width
     for d in range(1, N+1):
         if Lmax is not None and d > Lmax:
             continue
         for i in range(0, N-d+1):
             j = i + d
 
-            # Option 1: treat [i,j) as a leaf using the unary score for length d
-            best_score = unary_scores[i, d]
-            best_k = -1
+            # 1) Viterbi option: leaf
+            best_map_val = unary_scores[i, d] + gamma * d
+            best_k       = -1
 
-            # Option 2: split at k (i<k<j)
+            # 1a) Inside option: leaf
+            #    we treat the unary leaf as one possible tree,
+            #    so dp_inside_leaf = φ(i,d) + γ·d  in log-space
+            inside_terms = [unary_scores[i, d] + gamma*d]
+
+            # now consider every binary split k
             for k in range(i+1, j):
-                if Lmax is not None and ((k - i) > Lmax or (j - k) > Lmax):
+                if Lmax is not None and (k-i)>Lmax or (j-k)>Lmax:
                     continue
-                score = (
-                    split_scores[i, k-i, j-k]
-                    + dp[i, k]
-                    + dp[k, j]
-                )
-                if score > best_score:
-                    best_score = score
-                    best_k = k
 
-            dp[i, j] = best_score
-            backptr[i, j] = best_k
+                # score for splitting (i,j) → (i,k),(k,j)
+                split_val = split_scores[i, k-i, j-k]
 
-    return dp, backptr
+                # 2) Viterbi update
+                cand_map = split_val + dp_map[i,k] + dp_map[k,j]
+                if cand_map > best_map_val:
+                    best_map_val = cand_map
+                    best_k       = k
+
+                # 2a) Inside accumulation: add the score of *this* split tree
+                #    in log-space we sum over all splits,
+                #    so we'll do a logsumexp over:
+                #     split_val + dp_inside[i,k] + dp_inside[k,j]
+                inside_terms.append(split_val
+                                    + dp_inside[i,k]
+                                    + dp_inside[k,j])
+
+            # finalize Viterbi cell
+            dp_map[i,j]  = best_map_val
+            backptr[i,j] = best_k
+
+            # finalize Inside cell via log-sum-exp
+            dp_inside[i,j] = torch.logsumexp(
+                                 torch.stack(inside_terms), dim=0
+                             )            
+
+    return dp_inside, dp_map, backptr
 
 
 def backtrace_map_segmentation(best_lens, N):
@@ -315,6 +328,38 @@ def backtrace_hierarchy(
     left = backtrace_hierarchy(backptr, i, k)
     right = backtrace_hierarchy(backptr, k, j)
     return left + right
+
+
+def construct_hierarchy(
+    t: Tokenizer,
+    backptr: torch.Tensor,
+    i: int,
+    j: int
+):
+    """
+    Recursively build the best hierarchical decomposition for span [i,j).
+
+    Args:
+      t: tokenizer
+      backptr: LongTensor from hierarchical_dp_and_map
+      i, j:    span boundaries
+    """
+    k = backptr[i, j].item()
+    # If k == -1, it's a leaf
+    if k < 0:
+        # leaf
+        if t.bond_to_token is None:
+            t.bond_to_token = {}
+        t.bond_to_token[3*i] = (3*i, 0, 3*(j-i))
+        return [(i, j)]
+
+    # Otherwise split into two children
+    left = construct_hierarchy(t, backptr, i, k)
+    right = construct_hierarchy(t, backptr, k, j)
+    t.bond_to_token.pop(3*k)
+    t.bond_to_token[3*i] = (3*i, 0, 3*(j-i))
+
+
 
 
 def obtain_span(t, a, b, bert=False):
@@ -522,11 +567,12 @@ def main(args) -> None:
     if os.path.exists(args_path):
         print(f"loading args from {args_path}")
         loaded_args = json.load(open(args_path))
-        validate_args_match(
-            current   = args,
-            loaded    = loaded_args,
-            skip      = ["auto"],   # fields you don’t need to compare
-        )
+        if not args.debug:
+            validate_args_match(
+                current   = args,
+                loaded    = loaded_args,
+                skip      = ["auto"],   # fields you don’t need to compare
+            )
     else:        
         json.dump(args.__dict__, open(args_path), 'w+')
     logging.info(f"CUDA available : {torch.cuda.is_available()}")    
@@ -685,15 +731,18 @@ def main(args) -> None:
                 attn_stack = torch.stack([unary_attn_scores[start][end-start] for start, end in best_seg], axis=0)
                 attn_agg = attn_stack.mean(axis=0)                                            
             else:
-                dp, backptr = hierarchical_dp_and_map(unary_out, edge_out, N, args.max_seg_len)
+                dp_inside, dp_map, backptr = hierarchical_inside_and_map(unary_out, edge_out, N, args.max_seg_len, args.gamma)
                 best_tree = backtrace_hierarchy(backptr, 0, N)
+                logging.info("best tree", best_tree)
             
             if args.model == "feats":
-                # store segmentation in Tokenizer (as before)
-                t.bond_to_token = {3*start: (3*start, 3*seg_idx, min(3*(end-start), 3*t.n-1-3*start))
-                                for seg_idx, (start, end) in enumerate(best_seg)}                
-                # todo: implement the hierarchy
-                breakpoint()
+                if args.mode == "recursive":
+                    # navigate hierarchy
+                    construct_hierarchy(t, backptr, 0, N)
+                else:
+                    # store segmentation in Tokenizer (as before)
+                    t.bond_to_token = {3*start: (3*start, 3*seg_idx, min(3*(end-start), 3*t.n-1-3*start))
+                                    for seg_idx, (start, end) in enumerate(best_seg)}                                
             else:
                 # store segmentation in Tokenizer (as before)
                 t.bond_to_token = {start: (start, seg_idx, end - start)
@@ -710,27 +759,10 @@ def main(args) -> None:
                 best_map, _ = torch.max(map_alpha[N], dim=0)         # scalar
                 loss = -logZ                
             else:
-                # Compute log-partition Z(x) using a CKY-style DP with logsumexp,
-                # where dpZ[i,j] = log(sum of scores for span [i,j))
-                dpZ = torch.full((N+1, N+1), -float('inf'), device=dp.device)
-                for i in range(N+1):
-                    dpZ[i, i] = 0.0
-                for d in range(1, N+1):
-                    if Lmax is not None and d > Lmax:
-                        continue
-                    for i in range(0, N-d+1):
-                        j = i + d
-                        # Start with the score for treating [i,j) as a leaf.
-                        scores = [unary_scores[i, d]]
-                        # Sum contributions from all splits at k (i < k < j)
-                        for k in range(i+1, j):
-                            if Lmax is not None and ((k-i) > Lmax or (j-k) > Lmax):
-                                continue
-                            scores.append(split_scores[i, k-i, j-k] + dpZ[i, k] + dpZ[k, j])
-                        # Compute log-sum-exp over all valid scores.
-                        dpZ[i, j] = torch.logsumexp(torch.stack(scores), dim=0)
-                logZ = dpZ[0, N]
-                loss = -logZ
+                # compute log Z here and the loss
+                logZ = dp_inside[0, N]  
+                loss = -logZ           
+
             loss   = loss + args.l1 * l1_penalty(model) # optional L1 reg
             loss.backward()
             opt.step()
@@ -756,13 +788,17 @@ def main(args) -> None:
                 prob = torch.exp(best_map - logZ)                # scalar in [0,1]                
             else:
                 # Use dp for the MAP segmentation probability
-                best_dp = dp[0, N]
+                best_dp = dp_map[0, N]
                 prob = torch.exp(best_dp - logZ).item()
+            logging.info(f"epoch {epoch} idx {idx} prob {prob}")
             if prob > 0.5:   # arbitrary threshold for visualisation
                 path = Path(os.path.join(args.save_dir, f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"))
                 attn_path = path.with_name(path.stem + "_attn" + path.suffix)
                 t.visualize(path, vis_dihedral=False)
                 plot_feature_importance(attn_agg.detach().cpu().numpy(), obj.aggregator.per_res_labels, attn_path)
+                if args.mode == "recursive":
+                    path = Path(os.path.join(args.save_dir, f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"))
+                    t.bond_to_token.tree.visualize(path, horizontal_gap=0.5, font_size=6)
 
         # ---------------- checkpoint if improved ---------------------
         if (not is_ddp) or dist.get_rank() == 0:

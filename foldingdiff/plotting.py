@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Optional, Sequence, Union
 import pickle
+from copy import deepcopy
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -359,7 +360,7 @@ def column_fill(handles, labels, ncol):
 
 
 
-def plot(ref_coords, d, output_path, no_iters=500, step_iter=10, ratio=1):
+def plot(ref_coords, d, output_path, no_iters=500, step_iter=10, ratio=1, num_random_baseline=10):
     Ks, Ls, errs = [], [], []
     for t in range(0, no_iters+1, step_iter):
         path = f'./ckpts/{d}/bpe_iter={t}.pkl'
@@ -374,21 +375,31 @@ def plot(ref_coords, d, output_path, no_iters=500, step_iter=10, ratio=1):
             cur_coords.append(coord)
         K = len(bpe._tokens)
         L = np.mean(usage)
-        errors = []
-        for i in tqdm(range(len(ref_coords))):
-            coords = cur_coords[i]
-            try:
-                error = compute_rmsd(coords, ref_coords[i])
-            except:
-                print(i)
-                raise
-            errors.append(error)
+        errors = [compute_rmsd(cur_coords[i], ref_coords[i]) for i in tqdm(range(len(ref_coords)))]
         err = np.mean(errors)
         errs.append(err)
         Ks.append(K)
         Ls.append(L)
-    N = len(bpe.tokenizers)
+
     final_iter = t+1        
+    # add a permutation test baseline
+    # sample num_random_baseline random permutations
+    ref_ts = bpe.tokenizers[:len(ref_coords)]
+    ref_errs = []    
+    for k in tqdm(range(num_random_baseline), "random angles baseline"):
+        for key in ["tau","CA:C:1N","C:1N:1CA"]+["psi","omega","phi"]:
+            bin_c = np.array(bpe._bin_counts[1][key])
+            threshs = bpe._thresholds[1][key]
+            keep_nan_resample_val = lambda val: np.random.uniform(*threshs[np.random.choice(len(bin_c), p=bin_c/bin_c.sum())]) if val==val else val
+            for t in ref_ts:
+                randvals = t.angles_and_dists[key].map(keep_nan_resample_val)
+                t.angles_and_dists[key] = randvals
+        alt_coords = []
+        errors = [compute_rmsd(ref_ts[i].compute_coords(), ref_coords[i]) for i in tqdm(range(len(ref_coords)))]
+        ref_errs.append(np.mean(errors))
+    ref_err = np.mean(ref_errs)
+
+    N = len(bpe.tokenizers)    
     Ks = np.array(Ks)
     Ls = np.array(Ls)
     errs = np.array(errs)
@@ -437,6 +448,8 @@ def plot(ref_coords, d, output_path, no_iters=500, step_iter=10, ratio=1):
             linewidth=2,
             color="tab:red")
     ax2.set_ylabel("Error", color="tab:red")
+    # plot ref_err scalar as horizontal line, labeled on the y-axis
+    ax2.axhline(y=ref_err, color='tab:red', linestyle='--', label=f"Ref. Error ({num_random_baseline} permutations)")
     ax2.tick_params(axis="y", labelcolor="tab:red")
     # combined legend
     lines1, labels1 = ax1.get_legend_handles_labels()

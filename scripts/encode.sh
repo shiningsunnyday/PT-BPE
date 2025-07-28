@@ -24,6 +24,7 @@ pad="512"
 bins=$3
 bin_strat="uniform"
 sec="False"
+vis="True"
 res_init="true"
 save_every=$4
 plot_every=$5
@@ -42,6 +43,7 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --bins $bins \
   --res-init $res_init \
   --sec $sec \
+  --vis $vis \
   --data-dir $data_dir \
   --save-every $save_every \
   --plot-every $plot_every \
