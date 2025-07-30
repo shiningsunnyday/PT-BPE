@@ -166,6 +166,7 @@ def parse_args():
         default=3,
         help="num partitions for rmsd binning",
     )    
+    parser.add_argument("--glue-opt", type=str2bool, default=False, help="whether to opt the glue angles for rmsd keys")
     parser.add_argument("--cache", action='store_true', help="whether to use cached data")
     parser.add_argument("--save-every", type=int, default=10, help="how often to dump")
     parser.add_argument("--plot-every", type=int, default=50, help="how often to plot")
@@ -277,7 +278,8 @@ def main():
                   num_partitions=args.num_p,
                   compute_sec_structs=args.sec, 
                   plot_iou_with_sec_structs=args.sec_eval,                  
-                  res_init=args.res_init)
+                  res_init=args.res_init,
+                  glue_opt=args.glue_opt)
         pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_init.pkl'), 'wb+'))
         ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
         np.save(ref_path, ref_coords)

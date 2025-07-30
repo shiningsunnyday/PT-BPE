@@ -394,7 +394,7 @@ def plot(ref_coords, d, output_path, no_iters=500, step_iter=10, ratio=1, num_ra
             for t in ref_ts:
                 randvals = t.angles_and_dists[key].map(keep_nan_resample_val)
                 t.angles_and_dists[key] = randvals
-        alt_coords = []
+        alt_coords = []        
         errors = [compute_rmsd(ref_ts[i].compute_coords(), ref_coords[i]) for i in tqdm(range(len(ref_coords)))]
         ref_errs.append(np.mean(errors))
     ref_err = np.mean(ref_errs)

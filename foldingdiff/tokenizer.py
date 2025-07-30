@@ -449,6 +449,26 @@ class Tokenizer:
         return frame_from_triad(*list(self.compute_coords(idx-3, length+2)[-3:]))
 
 
+    def opt_glue(self, i1, length):
+        init_glue = self.get_glue_left(i1)    # (psi_{s-1}, theta_CNCA_s, phi_s)
+        R_occ, t_occ = self.exit_frame(i1, length)
+        # optimize
+        best_glue, best_loss = self.optimize_glues_entry(
+            i1, length,
+            R_occ=R_occ, t_occ=t_occ,
+            init_glue=init_glue,
+            steps_deg=(20, 8, 3),         # coarse → fine
+            wR=1.0, wt=0.1
+        )
+
+        # set the optimized glue and recompute coords
+        self.set_glue_left(
+            i1,
+            best_glue
+        )                      
+
+
+
 def vis_subspans(t1, t2, folder):
     df = t1.angles_and_dists.iloc[(t1.n-9):]
     n = len(df)
@@ -474,7 +494,6 @@ def vis_subspans(t1, t2, folder):
     for start in range(0, 3*t2.n, 3):
         for length in range(3, 3*t2.n - start - 1, 3):
             t2.visualize_bonds(start, length, f"./{folder}/test2_{start}-{start+length}.png", vis_dihedral=False)    
-
 
 
 def debug():
@@ -522,9 +541,7 @@ def debug():
 
     # sanity check: anchored or global RMSD goes down
     err_after  = compute_rmsd(orig_coords, after_coords)                    # after glue opt
-    print("RMSD before:", err_before, "after:", err_after)    
-
-    t1 = t1_copy
+    print("RMSD before:", error, "after:", err_after)    
 
 
 if __name__ == "__main__":

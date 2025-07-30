@@ -22,17 +22,18 @@ toy=$1
 data_dir=$2
 pad="512"
 bins=$3
-bin_strat="uniform"
+bin_strat=$4
 sec="False"
 vis="True"
-res_init="true"
-save_every=$4
-plot_every=$5
-p_size=$6
-num_p=$7
+res_init="True"
+save_every=$5
+plot_every=$6
+p_size=$7
+num_p=$8
+glue_opt=$9
 
-if [ -n "$8" ]; then
-  extra="--save-dir $8"
+if [ -n "${10}" ]; then
+  extra="--save-dir ${10}"
 else
   extra="--auto"
 fi
@@ -52,4 +53,5 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --toy $toy \
   --p-min-size $p_size \
   --num-p $num_p \
+  --glue-opt $glue_opt \
   $extra

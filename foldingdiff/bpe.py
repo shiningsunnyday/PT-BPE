@@ -16,7 +16,8 @@ class BPE():
         plot_iou_with_sec_structs=False,
         res_init=False,
         rmsd_partition_min_size=4,
-        num_partitions=3
+        num_partitions=3,
+        glue_opt=False
     ):
         """
         structures: list of dataset objects
@@ -34,6 +35,7 @@ class BPE():
         self.plot_iou_with_sec_structs = plot_iou_with_sec_structs
         self.rmsd_partition_min_size = rmsd_partition_min_size
         self.rmsd_only = rmsd_partition_min_size == 0
+        self.glue_opt = glue_opt
         self.num_partitions = num_partitions
         self.res_init = res_init
         self.bins = bins
@@ -63,7 +65,9 @@ class BPE():
         for i in range(3):
             self._tokens[i] = {Tokenizer.BOND_TYPES[i]: [0]}
             self._thresholds[Tokenizer.BOND_TYPES[i]] = [(Tokenizer.BOND_LENGTHS[i], Tokenizer.BOND_LENGTHS[i])]  
-        label_dict = {}      
+        label_dict = {}
+        if self.rmsd_only:
+            breakpoint()
         for t in self.tokenizers:
             # update avg bond lengths
             for i in range(3*t.n-1):
@@ -73,34 +77,37 @@ class BPE():
                     t.set_token_geo(i, 1, self._bin_val(dic))
                 except:
                     breakpoint()
-            if self.res_init:                
-                # update binned residue geo                
-                labels = []
-                for i in range(t.n):
-                    start = 3*i
-                    length = 3 if i < t.n-1 else 2
-                    geo = t.token_geo(start, length)
-                    for k in geo:
-                        if k not in Tokenizer.BOND_ANGLES+Tokenizer.DIHEDRAL_ANGLES:
-                            continue
-                        quant_vals = []
-                        for i, v in enumerate(geo[k]):
-                            lookup = self._thresholds[length]
-                            v = (v+2*np.pi) % (2*np.pi) # Convert to [0, 2*pi]
-                            ind = BPE.get_ind(v, lookup[k])
-                            quant_vals.append(ind)      
-                        geo[k] = quant_vals
+            if self.res_init:      
+                if self.rmsd_only:
+                    # get the quantized residue for each
+                    breakpoint()
+                else:     
+                    # update binned residue geo                
+                    labels = []
+                    for i in range(t.n):
+                        start = 3*i
+                        length = 3 if i < t.n-1 else 2
+                        geo = t.token_geo(start, length)
+                        for k in geo:
+                            if k not in Tokenizer.BOND_ANGLES+Tokenizer.DIHEDRAL_ANGLES:
+                                continue
+                            quant_vals = []
+                            for i, v in enumerate(geo[k]):
+                                lookup = self._thresholds[length]
+                                v = (v+2*np.pi) % (2*np.pi) # Convert to [0, 2*pi]
+                                ind = BPE.get_ind(v, lookup[k])
+                                quant_vals.append(ind)      
+                            geo[k] = quant_vals
 
-                    key = self._bin_val(geo)
-                    key_str = BPE.hash_geo(key)
-                    if key_str not in label_dict:
-                        n = len(label_dict)
-                        label_dict[key_str] = n
-                    else:
-                        n = label_dict[key_str]
-                    if not self.rmsd_only:
+                        key = self._bin_val(geo)
+                        key_str = BPE.hash_geo(key)
+                        if key_str not in label_dict:
+                            n = len(label_dict)
+                            label_dict[key_str] = n
+                        else:
+                            n = label_dict[key_str]
                         t.set_token_geo(start, length, key)
-                    labels.append(n)
+                        labels.append(n)
                 # 3*(t.n-1) + 2 bonds
                 new_tokens = [(3*i, labels[i], 3) for i in range(t.n-1)] + [(3*t.n-3, labels[t.n-1], 2)]
                 bond_to_token = {t[0]: t for t in new_tokens} # start bond : token
@@ -916,9 +923,10 @@ class BPE():
             if rmsd_key is not None:
                 start_time = time.perf_counter()
                 i1 = t.token_pos[index-1]
-                if not self.rmsd_only: # don't set if rmsd_only                    
-                    breakpoint()
+                if not self.rmsd_only: # don't set if rmsd_only                                        
                     t.set_token_geo(i1, length, self._sphere_dict[key][p])
+                    if self.glue_opt:
+                        t.opt_glue(i1, length)
                 step_times["step6"] += time.perf_counter() - start_time    
             
             # if i == 0 and t.bond_to_token[235] == (235, (41, 2), 6) and t.bond_to_token[241] == (241, 103, 24) and t.bond_to_token[265] == (265, 11, 3):
