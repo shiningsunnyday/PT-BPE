@@ -376,47 +376,155 @@ class Tokenizer:
             "fname": None
         }
 
+    
+    def get_glue_left(self, idx):
+        """
+        Given bond idx (mult of 3), the N-CA bond of residue s, get (omega_{s-1}, theta_CNCA_s, phi_s)
+        """
+        if idx % 3:
+            raise ValueError("must be multiple of 3")
+        if idx < 3:
+            raise ValueError("no left glues for first residue")
+        return (self._dihedral_angle(idx-2), self._bond_angle(idx-1), self._dihedral_angle(idx-1))
 
 
-def debug():
-    bpe = pickle.load(open("./ckpts/1753714998.318021/bpe_init.pkl", "rb"))
-    t1 = bpe.tokenizers[0]
+    def set_glue_left(self, idx, tup):
+        """
+        Given bond idx (mult of 3), the N-CA bond of residue s, get (omega_{s-1}, theta_CNCA_s, phi_s)
+        """
+        if idx % 3:
+            raise ValueError("must be multiple of 3")
+        if idx < 3:
+            raise ValueError("no left glues for first residue")
+        if len(tup) != 3:
+            raise ValueError("tup needs to be size 3")
+        self._set_dihedral_angle(idx-2, tup[0])
+        self._set_bond_angle(idx-1, tup[1])
+        self._set_dihedral_angle(idx-1, tup[2])
+
+
+    
+    def optimize_glues_entry(self, idx, length, R_occ, t_occ,
+                            init_glue,  # (omega_{s-1}, theta_CNCA_s, phi_s)
+                            steps_deg=(20, 8, 3),  # coarse -> fine
+                            wR=1.0, wt=0.1):
+        """
+        Coordinate-descent style coarse-to-fine search over 3 angles.
+        Assumes t_obj has snapped internal angles for [s,e] already.
+        """
+        best = np.array(init_glue, dtype=float)
+        def loss_for(glue):
+            # set glues at the left boundary of the segment
+            omega, theta, phi = glue
+            self.set_glue_left(idx, (omega, theta, phi))  # implement this in your object
+            coords = self.compute_coords()
+            (R_new, t_new) = self.exit_frame(idx, length)
+            return (wR*rot_geodesic(R_occ, R_new)**2 + wt*np.sum((t_occ - t_new)**2), R_new, t_new)
+
+        best_val, _, _ = loss_for(best)
+        for step_deg in steps_deg:
+            step = np.deg2rad(step_deg)
+            improved = True
+            while improved:
+                improved = False
+                # try all 3D moves with offsets in {-step, 0, +step}
+                for domega in (-step, 0.0, step):
+                    for dth in (-step, 0.0, step):
+                        for dphi in (-step, 0.0, step):
+                            cand = np.array([best[0]+domega, best[1]+dth, best[2]+dphi])
+                            cand = np.array([(c+np.pi)%(2*np.pi)-np.pi for c in cand])
+                            val, _, _ = loss_for(cand)
+                            if val + 1e-9 < best_val:
+                                best, best_val = cand, val
+                                improved = True
+        return tuple(best), best_val
+    
+
+
+    def exit_frame(self, idx, length):
+        """
+        Begin building coords from residue before idx
+        Return exit frame of final residue (that idx+length belongs to)
+        """
+        return frame_from_triad(*list(self.compute_coords(idx-3, length+2)[-3:]))
+
+
+def vis_subspans(t1, t2, folder):
     df = t1.angles_and_dists.iloc[(t1.n-9):]
     n = len(df)
     # remove rows 0 through 173 in this df
     struc = Tokenizer.init_structure(n)
     struc["angles"] = df.reset_index()
     t1 = Tokenizer(struc|{"fname":t1.fname})
-    t1.visualize("./ckpts/1753714998.318021/test1.png", vis_dihedral=False)
+    t1.visualize(f"./{folder}/test1.png", vis_dihedral=False)
 
-    t2 = bpe.tokenizers[6]
     df = t2.angles_and_dists.iloc[(t2.n-9):]
     n = len(df)
     # remove rows 0 through 173 in this df
     struc = Tokenizer.init_structure(n)
     struc["angles"] = df.reset_index()
     t2 = Tokenizer(struc|{"fname":t2.fname})
-    t2.visualize("./ckpts/1753714998.318021/test2.png", vis_dihedral=False)
+    t2.visualize(f"./{folder}/test2.png", vis_dihedral=False)
     
-    # for start in range(0, 3*t1.n, 3):
-    #     for length in range(3, 3*t1.n - start - 1, 3):
-    #         t1.visualize_bonds(start, length, f"./ckpts/1753714998.318021/test1_{start}-{start+length}.png", vis_dihedral=False)
+    for start in range(0, 3*t1.n, 3):
+        for length in range(3, 3*t1.n - start - 1, 3):
+            t1.visualize_bonds(start, length, f"./{folder}/test1_{start}-{start+length}.png", vis_dihedral=False)
 
-    # # Visualize all subspans for t2
-    # for start in range(0, 3*t2.n, 3):
-    #     for length in range(3, 3*t2.n - start - 1, 3):
-    #         t2.visualize_bonds(start, length, f"./ckpts/1753714998.318021/test2_{start}-{start+length}.png", vis_dihedral=False)
+    # Visualize all subspans for t2
+    for start in range(0, 3*t2.n, 3):
+        for length in range(3, 3*t2.n - start - 1, 3):
+            t2.visualize_bonds(start, length, f"./{folder}/test2_{start}-{start+length}.png", vis_dihedral=False)    
+
+
+
+def debug():
+    folder = "ckpts/1753714998.318021"
+    bpe = pickle.load(open(f"./{folder}/bpe_init.pkl", "rb"))
+    index_0 = 0
+    index_1 = 6
+    t1 = bpe.tokenizers[index_0]
+    t2 = bpe.tokenizers[index_1]
+    # vis_subspans(t1, t2, folder)
 
     # GOAL: replace 3-12 from t2 into 3-12 from t1
+    start1 = 3
+    start2 = 3
+    length = 9
     orig_coords = t1.compute_coords()
-    t1_copy = deepcopy(t1)
-    t1.set_token_geo(3, 9, t2.token_geo(3, 9))
-    t1.visualize("./ckpts/1753714998.318021/test1_after.png", vis_dihedral=False)
+    
+    # exit frame from original
+    R_occ, t_occ = t1.exit_frame(start1, length)
+    # snap internal angles for [s,e] from t2 into t1 (already done)
+    t1.set_token_geo(start1, length, t2.token_geo(start2, length))
+    t1.visualize(f"./{folder}/test1_after.png", vis_dihedral=False)
     after_coords = t1.compute_coords()
-    error = compute_rmsd(orig_coords, after_coords)
+    error = compute_rmsd(orig_coords, after_coords)    
+
+    # initial glue triple at left boundary from current t1
+    init_glue = t1.get_glue_left(start1)    # (psi_{s-1}, theta_CNCA_s, phi_s)
+
+    # optimize
+    best_glue, best_loss = t1.optimize_glues_entry(
+        start1, length,
+        R_occ=R_occ, t_occ=t_occ,
+        init_glue=init_glue,
+        steps_deg=(20, 8, 3),         # coarse → fine
+        wR=1.0, wt=0.1
+    )
+
+    # set the optimized glue and recompute coords
+    t1.set_glue_left(
+        start1,
+        best_glue
+    )
+    t1.visualize(f"./{folder}/test1_opt.png", vis_dihedral=False)
+    after_coords = t1.compute_coords()
+
+    # sanity check: anchored or global RMSD goes down
+    err_after  = compute_rmsd(orig_coords, after_coords)                    # after glue opt
+    print("RMSD before:", err_before, "after:", err_after)    
 
     t1 = t1_copy
-    breakpoint()
 
 
 if __name__ == "__main__":

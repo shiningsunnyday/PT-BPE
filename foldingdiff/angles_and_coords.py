@@ -560,7 +560,31 @@ def extract_aa_seq(fname):
     return aa_seq_from_backbone(backbone_atoms)
 
 
+def _norm(v): 
+    n = np.linalg.norm(v); 
+    return v / (n + 1e-12)
+    
 
+
+def frame_from_triad(N, CA, C):
+    """
+    Return (R, t) at residue i using triad (N, CA, C).
+    R columns are x,y,z; origin at CA.
+    """
+    x = _norm(C - CA)
+    u = _norm(N - CA)
+    z = _norm(np.cross(x, u))   # right-handed; preserves chirality
+    y = np.cross(z, x)
+    R = np.stack([x, y, z], axis=1)
+    t = CA.copy()
+    return R, t
+
+
+def rot_geodesic(RA, RB):
+    """Angle of RA^T RB in radians."""
+    R = RA.T @ RB
+    c = np.clip((np.trace(R) - 1.0) * 0.5, -1.0, 1.0)
+    return float(np.arccos(c))
 
 
 
