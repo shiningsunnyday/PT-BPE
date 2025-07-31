@@ -67,7 +67,54 @@ class BPE():
             self._thresholds[Tokenizer.BOND_TYPES[i]] = [(Tokenizer.BOND_LENGTHS[i], Tokenizer.BOND_LENGTHS[i])]  
         label_dict = {}
         if self.rmsd_only:
-            breakpoint()
+            # compute all the residue medoids
+            all_res3_coords = []
+            all_res2_coords = []
+            all_res2_occurs = []
+            all_res2_occurs = []
+            for ti in range(len(self.tokenizers)):
+                for i in range(t.n):                
+                    if i == t.n-1:
+                        length = 2
+                        coords = t.compute_coords(3*i, length)
+                        all_res2_coords.append(coords)
+                        all_res2_occurs.append((ti, 3*i, length))
+                    else:
+                        length = 3
+                        coords = t.compute_coords(3*i, length)
+                        all_res3_coords.append(coords)
+                        all_res3_occurs.append((ti, 3*i, length))
+
+            # run k-medoids
+            medoids3, assignments3 = k_medoids(all_res3_coords, self.num_partitions)
+            medoids2, assignments2 = k_medoids(all_res2_coords, self.num_partitions)
+
+            # hard-code k2, k3
+            k2 = {'N:CA': [0], 'CA:C': [0], 'tau': [0]}
+            k3 = {'N:CA': [0], 'CA:C': [0], '0C:1N': [0], 'tau': [0], 'CA:C:1N': [0], 'psi': [0]}
+
+            # vis the res3 medoids
+            self._sphere_dict[k3] = []
+            for p, m in enumerate(medoids3):
+                ti, i1, length = all_res3_occurs[m]
+                t = self.tokenizers[ti]
+                struc = t.token_geo(i1, length)            
+                logger.info(f"res3 partition {p}: {struc}")
+                self._sphere_dict[k].append(struc)
+                key_vis_path = os.path.join(self.save_dir, f"res3_init_{p}.png")
+                t.visualize_bonds(i1, length, key_vis_path)
+
+            # vis the res2 medoids
+            self._sphere_dict[k2] = []
+            for p, m in enumerate(medoids2):
+                ti, i1, length = all_res2_occurs[m]
+                t = self.tokenizers[ti]
+                struc = t.token_geo(i1, length)            
+                logger.info(f"res2 partition {p}: {struc}")
+                self._sphere_dict[k].append(struc)
+                key_vis_path = os.path.join(self.save_dir, f"res2_init_{p}.png")
+                t.visualize_bonds(i1, length, key_vis_path)
+
         for t in self.tokenizers:
             # update avg bond lengths
             for i in range(3*t.n-1):
@@ -79,12 +126,11 @@ class BPE():
                     breakpoint()
             if self.res_init:      
                 if self.rmsd_only:
-                    # get the quantized residue for each
                     breakpoint()
                 else:     
                     # update binned residue geo                
                     labels = []
-                    for i in range(t.n):
+                    for i in range(t.n): # for each residue
                         start = 3*i
                         length = 3 if i < t.n-1 else 2
                         geo = t.token_geo(start, length)
@@ -95,10 +141,11 @@ class BPE():
                             for i, v in enumerate(geo[k]):
                                 lookup = self._thresholds[length]
                                 v = (v+2*np.pi) % (2*np.pi) # Convert to [0, 2*pi]
+                                # quantize val
                                 ind = BPE.get_ind(v, lookup[k])
                                 quant_vals.append(ind)      
                             geo[k] = quant_vals
-
+                        # quantized key
                         key = self._bin_val(geo)
                         key_str = BPE.hash_geo(key)
                         if key_str not in label_dict:
