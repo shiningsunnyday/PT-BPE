@@ -122,6 +122,12 @@ def str2dict(v):
         bins[int(a)] = int(b)
     return bins
 
+def str2dictorint(v):
+    if v.isdigit():
+        return int(v)
+    else:
+        return str2dict(v)
+
 def int_or_inf(x: str):
     # allow case‐insensitive “inf”
     if x.lower() in ("inf", "infinity"):
@@ -162,9 +168,9 @@ def parse_args():
     )
     parser.add_argument(
         "--num-p",
-        type=int,
+        type=str2dictorint,
         default=3,
-        help="num partitions for rmsd binning",
+        help="num partitions for rmsd binning; OR -separated number of rmsd partitions per size step, example: 3-100:9-10 means 100 partitions from token size 3 to 9, 10 bins from 9 onwards"
     )
     parser.add_argument(
         "--max-num-strucs",

@@ -26,7 +26,7 @@ class BPE():
         bin_strategy: how to bin values
         compute_sec_structs: whether to use secondary structure count to define token pair priority
         rmsd_packing_min_size: when to start using rmsd partitioning, if 0 run with special setting
-        num_partitions: how many partitions
+        num_partitions: how many partitions, int or dict from size to num_partitions
         """
         self.tokenizers = []
         for structure in structures:
@@ -49,15 +49,128 @@ class BPE():
         self._times = []
         self._ious = []
     
+    
     def initialize(self, path=None):
         logger.info(f"Initialize start")
         start_time = time.perf_counter()
         self._init_thresholds(path=path) # call this before _init_tokens
         logger.info(f"_init_thresholds took {time.perf_counter()-start_time}")
         start_time = time.perf_counter()        
-        self._init_tokens()        
-        logger.info(f"_init_tokens took {time.perf_counter()-start_time}")
+        if self.res_init:
+            self._init_res_tokens()
+            logger.info(f"_init_res_tokens took {time.perf_counter()-start_time}")
+        else:
+            self._init_tokens()        
+            logger.info(f"_init_tokens took {time.perf_counter()-start_time}")
         logger.info(f"Initialize finish")
+
+
+    def _init_res_tokens(self):
+        """
+        See docstring for _init_tokens
+        """
+        self._tokens = {}
+        label_dict = {}
+        res_geo = defaultdict(list)   
+
+        for ti, t in enumerate(self.tokenizers):
+            # update avg bond lengths
+            for i in range(3*t.n-1):
+                t.set_token_geo(i, 1, self._bin_val({Tokenizer.BOND_TYPES[i%3]: [0]} ))
+            # update binned residue geo
+            labels = []
+            for i in range(t.n): # for each residue
+                start = 3*i
+                length = 3 if i < t.n-1 else 2
+                geo = t.token_geo(start, length)
+                self.quant_geo(geo)
+                if length < self.rmsd_partition_min_size:
+                    # quantized key
+                    key = self._bin_val(geo)
+                    key_str = BPE.hash_geo(key)
+                    if key_str not in label_dict:
+                        n = len(label_dict)
+                        label_dict[key_str] = n
+                    else:
+                        n = label_dict[key_str]
+                    t.set_token_geo(start, length, key)
+                    labels.append(n)
+                else:
+                    # add this to res_{geo}
+                    res_geo[length].append((ti, start, length))
+                    labels.append(None)
+
+            # 3*(t.n-1) + 2 bonds
+            new_tokens = [(3*i, labels[i], 3) for i in range(t.n-1)] + [(3*t.n-3, labels[t.n-1], 2)]
+            bond_to_token = {t[0]: t for t in new_tokens} # start bond : token
+            token_pos = [3*(i//3) for i in range(3*t.n-1)]                
+            t.token_pos = token_pos
+            t.tokens = new_tokens
+            t.bond_to_token = bond_to_token
+
+        if res_geo:
+            self._sphere_dict = {} # for rmsd sphere packing
+            self._tokens = {}
+            for n, size in enumerate(res_geo):
+                # run k-medoids
+                # compute all the residue medoids
+                all_coords = []
+                all_occurs = []
+                for ti, start, length in res_geo[size]:
+                    t = self.tokenizers[ti]
+                    # need to re-init this later
+                    t.bond_to_token_copy = dict(t.bond_to_token)
+                    coords = t.compute_coords(start, length)
+                    all_coords.append(coords)
+                    all_occurs.append((ti, start, length))
+
+                # run k-medoids
+                medoids, assignments = k_medoids(all_coords, self.num_partitions[size], max_num_strucs=self.max_num_strucs)
+
+                # vis the res medoids     
+                if size == 3:
+                    k = '{"N:CA": [0], "CA:C": [0], "0C:1N": [0], "tau": [0], "CA:C:1N": [0], "psi": [0]}'
+                elif size == 2:
+                    k = '{"CA:C": [0], "0C:1N": [0], "CA:C:1N": [0]}'
+                else:
+                    raise NotImplementedError
+                self._sphere_dict[k] = []
+                for p, m in enumerate(medoids):
+                    ti, i1, length = all_occurs[m]
+                    t = self.tokenizers[ti]
+                    struc = t.token_geo(i1, length)            
+                    logger.info(f"res partition {p}: {struc}")
+                    self._sphere_dict[k].append(struc)
+                    key_vis_path = os.path.join(self.save_dir, f"init_{p}.png")
+                    t.visualize_bonds(i1, length, key_vis_path)
+                    # add to _tokens
+                    self._tokens[(n, p)] = struc                
+
+                # for each assignment
+                    # set_token_geo to the medoid
+                    # (optional) run glue
+                    # track it in labels
+                # for each t for each token
+                    # revise t.tokens
+                    # revise t.bond_to_token                    
+                for (ti1, start1, length1), p in tqdm(zip(res_geo[size], assignments), desc="iterating over assignments"):
+                    t1 = self.tokenizers[ti1]
+                    ti2, start2, length2 = res_geo[size][p]
+                    t2 = self.tokenizers[ti2]
+                    t1.set_token_geo(start1, length, t2.token_geo(start2, length))
+                    if self.glue_opt and start1 > 0:
+                        self.opt_glue(t1, start1, length)
+                    t1.tokens[start1//3] = (start1, (n, p), length)
+                    t1.bond_to_token_copy[start1] = t1.tokens[start1//3]
+                
+                for t in self.tokenizers:
+                    if hasattr(t, "bond_to_token_copy"):
+                        t.bond_to_token = t.bond_to_token_copy
+                        delattr(t, "bond_to_token_copy")
+        else:
+            self._tokens = {n: json.loads(key_str) for key_str, n in label_dict.items()}
+        logger.info(f"initialized {len(self._tokens)} residue-level tokens")     
+
     
     def _init_tokens(self):
         """
@@ -66,116 +179,22 @@ class BPE():
             For bond-residue tokens of size >= self.rmsd_partition_min_size, we instead partition the geo's with k-medoids, then take the medoids as the initial tokens. We "quantize" to these medoids. We also quantize the glue angles (omega, psi, C-N-CA). If opt_glue, we add an extra step to optimize the glue angles before quantizing them.
         In both cases, we initialize t.tokens and t.bond_to_tokens.
         """
-        self._tokens = {}                
-        if self.res_init:
-            label_dict = {}
-            res_geo = defaultdict(list)            
-        else:
-            for i in range(3):
-                self._tokens[i] = {Tokenizer.BOND_TYPES[i]: [0]}        
+        self._tokens = {}
+        for i in range(3):
+            self._tokens[i] = {Tokenizer.BOND_TYPES[i]: [0]}        
 
         for ti, t in enumerate(self.tokenizers):
             # update avg bond lengths
             for i in range(3*t.n-1):
                 t.set_token_geo(i, 1, self._bin_val({Tokenizer.BOND_TYPES[i%3]: [0]} ))
-            if self.res_init:
-                # update binned residue geo
-                labels = []                
-                for i in range(t.n): # for each residue
-                    start = 3*i
-                    length = 3 if i < t.n-1 else 2
-                    geo = t.token_geo(start, length)
-                    self.quant_geo(geo)
-                    if length < self.rmsd_partition_min_size:
-                        # quantized key
-                        key = self._bin_val(geo)
-                        key_str = BPE.hash_geo(key)
-                        if key_str not in label_dict:
-                            n = len(label_dict)
-                            label_dict[key_str] = n
-                        else:
-                            n = label_dict[key_str]
-                        t.set_token_geo(start, length, key)
-                        labels.append(n)
-                    else:
-                        # add this to res_{geo}
-                        res_geo[json.dumps(geo)].append((ti, start, length))
-                        labels.append(None)
 
-                # 3*(t.n-1) + 2 bonds
-                new_tokens = [(3*i, labels[i], 3) for i in range(t.n-1)] + [(3*t.n-3, labels[t.n-1], 2)]
-                bond_to_token = {t[0]: t for t in new_tokens} # start bond : token
-                token_pos = [3*(i//3) for i in range(3*t.n-1)]                
-                t.token_pos = token_pos
-                t.tokens = new_tokens
-                t.bond_to_token = bond_to_token
-            else:
-                new_tokens = [(i,t.bond_labels[i],1) for i in range(3*t.n-1)]
-                bond_to_token = {t[0]: t for t in new_tokens}
-                token_pos = [i for i in range(3*t.n-1)]
-                t.token_pos = token_pos
-                t.tokens = new_tokens
-                t.bond_to_token = bond_to_token
+            new_tokens = [(i,t.bond_labels[i],1) for i in range(3*t.n-1)]
+            bond_to_token = {t[0]: t for t in new_tokens}
+            token_pos = [i for i in range(3*t.n-1)]
+            t.token_pos = token_pos
+            t.tokens = new_tokens
+            t.bond_to_token = bond_to_token
 
-
-        if self.res_init:
-            if res_geo:
-                self._sphere_dict = {} # for rmsd sphere packing
-                self._tokens = {}
-                for n, k in enumerate(res_geo):
-                    # run k-medoids
-                    # compute all the residue medoids
-                    all_coords = []
-                    all_occurs = []
-                    for ti, start, length in res_geo[k]:
-                        t = self.tokenizers[ti]
-                        # need to re-init this later
-                        t.bond_to_token_copy = dict(t.bond_to_token)
-                        coords = t.compute_coords(start, length)
-                        all_coords.append(coords)
-                        all_occurs.append((ti, start, length))
-
-                    # run k-medoids
-                    medoids, assignments = k_medoids(all_coords, self.num_partitions, max_num_strucs=self.max_num_strucs)
-
-                    # vis the res medoids
-                    self._sphere_dict[k] = []
-                    for p, m in enumerate(medoids):
-                        ti, i1, length = all_occurs[m]
-                        t = self.tokenizers[ti]
-                        struc = t.token_geo(i1, length)            
-                        logger.info(f"res partition {p}: {struc}")
-                        self._sphere_dict[k].append(struc)
-                        key_vis_path = os.path.join(self.save_dir, f"init_{p}.png")
-                        t.visualize_bonds(i1, length, key_vis_path)
-                        # add to _tokens
-                        self._tokens[(n, p)] = struc
-                    
-
-                    # for each assignment
-                        # set_token_geo to the medoid
-                        # (optional) run glue
-                        # track it in labels
-                    # for each t for each token
-                        # revise t.tokens
-                        # revise t.bond_to_token                    
-                    for (ti1, start1, length1), p in tqdm(zip(res_geo[k], assignments), desc="iterating over assignments"):
-                        t1 = self.tokenizers[ti1]
-                        ti2, start2, length2 = res_geo[k][p]
-                        t2 = self.tokenizers[ti2]
-                        t1.set_token_geo(start1, length, t2.token_geo(start2, length))
-                        if self.glue_opt and start1 > 0:
-                            self.opt_glue(t1, start1, length)
-                        t1.tokens[start1//3] = (start1, (n, p), length)
-                        t1.bond_to_token_copy[start1] = t1.tokens[start1//3]
-                    
-                    for t in self.tokenizers:
-                        if hasattr(t, "bond_to_token_copy"):
-                            t.bond_to_token = t.bond_to_token_copy
-                            delattr(t, "bond_to_token_copy")
-            else:
-                self._tokens = {n: json.loads(key_str) for key_str, n in label_dict.items()}
-            logger.info(f"initialized {len(self._tokens)} residue-level tokens")
 
     def optimize_glues_entry(self, t, idx, length, R_occ, t_occ,
                                 init_glue,  # (omega_{s-1}, theta_CNCA_s, phi_s)
