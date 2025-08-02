@@ -511,31 +511,13 @@ def debug():
     length = 9
     orig_coords = t1.compute_coords()
     
-    # exit frame from original
-    R_occ, t_occ = t1.exit_frame(start1, length)
     # snap internal angles for [s,e] from t2 into t1 (already done)
-    t1.set_token_geo(start1, length, t2.token_geo(start2, length))
+    t1.set_token_geo(start1, length, t2.token_geo(start2, length))    
     t1.visualize(f"./{folder}/test1_after.png", vis_dihedral=False)
     after_coords = t1.compute_coords()
     error = compute_rmsd(orig_coords, after_coords)    
 
-    # initial glue triple at left boundary from current t1
-    init_glue = t1.get_glue_left(start1)    # (psi_{s-1}, theta_CNCA_s, phi_s)
-
-    # optimize
-    best_glue, best_loss = t1.optimize_glues_entry(
-        start1, length,
-        R_occ=R_occ, t_occ=t_occ,
-        init_glue=init_glue,
-        steps_deg=(20, 8, 3),         # coarse → fine
-        wR=1.0, wt=0.1
-    )
-
-    # set the optimized glue and recompute coords
-    t1.set_glue_left(
-        start1,
-        best_glue
-    )
+    t1.opt_glue(start1, length)
     t1.visualize(f"./{folder}/test1_opt.png", vis_dihedral=False)
     after_coords = t1.compute_coords()
 

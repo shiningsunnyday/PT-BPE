@@ -17,6 +17,7 @@ class BPE():
         res_init=False,
         rmsd_partition_min_size=4,
         num_partitions=3,
+        max_num_strucs=500,
         glue_opt=False
     ):
         """
@@ -37,6 +38,7 @@ class BPE():
         self.rmsd_only = rmsd_partition_min_size == 0
         self.glue_opt = glue_opt
         self.num_partitions = num_partitions
+        self.max_num_strucs = max_num_strucs
         self.res_init = res_init
         self.bins = bins
         self.bin_strategy = bin_strategy
@@ -120,7 +122,8 @@ class BPE():
         if self.res_init:
             if res_geo:
                 self._sphere_dict = {} # for rmsd sphere packing
-                for k in res_geo:
+                self._tokens = {}
+                for n, k in enumerate(res_geo):
                     # run k-medoids
                     # compute all the residue medoids
                     all_coords = []
@@ -132,7 +135,7 @@ class BPE():
                         all_occurs.append((ti, start, length))
 
                     # run k-medoids
-                    medoids, assignments = k_medoids(all_coords, self.num_partitions)
+                    medoids, assignments = k_medoids(all_coords, self.num_partitions, max_num_strucs=self.max_num_strucs)                    
 
                     # vis the res medoids
                     self._sphere_dict[k] = []
@@ -144,16 +147,27 @@ class BPE():
                         self._sphere_dict[k].append(struc)
                         key_vis_path = os.path.join(self.save_dir, f"init_{p}.png")
                         t.visualize_bonds(i1, length, key_vis_path)
-
-                    breakpoint()
+                        # add to _tokens
+                        self._tokens[(n, p)] = struc
+                    
+                    for (ti1, start1, length1), p in tqdm(zip(res_geo[k], assignments), desc="iterating over assignments"):
+                        t1 = self.tokenizers[ti1]
+                        ti2, start2, length2 = res_geo[k][p]
+                        t2 = self.tokenizers[ti2]
+                        t1.set_token_geo(start1, length, t2.token_geo(start2, length))
+                        if self.glue_opt and start1 > 0:
+                            t1.opt_glue(start1, length)
+                        t1.tokens[start1//3] = (start, (n, p), length)
+                        t1.bond_to_token[start1] = t1.tokens[start1//3]
                     # for each assignment
                         # set_token_geo to the medoid
                         # (optional) run glue
                         # track it in labels
                     # for each t for each token
                         # revise t.tokens
-                        # revise t.bond_to_token            
-            self._tokens = {n: json.loads(key_str) for key_str, n in label_dict.items()}
+                        # revise t.bond_to_token
+            else:
+                self._tokens = {n: json.loads(key_str) for key_str, n in label_dict.items()}
             logger.info(f"initialized {len(self._tokens)} residue-level tokens")
 
     

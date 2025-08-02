@@ -1,5 +1,6 @@
 from copy import deepcopy
 import numpy as np
+from typing import Optional 
 
 
 def kabsch(P, Q):
@@ -145,78 +146,77 @@ def k_means(strucs, k, max_iterations=10, tol=0.1):
             break
     return medoids, assignments
 
-def k_medoids(strucs, k, max_iterations=10, tol=1e-4):
+def k_medoids(
+    strucs,
+    k,
+    max_iterations: int = 10,
+    tol: float = 1e-4,
+    *,
+    max_num_strucs: Optional[int] = None,
+    seed: Optional[int] = None,          
+):
     """
     Perform k-medoids clustering on a set of structures.
 
-    Parameters:
-      strucs : list
-          A list of protein structures (each structure can be any representation
-          for which 'distance' can compute a pairwise RMSD or similar metric).
-      k : int
-          The number of clusters.
-      distance : callable
-          A function that takes two structures and returns a distance (e.g., RMSD).
-      max_iterations : int, optional
-          Maximum number of iterations to run.
-      tol : float, optional
-          Convergence threshold; if the sum of medoid shifts is below tol, stop.
-
-    Returns:
-      medoids : list
-          The final list of medoid structures (representative structures).
-      assignments : numpy.ndarray
-          An array of cluster assignments (indices from 0 to k-1) for each structure.
+    ...
+    max_num_strucs : int, optional
+        If len(strucs) is larger than this value, run the algorithm only on a
+        random subset (size = max_num_strucs) and afterwards assign every
+        structure to the nearest medoid.
+    seed : int or None, optional
+        Random seed used for deterministic subsampling and medoid selection.
     """
+
     N = len(strucs)
-    
-    # Initialize medoids (for instance, randomly choose k structures)
-    medoid_indices = np.random.choice(N, size=k, replace=False)
+    if max_num_strucs is not None and max_num_strucs < k:
+        raise ValueError("`max_num_strucs` must be >= k")
+
+    rng = np.random.default_rng(seed)
+
+    # Decide which structures participate in the iterative part
+    if max_num_strucs is not None and N > max_num_strucs:
+        active_idx = rng.choice(N, size=max_num_strucs, replace=False)
+    else:
+        active_idx = np.arange(N)
+
+    # --- initialisation (unchanged except we draw from `active_idx`) -----------
+    medoid_indices = rng.choice(active_idx, size=k, replace=False)
     medoids = [strucs[i] for i in medoid_indices]
-    
+
     assignments = np.zeros(N, dtype=int)
     for iteration in range(max_iterations):
-        # Assignment step: assign each structure to the nearest medoid
-        for i, d in enumerate(strucs):
-            costs = [compute_rmsd(d, medoids[j]) for j in range(k)]
+        # -------- assignment step (only on the active subset) -----------------
+        for i in active_idx:
+            costs = [compute_rmsd(strucs[i], medoids[j]) for j in range(k)]
             assignments[i] = np.argmin(costs)
-        
-        new_medoids = []
-        new_medoids_idx = []
+
+        # -------- update step --------------------------------------------------
         total_shift = 0.0
-        # Update step: for each cluster, select the medoid that minimizes total distance within the cluster.
+        new_medoids, new_medoid_indices = [], []
         for j in range(k):
-            # Get indices of structures assigned to cluster j
-            cluster_indices = [i for i in range(N) if assignments[i] == j]
-            if not cluster_indices:
-                # If a cluster is empty, randomly reinitialize a medoid from the dataset
-                new_medoid_idx = np.random.choice(N)
-                new_medoid = strucs[new_medoid_idx]
+            cluster_members = [idx for idx in active_idx if assignments[idx] == j]
+            if not cluster_members:
+                new_idx = rng.choice(N)              # re-initialise from *all* data
             else:
-                # Compute the total distance from each candidate in the cluster to all others
-                candidate_costs = []
-                for idx in cluster_indices:
-                    candidate = strucs[idx]
-                    cost = sum(compute_rmsd(candidate, strucs[i]) for i in cluster_indices)
-                    candidate_costs.append(cost)
-                # Select the candidate with minimal cost as the new medoid
-                best_idx = cluster_indices[np.argmin(candidate_costs)]
-                new_medoid = strucs[best_idx]
-                new_medoid_idx = best_idx
-            # Compute shift distance for convergence checking:
-            shift = compute_rmsd(medoids[j], new_medoid)
+                # pick candidate with minimal total intra-cluster distance
+                dists = [
+                    sum(compute_rmsd(strucs[c], strucs[m]) for m in cluster_members)
+                    for c in cluster_members
+                ]
+                new_idx = cluster_members[int(np.argmin(dists))]
+            shift = compute_rmsd(medoids[j], strucs[new_idx])
             total_shift += shift
-            new_medoids.append(new_medoid)
-            new_medoids_idx.append(new_medoid_idx)
-        
-        # Check convergence: if the total change is below tolerance, stop.
+            new_medoids.append(strucs[new_idx])
+            new_medoid_indices.append(new_idx)
+
+        medoids, medoid_indices = new_medoids, new_medoid_indices
         if total_shift < tol:
-            medoids = new_medoids
-            medoid_indices = new_medoids_idx
-            print(f"Converged in {iteration+1} iterations with total shift {total_shift:.6f}.")
+            print(f"Converged in {iteration + 1} iterations with total shift {total_shift:.6f}.")
             break
-        else:
-            medoids = new_medoids
-            medoid_indices = new_medoids_idx
-    
+
+    # -------- final assignment for *all* structures ---------------------------
+    for i, d in enumerate(strucs):
+        costs = [compute_rmsd(d, strucs[idx]) for idx in medoid_indices]
+        assignments[i] = np.argmin(costs)
+
     return medoid_indices, assignments

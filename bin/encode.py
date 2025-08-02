@@ -165,6 +165,12 @@ def parse_args():
         type=int,
         default=3,
         help="num partitions for rmsd binning",
+    )
+    parser.add_argument(
+        "--max-num-strucs",
+        type=int,
+        default=500,
+        help="max N for running medoids",
     )    
     parser.add_argument("--glue-opt", type=str2bool, default=False, help="whether to opt the glue angles for rmsd keys")
     parser.add_argument("--cache", action='store_true', help="whether to use cached data")
@@ -276,6 +282,7 @@ def main():
                   save_dir=args.save_dir, 
                   rmsd_partition_min_size=args.p_min_size, 
                   num_partitions=args.num_p,
+                  max_num_strucs=args.max_num_strucs,
                   compute_sec_structs=args.sec, 
                   plot_iou_with_sec_structs=args.sec_eval,                  
                   res_init=args.res_init,
@@ -356,5 +363,4 @@ def main():
 
 
 if __name__ == "__main__":
-    breakpoint()
     main()

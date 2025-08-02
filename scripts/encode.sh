@@ -39,7 +39,7 @@ else
 fi
 
 PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
-  /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff/bin/python -m bin.encode \
+  /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff/bin/python -m pdb -c continue bin/encode.py \
   --bin-strategy $bin_strat \
   --bins $bins \
   --res-init $res_init \
