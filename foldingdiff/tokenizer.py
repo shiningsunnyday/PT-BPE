@@ -401,43 +401,6 @@ class Tokenizer:
         self._set_dihedral_angle(idx-2, tup[0])
         self._set_bond_angle(idx-1, tup[1])
         self._set_dihedral_angle(idx-1, tup[2])
-
-
-    
-    def optimize_glues_entry(self, idx, length, R_occ, t_occ,
-                            init_glue,  # (omega_{s-1}, theta_CNCA_s, phi_s)
-                            steps_deg=(20, 8, 3),  # coarse -> fine
-                            wR=1.0, wt=0.1):
-        """
-        Coordinate-descent style coarse-to-fine search over 3 angles.
-        Assumes t_obj has snapped internal angles for [s,e] already.
-        """
-        best = np.array(init_glue, dtype=float)
-        def loss_for(glue):
-            # set glues at the left boundary of the segment
-            omega, theta, phi = glue
-            self.set_glue_left(idx, (omega, theta, phi))  # implement this in your object
-            coords = self.compute_coords()
-            (R_new, t_new) = self.exit_frame(idx, length)
-            return (wR*rot_geodesic(R_occ, R_new)**2 + wt*np.sum((t_occ - t_new)**2), R_new, t_new)
-
-        best_val, _, _ = loss_for(best)
-        for step_deg in steps_deg:
-            step = np.deg2rad(step_deg)
-            improved = True
-            while improved:
-                improved = False
-                # try all 3D moves with offsets in {-step, 0, +step}
-                for domega in (-step, 0.0, step):
-                    for dth in (-step, 0.0, step):
-                        for dphi in (-step, 0.0, step):
-                            cand = np.array([best[0]+domega, best[1]+dth, best[2]+dphi])
-                            cand = np.array([(c+np.pi)%(2*np.pi)-np.pi for c in cand])
-                            val, _, _ = loss_for(cand)
-                            if val + 1e-9 < best_val:
-                                best, best_val = cand, val
-                                improved = True
-        return tuple(best), best_val
     
 
 
@@ -446,26 +409,7 @@ class Tokenizer:
         Begin building coords from residue before idx
         Return exit frame of final residue (that idx+length belongs to)
         """
-        return frame_from_triad(*list(self.compute_coords(idx-3, length+2)[-3:]))
-
-
-    def opt_glue(self, i1, length):
-        init_glue = self.get_glue_left(i1)    # (psi_{s-1}, theta_CNCA_s, phi_s)
-        R_occ, t_occ = self.exit_frame(i1, length)
-        # optimize
-        best_glue, best_loss = self.optimize_glues_entry(
-            i1, length,
-            R_occ=R_occ, t_occ=t_occ,
-            init_glue=init_glue,
-            steps_deg=(20, 8, 3),         # coarse → fine
-            wR=1.0, wt=0.1
-        )
-
-        # set the optimized glue and recompute coords
-        self.set_glue_left(
-            i1,
-            best_glue
-        )                      
+        return frame_from_triad(*list(self.compute_coords(idx-3, length+2)[-3:]))               
 
 
 

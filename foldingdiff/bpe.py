@@ -61,25 +61,24 @@ class BPE():
     
     def _init_tokens(self):
         """
-        Here we treat each bond as an inital "bond-type" token, then standardizing the length of the bond to a fixed value
+        Here we treat each bond as an inital "bond-type" token, then standardizing the length of the bond to a fixed value. We don't quantize any angles here, because the quantization strength will depend on the key length.
+        If self.res_init is true, we instead take the quantized residue geo's as the initial tokens and do quantize all occurrences (bin val) using the quantization strength for size 2 or 3 keys.
+            For bond-residue tokens of size >= self.rmsd_partition_min_size, we instead partition the geo's with k-medoids, then take the medoids as the initial tokens. We "quantize" to these medoids. We also quantize the glue angles (omega, psi, C-N-CA). If opt_glue, we add an extra step to optimize the glue angles before quantizing them.
+        In both cases, we initialize t.tokens and t.bond_to_tokens.
         """
-        self._tokens = {}
-        for i in range(3):
-            self._tokens[i] = {Tokenizer.BOND_TYPES[i]: [0]}
-            self._thresholds[Tokenizer.BOND_TYPES[i]] = [(Tokenizer.BOND_LENGTHS[i], Tokenizer.BOND_LENGTHS[i])]  
+        self._tokens = {}                
+        if self.res_init:
+            label_dict = {}
+            res_geo = defaultdict(list)            
+        else:
+            for i in range(3):
+                self._tokens[i] = {Tokenizer.BOND_TYPES[i]: [0]}        
 
-        label_dict = {}
-        res_geo = defaultdict(list)
         for ti, t in enumerate(self.tokenizers):
             # update avg bond lengths
             for i in range(3*t.n-1):
-                tt = t.bond_labels[i]
-                dic = self._tokens[tt]                
-                try:
-                    t.set_token_geo(i, 1, self._bin_val(dic))
-                except:
-                    breakpoint()
-            if self.res_init:                      
+                t.set_token_geo(i, 1, self._bin_val({Tokenizer.BOND_TYPES[i%3]: [0]} ))
+            if self.res_init:
                 # update binned residue geo
                 labels = []                
                 for i in range(t.n): # for each residue
@@ -130,12 +129,14 @@ class BPE():
                     all_occurs = []
                     for ti, start, length in res_geo[k]:
                         t = self.tokenizers[ti]
+                        # need to re-init this later
+                        t.bond_to_token_copy = dict(t.bond_to_token)
                         coords = t.compute_coords(start, length)
                         all_coords.append(coords)
                         all_occurs.append((ti, start, length))
 
                     # run k-medoids
-                    medoids, assignments = k_medoids(all_coords, self.num_partitions, max_num_strucs=self.max_num_strucs)                    
+                    medoids, assignments = k_medoids(all_coords, self.num_partitions, max_num_strucs=self.max_num_strucs)
 
                     # vis the res medoids
                     self._sphere_dict[k] = []
@@ -150,26 +151,111 @@ class BPE():
                         # add to _tokens
                         self._tokens[(n, p)] = struc
                     
-                    for (ti1, start1, length1), p in tqdm(zip(res_geo[k], assignments), desc="iterating over assignments"):
-                        t1 = self.tokenizers[ti1]
-                        ti2, start2, length2 = res_geo[k][p]
-                        t2 = self.tokenizers[ti2]
-                        t1.set_token_geo(start1, length, t2.token_geo(start2, length))
-                        if self.glue_opt and start1 > 0:
-                            t1.opt_glue(start1, length)
-                        t1.tokens[start1//3] = (start, (n, p), length)
-                        t1.bond_to_token[start1] = t1.tokens[start1//3]
+
                     # for each assignment
                         # set_token_geo to the medoid
                         # (optional) run glue
                         # track it in labels
                     # for each t for each token
                         # revise t.tokens
-                        # revise t.bond_to_token
+                        # revise t.bond_to_token                    
+                    for (ti1, start1, length1), p in tqdm(zip(res_geo[k], assignments), desc="iterating over assignments"):
+                        t1 = self.tokenizers[ti1]
+                        ti2, start2, length2 = res_geo[k][p]
+                        t2 = self.tokenizers[ti2]
+                        t1.set_token_geo(start1, length, t2.token_geo(start2, length))
+                        if self.glue_opt and start1 > 0:
+                            self.opt_glue(t1, start1, length)
+                        t1.tokens[start1//3] = (start1, (n, p), length)
+                        t1.bond_to_token_copy[start1] = t1.tokens[start1//3]
+                    
+                    for t in self.tokenizers:
+                        if hasattr(t, "bond_to_token_copy"):
+                            t.bond_to_token = t.bond_to_token_copy
+                            delattr(t, "bond_to_token_copy")
             else:
                 self._tokens = {n: json.loads(key_str) for key_str, n in label_dict.items()}
             logger.info(f"initialized {len(self._tokens)} residue-level tokens")
 
+    def optimize_glues_entry(self, t, idx, length, R_occ, t_occ,
+                                init_glue,  # (omega_{s-1}, theta_CNCA_s, phi_s)
+                                wR=1.0, wt=0.1):
+        """
+        Coordinate-descent style coarse-to-fine search over 3 angles.
+        Assumes t_obj has snapped internal angles for [s,e] already.
+        """
+
+        # -------- build discrete candidate sets --------------------------------
+        omegas = np.mean(self._thresholds[length]['omega'], axis=-1)   # sorted 1-D
+        thetas = np.mean(self._thresholds[length]['C:1N:1CA'], axis=-1)
+        phis   = np.mean(self._thresholds[length]['phi'],   axis=-1)
+        # -----------------------------------------------------------------------
+
+        # -------- snap start point to nearest grid values ----------------------
+        o_idx = int(np.argmin(np.abs(omegas - init_glue[0])))
+        t_idx = int(np.argmin(np.abs(thetas - init_glue[1])))
+        p_idx = int(np.argmin(np.abs(phis   - init_glue[2])))
+        best  = np.array([omegas[o_idx], thetas[t_idx], phis[p_idx]], dtype=float)
+        # -----------------------------------------------------------------------
+
+        def loss_for(glue):
+            # set glues at the left boundary of the segment
+            omega, theta, phi = glue
+            t.set_glue_left(idx, (omega, theta, phi))
+            R_new, t_new = t.exit_frame(idx, length)
+            return (wR * rot_geodesic(R_occ, R_new) ** 2 +
+                    wt * np.sum((t_occ - t_new) ** 2), R_new, t_new)
+
+        best_val, _, _ = loss_for(best)
+
+        # ------------- choose search strategy ---------------------------------
+        if max(len(omegas), len(thetas), len(phis)) <= 5:        # small ⇒ brute
+            for o in omegas:
+                for th in thetas:
+                    for ph in phis:
+                        cand = np.array([o, th, ph])
+                        val, _, _ = loss_for(cand)
+                        if val < best_val:
+                            best, best_val = cand, val
+            return tuple(best), best_val
+        # ------------- otherwise: discrete coordinate descent -----------------
+        improved = True
+        while improved:
+            improved = False
+            # loop over the three dimensions separately
+            for dim, (arr, idx) in enumerate(
+                    [(omegas, o_idx), (thetas, t_idx), (phis, p_idx)]):
+                for delta in (-1, 1):                      # one step ↓ or ↑
+                    new_idx = idx + delta
+                    if 0 <= new_idx < len(arr):
+                        cand_idx = [o_idx, t_idx, p_idx]
+                        cand_idx[dim] = new_idx
+                        cand = np.array([omegas[cand_idx[0]],
+                                        thetas[cand_idx[1]],
+                                        phis[cand_idx[2]]])
+                        val, _, _ = loss_for(cand)
+                        if val + 1e-9 < best_val:
+                            o_idx, t_idx, p_idx = cand_idx   # accept move
+                            best, best_val = cand, val
+                            improved = True
+        return tuple(best), best_val
+
+    def opt_glue(self, t: Tokenizer, i1, length):
+        init_glue = t.get_glue_left(i1)    # (psi_{s-1}, theta_CNCA_s, phi_s)
+        R_occ, t_occ = t.exit_frame(i1, length)
+        # optimize
+        best_glue, best_loss = self.optimize_glues_entry(
+            t, i1, length,
+            R_occ=R_occ, t_occ=t_occ,
+            init_glue=init_glue,
+            wR=1.0, wt=0.1
+        )
+
+        # set the optimized glue and recompute coords
+        t.set_glue_left(
+            i1,
+            best_glue
+        )       
     
     def _bin_side_chain(self, key):
         """
@@ -185,6 +271,7 @@ class BPE():
     def _init_thresholds(self, path=None):
         """
         We obtain the thresholds
+        We fix all bond lengths, so the thresholds are trivial.
         These threshold determine statistical significance of a motif, so we should choose them carefully
         We make these depend on |token|
         Due to circular angular data, we use circular histogram
@@ -225,6 +312,9 @@ class BPE():
             self._thresholds[size] = _thresholds
             self._bin_counts[size] = _bin_counts
             last_size = size
+        
+        for i in range(3):
+            self._thresholds[Tokenizer.BOND_TYPES[i]] = [(Tokenizer.BOND_LENGTHS[i], Tokenizer.BOND_LENGTHS[i])]        
     
 
     @property
