@@ -166,8 +166,9 @@ def k_medoids(
     seed : int or None, optional
         Random seed used for deterministic subsampling and medoid selection.
     """
-
+    
     N = len(strucs)
+    k = min(k, N)
     if max_num_strucs is not None and max_num_strucs < k:
         raise ValueError("`max_num_strucs` must be >= k")
 

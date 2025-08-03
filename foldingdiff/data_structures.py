@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-
+import bisect    
 
 class Node:
     def __init__(self, value, left=None, right=None):
@@ -261,22 +261,36 @@ class TokenHierarchy(dict):
         raise NotImplementedError   
 
 
-class ThresholdDict(dict): # only add, no remove
+class ThresholdDict(dict):  # only add, no remove
+    def __init__(self, *args, **kwargs):                 # ← UPDATED
+        """
+        Allow construction from any standard dict inputs, e.g.
+        ThresholdDict({'a': 1, 3: 'x'}, b=2)
+        """
+        super().__init__(*args, **kwargs)
+        # rebuild helpers from any pre-existing integer keys
+        self._int_keys = sorted(k for k in self if isinstance(k, int))
+
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
-        instance.max_key = -1
+        instance._int_keys = []        #  NEW: keep keys sorted
         return instance
 
-    def __init__(self):
-        super().__init__()
-        self.max_key = -1
-
     def __setitem__(self, key, val):
-        if isinstance(key, int) and key > self.max_key:
-            self.max_key = key
+        if isinstance(key, int):
+            if key not in self:                         #  NEW
+                bisect.insort(self._int_keys, key)     #  NEW
         super().__setitem__(key, val)
     
     def __getitem__(self, key):
-        if isinstance(key, int) and key > self.max_key:
-            key = self.max_key        
-        return super().__getitem__(key)
+        #  NEW IMPLEMENTATION
+        if key in self:
+            return super().__getitem__(key)
+
+        if isinstance(key, int):
+            idx = bisect.bisect_right(self._int_keys, key) - 1
+            if idx >= 0:
+                return super().__getitem__(self._int_keys[idx])
+
+        # fall back to normal dict behaviour
+        raise KeyError(key)

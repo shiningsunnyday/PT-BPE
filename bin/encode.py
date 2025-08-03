@@ -185,8 +185,8 @@ def parse_args():
     parser.add_argument("--num_ref", type=int, default=10, help="how many ref structures to eval error")
     args = parser.parse_args()
     # Post‐parse validation
-    if args.p_min_size == 0 and args.bins != {1: 1}:
-        parser.error("--bins must be '1-1' when --p-min-size is 0")
+    # if args.p_min_size == 0 and args.bins != {1: 1}:
+    #     parser.error("--bins must be '1-1' when --p-min-size is 0")
     return args
 
 

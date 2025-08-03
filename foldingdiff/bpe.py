@@ -5,6 +5,7 @@ import heapq
 import json
 import logging
 from collections import defaultdict
+from functools import partial
 from sortedcontainers import SortedDict
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,10 @@ class BPE():
         self.rmsd_partition_min_size = rmsd_partition_min_size
         self.rmsd_only = rmsd_partition_min_size == 0
         self.glue_opt = glue_opt
-        self.num_partitions = num_partitions
+        if isinstance(num_partitions, dict):
+            self.num_partitions = ThresholdDict(num_partitions)
+        else:
+            self.num_partitions = num_partitions
         self.max_num_strucs = max_num_strucs
         self.res_init = res_init
         self.bins = bins
@@ -125,7 +129,7 @@ class BPE():
                     all_occurs.append((ti, start, length))
 
                 # run k-medoids
-                medoids, assignments = k_medoids(all_coords, self.num_partitions[size], max_num_strucs=self.max_num_strucs)
+                medoids, assignments = k_medoids(all_coords, self.num_partitions[size], max_num_strucs=max(self.max_num_strucs, self.num_partitions[size]))
 
                 # vis the res medoids     
                 if size == 3:
@@ -141,8 +145,8 @@ class BPE():
                     struc = t.token_geo(i1, length)            
                     logger.info(f"res partition {p}: {struc}")
                     self._sphere_dict[k].append(struc)
-                    key_vis_path = os.path.join(self.save_dir, f"init_{p}.png")
-                    t.visualize_bonds(i1, length, key_vis_path)
+                    key_vis_path = os.path.join(self.save_dir, f"init_size={size}_{p}.png")
+                    # t.visualize_bonds(i1, length, key_vis_path)
                     # add to _tokens
                     self._tokens[(n, p)] = struc                
 
@@ -152,29 +156,45 @@ class BPE():
                     # track it in labels
                 # for each t for each token
                     # revise t.tokens
-                    # revise t.bond_to_token                    
+                    # revise t.bond_to_token             
                 for (ti1, start1, length1), p in tqdm(zip(res_geo[size], assignments), desc="iterating over assignments"):
                     t1 = self.tokenizers[ti1]
-                    ti2, start2, length2 = res_geo[size][p]
+                    ti2, start2, length2 = res_geo[size][medoids[p]]
                     t2 = self.tokenizers[ti2]
-                    t1.set_token_geo(start1, length, t2.token_geo(start2, length))
-                    if self.glue_opt and start1 > 0:
-                        self.opt_glue(t1, start1, length)
-                    t1.tokens[start1//3] = (start1, (n, p), length)
+                    assert length1 == length2                    
+                    t1.set_token_geo(start1, length1, t2.token_geo(start2, length1))
+                    t1.tokens[start1//3] = (start1, (n, p), length1)
                     t1.bond_to_token_copy[start1] = t1.tokens[start1//3]
-                
+
+                for (ti1, start1, length1), p in tqdm(zip(res_geo[size], assignments), desc="opting glues"):
+                    if start1 > 0:
+                        self.opt_glue(self.tokenizers[ti1], start1, length1)
+
                 for t in self.tokenizers:
                     if hasattr(t, "bond_to_token_copy"):
                         t.bond_to_token = t.bond_to_token_copy
                         delattr(t, "bond_to_token_copy")
+            # quantize omega, phi, and C-N-CA angles
+            if not self.glue_opt:
+                for ti, t in enumerate(self.tokenizers):
+                    # update omega, phi, and C-N-CA
+                    for angle in ['omega', 'phi', 'C:1N:1CA']:
+                        relv_thresh = self._thresholds[1][angle]
+                        t.angles_and_dists[angle] = [sum(relv_thresh[BPE.get_ind((v+2*np.pi) % (2*np.pi), relv_thresh)])/2 if v==v else v for v in t.angles_and_dists[angle]]
         else:
+            # quantize all angles  
+            for ti, t in enumerate(self.tokenizers):
+                # update omega, phi, and C-N-CA
+                for angle in Tokenizer.DIHEDRAL_ANGLES+Tokenizer.BOND_ANGLES:
+                        relv_thresh = self._thresholds[1][angle]
+                        t.angles_and_dists[angle] = [sum(relv_thresh[BPE.get_ind((v+2*np.pi) % (2*np.pi), relv_thresh)])/2 if v==v else v for v in t.angles_and_dists[angle]]                    
             self._tokens = {n: json.loads(key_str) for key_str, n in label_dict.items()}
         logger.info(f"initialized {len(self._tokens)} residue-level tokens")     
 
     
     def _init_tokens(self):
         """
-        Here we treat each bond as an inital "bond-type" token, then standardizing the length of the bond to a fixed value. We don't quantize any angles here, because the quantization strength will depend on the key length.
+        Here we treat each bond as an inital "bond-type" token, then standardizing the length of the bond to a fixed value. 
         If self.res_init is true, we instead take the quantized residue geo's as the initial tokens and do quantize all occurrences (bin val) using the quantization strength for size 2 or 3 keys.
             For bond-residue tokens of size >= self.rmsd_partition_min_size, we instead partition the geo's with k-medoids, then take the medoids as the initial tokens. We "quantize" to these medoids. We also quantize the glue angles (omega, psi, C-N-CA). If opt_glue, we add an extra step to optimize the glue angles before quantizing them.
         In both cases, we initialize t.tokens and t.bond_to_tokens.
@@ -184,9 +204,11 @@ class BPE():
             self._tokens[i] = {Tokenizer.BOND_TYPES[i]: [0]}        
 
         for ti, t in enumerate(self.tokenizers):
-            # update avg bond lengths
+            # quantize bond lengths
             for i in range(3*t.n-1):
                 t.set_token_geo(i, 1, self._bin_val({Tokenizer.BOND_TYPES[i%3]: [0]} ))
+            # quantize bond angles
+            breakpoint()
 
             new_tokens = [(i,t.bond_labels[i],1) for i in range(3*t.n-1)]
             bond_to_token = {t[0]: t for t in new_tokens}
@@ -194,6 +216,8 @@ class BPE():
             t.token_pos = token_pos
             t.tokens = new_tokens
             t.bond_to_token = bond_to_token
+            
+    
 
 
     def optimize_glues_entry(self, t, idx, length, R_occ, t_occ,
@@ -217,7 +241,7 @@ class BPE():
         best  = np.array([omegas[o_idx], thetas[t_idx], phis[p_idx]], dtype=float)
         # -----------------------------------------------------------------------
 
-        def loss_for(glue):
+        def loss_fn(glue, idx, length, wR, wt):
             # set glues at the left boundary of the segment
             omega, theta, phi = glue
             t.set_glue_left(idx, (omega, theta, phi))
@@ -225,6 +249,7 @@ class BPE():
             return (wR * rot_geodesic(R_occ, R_new) ** 2 +
                     wt * np.sum((t_occ - t_new) ** 2), R_new, t_new)
 
+        loss_for = partial(loss_fn, idx=idx, length=length, wR=wR, wt=wt)
         best_val, _, _ = loss_for(best)
 
         # ------------- choose search strategy ---------------------------------
@@ -274,7 +299,8 @@ class BPE():
         t.set_glue_left(
             i1,
             best_glue
-        )       
+        )
+        return t
     
     def _bin_side_chain(self, key):
         """
@@ -297,13 +323,8 @@ class BPE():
         Thresholds: Dict{|token|: List[(bin_start, bin_end)]}
         """
         self._thresholds = ThresholdDict()
-        self._bin_counts = {}
-        last_size = 0
+        self._bin_counts = ThresholdDict()
         for size, num_bins in self.bins.items():
-            if last_size:
-                for s in range(last_size+1, size):
-                    self._thresholds[s] = self._thresholds[last_size]
-                    self._bin_counts[s] = self._bin_counts[last_size]
             _thresholds = {}
             _bin_counts = {}
             # we will fix the bond lengths
@@ -330,7 +351,6 @@ class BPE():
                     _bin_counts[key] = _bin_counts.get(key, []) + [count]                 
             self._thresholds[size] = _thresholds
             self._bin_counts[size] = _bin_counts
-            last_size = size
         
         for i in range(3):
             self._thresholds[Tokenizer.BOND_TYPES[i]] = [(Tokenizer.BOND_LENGTHS[i], Tokenizer.BOND_LENGTHS[i])]        
@@ -539,7 +559,9 @@ class BPE():
                 quant = False
                 if k in Tokenizer.BOND_TYPES:
                     i = ((Tokenizer.BOND_TYPES.index(k)+3)-idx1%3)%3 + 3*i
-                    if pt1:
+                    if pt1 and pt2:
+                        pass
+                    elif pt1:
                         if i >= l1:
                             quant = True
                     elif pt2:
@@ -907,7 +929,7 @@ class BPE():
             all_occurs.append((i, i1))
             coords = t.compute_coords(i1, length)
             all_coords.append(coords)
-        medoids, assignments = k_medoids(all_coords, self.num_partitions)
+        medoids, assignments = k_medoids(all_coords, self.num_partitions[length])
         # _sphere_dict
         self._sphere_dict[k] = []
         for p, m in enumerate(medoids):
@@ -971,7 +993,7 @@ class BPE():
         # --- Step 0: Do RMSD packing if |token| >= rmsd_partition_min_size ---
         if Tokenizer.num_bonds(key_dict) >= self.rmsd_partition_min_size \
         and key not in self._sphere_dict \
-        and len(self._geo_dict[key]) > self.num_partitions:
+        and len(self._geo_dict[key]) > self.num_partitions[Tokenizer.num_bonds(key_dict)]:
             # Step 0.1: populate _sphere_dict
             # Step 0.2: update geo
             # Step 0.3: update _geo_dict
