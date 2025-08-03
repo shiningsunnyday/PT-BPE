@@ -7,6 +7,7 @@ import logging
 from collections import defaultdict
 from functools import partial
 from sortedcontainers import SortedDict
+from torch.optim import LBFGS
 logger = logging.getLogger(__name__)
 
 class BPE():
@@ -168,7 +169,7 @@ class BPE():
 
                 for (ti1, start1, length1), p in tqdm(zip(res_geo[size], assignments), desc="opting glues"):
                     if start1 > 0:
-                        self.opt_glue(self.tokenizers[ti1], start1, length1)
+                        self.opt_glue(self.tokenizers[ti1], start1, 3*((length1-2)//3)+2)
 
                 for t in self.tokenizers:
                     if hasattr(t, "bond_to_token_copy"):
@@ -216,8 +217,68 @@ class BPE():
             t.token_pos = token_pos
             t.tokens = new_tokens
             t.bond_to_token = bond_to_token
-            
     
+
+    @staticmethod
+    def fk_segment_torch(t, idx, length, ω, θ, φ):
+        geo = t.token_geo(idx-3, length+3)
+        for k in geo:
+            geo[k] = torch.tensor(geo[k])
+        geo["omega"][0] = ω
+        geo["C:1N:1CA"][0] = θ
+        geo["phi"][0] = φ
+        breakpoint()
+        assert len(geo['N:CA']) == len(geo['CA:C'])
+        assert len(geo['CA:C']) == len(geo.get('0C:1N', []))+1
+        num_bonds = Tokenizer.num_bonds(geo)
+        assert num_bonds%3 == 2
+        n_init, ca_init, c_init = update_backbone_positions(N_INIT, CA_INIT, C_INIT, geo['CA:C'][0].item(), geo['N:CA'][0].item(), geo['tau'][0].item())
+        n_init, ca_init, c_init = n_init, ca_init, c_init
+        nerf = NERFBuilder(
+            phi_dihedrals=torch.cat((torch.tensor([np.nan]), geo['phi'])),
+            psi_dihedrals=torch.cat((geo['psi'], torch.tensor([np.nan]))),
+            omega_dihedrals=torch.cat((geo['omega'], torch.tensor([np.nan]))),
+            bond_len_n_ca=geo['N:CA'][1:],
+            bond_len_ca_c=geo['CA:C'][1:],
+            bond_len_c_n=geo['0C:1N'],
+            bond_angle_n_ca=geo['C:1N:1CA'],
+            bond_angle_ca_c=geo['tau'][1:],
+            bond_angle_c_n=geo['CA:C:1N'],
+            init_coords=[n_init,ca_init,c_init]
+        )
+        return frame_from_triad_torch(*nerf.cartesian_coords[-3:].unbind(dim=0))
+
+    def optimize_glues_entry_torch(self, t, idx, length, R_occ, t_occ,
+                                init_glue,  # (omega_{s-1}, theta_CNCA_s, phi_s)
+                                wR=1.0, wt=0.1):
+        # ---- fixed tensors from original chain ----
+        R_occ = torch.tensor(R_occ,  dtype=torch.float32)
+        t_occ = torch.tensor(t_occ,  dtype=torch.float32)
+
+        # ---- initial glue triple as unconstrained raw params ----
+        init = torch.tensor(init_glue, dtype=torch.float32)
+        raw   = torch.nn.Parameter(init)
+
+        opt = LBFGS([raw], max_iter=20, line_search_fn='strong_wolfe')
+        # opt = torch.optim.Adam([raw], lr=1e-2)
+
+        def wrap(raw):
+            # map ℝ → (−π,π]
+            return torch.atan2(torch.sin(raw), torch.cos(raw))
+
+        def closure():
+            opt.zero_grad()
+            ω, θ, φ = wrap(raw)
+            R_new, t_new = BPE.fk_segment_torch(t, idx, length, ω, θ, φ)
+            breakpoint()
+            rot_loss = 0.5 * torch.sum((R_occ - R_new)**2)
+            trans_loss = torch.sum((t_occ - t_new)**2)
+            loss = wR*rot_loss + wt*trans_loss
+            loss.backward()
+            return loss
+
+        opt.step(closure)
+        ω_opt, θ_opt, φ_opt = wrap(raw).detach().cpu().numpy()
 
 
     def optimize_glues_entry(self, t, idx, length, R_occ, t_occ,
@@ -285,10 +346,15 @@ class BPE():
         return tuple(best), best_val
 
     def opt_glue(self, t: Tokenizer, i1, length):
+        # optimize angles left of residue starting at bond i1
+        if i1 % 3:
+            raise ValueError(f"i1={i1} has to be start of residue")
+        if length % 3 != 2:
+            raise ValueError(f"i1+length-1 must end the last residue")
         init_glue = t.get_glue_left(i1)    # (psi_{s-1}, theta_CNCA_s, phi_s)
         R_occ, t_occ = t.exit_frame(i1, length)
         # optimize
-        best_glue, best_loss = self.optimize_glues_entry(
+        best_glue, best_loss = self.optimize_glues_entry_torch(
             t, i1, length,
             R_occ=R_occ, t_occ=t_occ,
             init_glue=init_glue,
@@ -1116,7 +1182,7 @@ class BPE():
                 if not self.rmsd_only: # don't set if rmsd_only                                        
                     t.set_token_geo(i1, length, self._sphere_dict[key][p])
                     if self.glue_opt:
-                        t.opt_glue(i1, length)
+                        t.opt_glue(i1, 3*((length1-2)//3)+2)
                 step_times["step6"] += time.perf_counter() - start_time    
             
             # if i == 0 and t.bond_to_token[235] == (235, (41, 2), 6) and t.bond_to_token[241] == (241, 103, 24) and t.bond_to_token[265] == (265, 11, 3):

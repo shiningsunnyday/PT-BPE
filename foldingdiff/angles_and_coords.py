@@ -564,7 +564,9 @@ def _norm(v):
     n = np.linalg.norm(v); 
     return v / (n + 1e-12)
     
-
+def _normalize(v: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """L2-normalize the last dim with a small eps for numerical stability."""
+    return v / (v.norm(dim=-1, keepdim=True) + eps)
 
 def frame_from_triad(N, CA, C):
     """
@@ -577,6 +579,40 @@ def frame_from_triad(N, CA, C):
     y = np.cross(z, x)
     R = np.stack([x, y, z], axis=1)
     t = CA.copy()
+    return R, t
+
+
+def frame_from_triad_torch(N: torch.Tensor,
+                     CA: torch.Tensor,
+                     C: torch.Tensor,
+                     eps: float = 1e-8):
+    """
+    Compute (R, t) from a triad (N, CA, C).
+
+    Args
+    ----
+    N, CA, C : (*, 3) tensors (same batch shape *), dtype/device arbitrary.
+    eps      : small value to avoid div-by-zero in normalization.
+
+    Returns
+    -------
+    R : (*, 3, 3) rotation matrices; columns are x, y, z.
+    t : (*, 3)    translation (just CA).
+    """
+    # unit x-axis (points from CA to C)
+    x = _normalize(C - CA, eps)
+
+    # helper vector
+    u = _normalize(N - CA, eps)
+
+    # right-handed z-axis, then y-axis
+    z = _normalize(torch.cross(x, u, dim=-1), eps)
+    y = torch.cross(z, x, dim=-1)
+
+    # stack column-wise to form rotation matrix
+    R = torch.stack((x, y, z), dim=-1)   # (*, 3, 3)
+    t = CA.clone()                       # (*, 3)
+
     return R, t
 
 

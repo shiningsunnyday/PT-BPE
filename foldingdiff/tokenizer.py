@@ -403,13 +403,28 @@ class Tokenizer:
         self._set_dihedral_angle(idx-1, tup[2])
     
 
+    def entry_frame(self, idx, length):
+        """
+        Begin building coords from residue before idx
+        Return entry frame of first residue (that idx+length belongs to)
+        """
+        if idx % 3:
+            raise ValueError(f"idx={idx} has to be start of residue")
+        if length % 3 != 2:
+            raise ValueError(f"idx+length-1 must end the last residue")        
+        return frame_from_triad(*list(self.compute_coords(idx-3, 2)))
+
 
     def exit_frame(self, idx, length):
         """
         Begin building coords from residue before idx
         Return exit frame of final residue (that idx+length belongs to)
         """
-        return frame_from_triad(*list(self.compute_coords(idx-3, length+2)[-3:]))               
+        if idx % 3:
+            raise ValueError(f"idx={idx} has to be start of residue")
+        if length % 3 != 2:
+            raise ValueError(f"idx+length-1 must end the last residue")
+        return frame_from_triad(*list(self.compute_coords(idx-3, length+3)[-3:]))
 
 
 
