@@ -175,7 +175,7 @@ def parse_args():
     parser.add_argument(
         "--max-num-strucs",
         type=int,
-        default=500,
+        default=1000,
         help="max N for running medoids",
     )    
     parser.add_argument("--glue-opt", type=str2bool, default=False, help="whether to opt the glue angles for rmsd keys")
@@ -300,6 +300,8 @@ def main():
         res = bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False)
         # use this for sanity check
         bpe.initialize()
+        visual_path = os.path.join(args.save_dir, f"backbone_0_iter=init.png")
+        res = bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False)        
         bpe.bin()    
         if args.debug: 
             bpe_debug = BPE(dataset.structures, bins=args.bins, save_dir=args.save_dir)

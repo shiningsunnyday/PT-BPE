@@ -20,6 +20,7 @@ from biotite.structure.io.pdb import PDBFile
 from biotite.sequence import ProteinSequence
 
 from foldingdiff import nerf
+import torch
 
 EXHAUSTIVE_ANGLES = ["phi", "psi", "omega", "tau", "CA:C:1N", "C:1N:1CA"]
 EXHAUSTIVE_DISTS = ["0C:1N", "N:CA", "CA:C"]

@@ -23,7 +23,6 @@ N_INIT = np.array([17.047, 14.099, 3.625])
 CA_INIT = np.array([16.967, 12.784, 4.338])
 C_INIT = np.array([15.685, 12.755, 5.133])
 
-
 class NERFBuilder:
     """
     Builder for NERF
@@ -80,7 +79,7 @@ class NERFBuilder:
         """Build out the molecule"""
         retval = self.init_coords.copy()
         if self.use_torch:
-            retval = [torch.tensor(x, requires_grad=True) for x in retval]
+            retval = [torch.tensor(x) for x in retval]
 
         # The first value of phi at the N terminus is not defined
         # The last value of psi and omega at the C terminus are not defined

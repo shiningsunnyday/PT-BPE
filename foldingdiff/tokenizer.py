@@ -424,7 +424,8 @@ class Tokenizer:
             raise ValueError(f"idx={idx} has to be start of residue")
         if length % 3 != 2:
             raise ValueError(f"idx+length-1 must end the last residue")
-        return frame_from_triad(*list(self.compute_coords(idx-3, length+3)[-3:]))
+        coords = self.compute_coords(idx-3, length+3)[-3:]
+        return frame_from_triad(*list(coords))
 
 
 
