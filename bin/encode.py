@@ -177,7 +177,7 @@ def parse_args():
         type=int,
         default=1000,
         help="max N for running medoids",
-    )    
+    )
     parser.add_argument("--glue-opt", type=str2bool, default=False, help="whether to opt the glue angles for rmsd keys")
     parser.add_argument("--cache", action='store_true', help="whether to use cached data")
     parser.add_argument("--save-every", type=int, default=10, help="how often to dump")
@@ -296,27 +296,26 @@ def main():
         pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_init.pkl'), 'wb+'))
         ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
         np.save(ref_path, ref_coords)
+        xlim, ylim, zlim = None, None, None
         visual_path = os.path.join(args.save_dir, f"backbone_0_iter=-1.png")
-        res = bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False)
+        res = bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False, xlim=xlim, ylim=ylim, zlim=zlim)
+        xlim, ylim, zlim = tuple(res) # for later
         # use this for sanity check
         bpe.initialize()
         visual_path = os.path.join(args.save_dir, f"backbone_0_iter=init.png")
-        res = bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False)        
+        bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False, xlim=xlim, ylim=ylim, zlim=zlim)        
         bpe.bin()    
         if args.debug: 
             bpe_debug = BPE(dataset.structures, bins=args.bins, save_dir=args.save_dir)
             bpe_debug.initialize()
             bpe_debug.old_bin()
-    vis_paths = []
-    xlim, ylim, zlim = None, None, None
+    vis_paths = []    
     for t in range(_iter+1, 10000):
         ## visualization        
         if args.vis and t in list(range(0,10)) + list(range(10,100,10)) + list(range(1000,10000,1000)):
             # Save current visualization.
             visual_path = os.path.join(args.save_dir, f"backbone_0_iter={t}.png")
-            res = bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False, xlim=xlim, ylim=ylim, zlim=zlim)
-            if xlim is None:
-                xlim, ylim, zlim = tuple(res) # for later
+            bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False, xlim=xlim, ylim=ylim, zlim=zlim)
             vis_paths.append(visual_path)            
             # Define the output GIF path.
             gif_path = os.path.join(args.save_dir, f"backbone_0_iter_up_to={t}.gif")            

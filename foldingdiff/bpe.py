@@ -250,7 +250,7 @@ class BPE():
 
     def optimize_glues_entry_torch(self, t, idx, length, R_occ, t_occ,
                                 init_glue,  # (omega_{s-1}, theta_CNCA_s, phi_s)
-                                wR=1.0, wt=0.1):
+                                wR=1.0, wt=0.1, lambda_prior=0.1):
         # ---- fixed tensors from original chain ----
         R_occ = torch.tensor(R_occ,  dtype=torch.float32)
         t_occ = torch.tensor(t_occ,  dtype=torch.float32)
@@ -263,9 +263,51 @@ class BPE():
         loss_log = []
         # opt = torch.optim.Adam([raw], lr=1e-2)
 
-        def wrap(raw):
-            # map ℝ → (−π,π]
-            return torch.atan2(torch.sin(raw), torch.cos(raw))
+        def wrap(a):
+            # atan2(sin,cos) gives (-π, π]; shift by 2π then mod 2π → [0, 2π)
+            a_wrapped = torch.atan2(torch.sin(a), torch.cos(a)) + (2.0 * np.pi)
+            return torch.remainder(a_wrapped, (2.0 * np.pi))
+
+        def snap_bin(arr, x):
+            """
+            Parameters
+            ----------
+            arr : array-like of shape (m, 2)
+                Consecutive bins; arr[i] = (left_edge, right_edge) of bin i.
+            x   : scalar
+                Value whose bin index we want.
+
+            Returns
+            -------
+            int   ∈  {-1, … , m}
+                ‑1  if x < left-most edge
+                m   if x > right-most edge
+                i   such that x ∈ [left_i , right_i) otherwise
+            """
+            # Convert to ndarray for easy slicing
+            arr = np.asarray(arr)
+            m   = arr.shape[0]
+
+            # Fast checks for the two out-of-range cases
+            if x < arr[0, 0]:
+                return arr[0][0]
+            if x > arr[-1, 1]:
+                return arr[-1, 1]
+
+            # Binary search on the right edges
+            right_edges = arr[:, 1]           # length m
+            i = bisect.bisect_right(right_edges, x)
+            return sum(arr[i])/2
+            
+
+        def circ_kde_prior(angle, centers, weights, kappa=20.0):
+            # mixture of von Mises densities (normalized up to a constant; good enough for regularization)
+            # centers: tensor [K], weights: tensor [K] sum to 1
+            # vm ~ exp(kappa * cos(angle - mu))
+            diffs = angle - centers  # [K]
+            log_terms = kappa * torch.cos(diffs) + torch.log(weights + 1e-12)  # [K]
+            # log-sum-exp over modes (ignore normalization constants; this is a prior up to a constant)
+            return -torch.logsumexp(log_terms, dim=0)  # negative log prior
 
         def closure():
             opt.zero_grad()
@@ -273,13 +315,20 @@ class BPE():
             R_new, t_new = BPE.fk_segment_torch(t, idx, length, ω, θ, φ)
             rot_loss = 0.5 * torch.sum((R_occ - R_new)**2)
             trans_loss = torch.sum((t_occ - t_new)**2)
-            loss = wR*rot_loss + wt*trans_loss
+            exit_frame_loss = wR*rot_loss + wt*trans_loss
+            prior = (circ_kde_prior(ω, self._bin_centers[length]['omega'], self._bin_weights[length]['omega'], kappa=50.)
+                + circ_kde_prior(θ, self._bin_centers[length]['C:1N:1CA'], self._bin_weights[length]['C:1N:1CA'], kappa=20.)
+                + circ_kde_prior(φ, self._bin_centers[length]['phi'], self._bin_weights[length]['phi'], kappa=20.))
+            loss = exit_frame_loss + lambda_prior * prior                        
             loss.backward()
             loss_log.append(loss.item())
             return loss
 
         opt.step(closure)
         ω_opt, θ_opt, φ_opt = wrap(raw).detach().cpu().numpy()
+        ω_opt = snap_bin(self._thresholds[length]['omega'], ω_opt)
+        θ_opt = snap_bin(self._thresholds[length]['C:1N:1CA'], θ_opt)
+        φ_opt = snap_bin(self._thresholds[length]['phi'], φ_opt)
         # print("loss trace (first 10):", loss_log[:10], "... last:", loss_log[-1])
         return (ω_opt, θ_opt, φ_opt)
 
@@ -392,6 +441,8 @@ class BPE():
         """
         self._thresholds = ThresholdDict()
         self._bin_counts = ThresholdDict()
+        self._bin_centers = ThresholdDict()
+        self._bin_weights = ThresholdDict()
         for size, num_bins in self.bins.items():
             _thresholds = {}
             _bin_counts = {}
@@ -419,6 +470,8 @@ class BPE():
                     _bin_counts[key] = _bin_counts.get(key, []) + [count]                 
             self._thresholds[size] = _thresholds
             self._bin_counts[size] = _bin_counts
+            self._bin_centers[size] = {k: torch.tensor(v, dtype=torch.float32).mean(axis=-1) for k, v in _thresholds.items()}
+            self._bin_weights[size] = {k: torch.tensor(v, dtype=torch.float32)/sum(v) for k, v in _bin_counts.items()}
         
         for i in range(3):
             self._thresholds[Tokenizer.BOND_TYPES[i]] = [(Tokenizer.BOND_LENGTHS[i], Tokenizer.BOND_LENGTHS[i])]        
