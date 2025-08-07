@@ -28,32 +28,32 @@ fi
 
 case "$2" in
   1)
-    ckpt_path="./ckpts/1752523675.4143364/bpe_iter=215.pkl"
     task="conserved-site-prediction"
+    # ckpt_path="./ckpts/1752523675.4143364/bpe_iter=215.pkl"
     ;;
   2)
-    ckpt_path="./ckpts/1752523819.479008/bpe_iter=155.pkl"
     task="CatBio"
+    # ckpt_path="./ckpts/1752523819.479008/bpe_iter=155.pkl"
     ;;
   3)
-    ckpt_path="./ckpts/1752566951.7877476/bpe_iter=33.pkl" # still working on it
     task="BindBio"
+    # ckpt_path="./ckpts/1752566951.7877476/bpe_iter=33.pkl" # still working on it
     ;;
   4)
-    ckpt_path="./ckpts/1752567036.6695304/bpe_iter=100.pkl"
     task="CatInt"
+    # ckpt_path="./ckpts/1752567036.6695304/bpe_iter=100.pkl"
     ;;
   5)
-    ckpt_path="./ckpts/1752610090.6529822/bpe_iter=30.pkl" # untrained
     task="BindInt"
+    # ckpt_path="./ckpts/1752610090.6529822/bpe_iter=30.pkl" # untrained
     ;;
   6)
-    ckpt_path="./ckpts/1752521366.505088/bpe_iter=100.pkl"
     task="repeat-motif-prediction"
+    # ckpt_path="./ckpts/1752521366.505088/bpe_iter=100.pkl"    
     ;;
   7)
-    ckpt_path="./ckpts/1752525499.4329767/bpe_iter=135.pkl"
     task="remote-homology-detection"
+    # ckpt_path="./ckpts/1752525499.4329767/bpe_iter=135.pkl"
     level="protein"
     ;;
   *)
@@ -63,8 +63,10 @@ case "$2" in
     ;;
 esac
 
-if [ -n "$3" ]; then
-  extra="--inference --model_path $3 --num_samples $4"
+ckpt_path="./ckpts/${3}/bpe_iter=${4}.pkl" # new
+
+if [ -n "$5" ]; then
+  extra="--inference --model_path $5 --num_samples $6"
   # load docker image for lddt
   podman load -i ost.tar
 else

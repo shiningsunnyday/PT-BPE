@@ -54,8 +54,7 @@ def parse_args():
     parser.add_argument("--auto", action='store_true', help='auto set folders')
     parser.add_argument("--config", help='file to config compute_feats')
     parser.add_argument("--batch_size", help='batch size for feat computation checkpointing', type=int, default=100)
-    parser.add_argument("--save-dir", default="./ckpts")
-    parser.add_argument("--plot-dir", default="./plots/learn")
+    parser.add_argument("--save-dir")
     # model params
     parser.add_argument("--model", default="bert", choices=["bert", "transformer", "feats"])
     # hparams
@@ -186,68 +185,65 @@ def hierarchical_inside_and_map(
 ):
     """
     Returns:
-      dp_map[i,j]      = max score (Viterbi) for span [i,j)
-      backptr[i,j]     = best split or -1 for leaf
-      dp_inside[i,j]   = log-partition (sum-product) for span [i,j)
+      dp_inside[i,j]: log‐partition for span [i,j)
+      dp_map[i,j]:    Viterbi best score for span [i,j)
+      backptr[i,j]:   best split k (or -1 if leaf)
+
+    Caps *only* the leaf option at Lmax; splits can build arbitrarily large spans.
     """
     device = unary_scores.device
 
-    # allocate
-    dp_map    = torch.full((N+1, N+1), -float('inf'), device=device)
+    # Allocate tables
     dp_inside = torch.full((N+1, N+1), -float('inf'), device=device)
+    dp_map    = torch.full((N+1, N+1), -float('inf'), device=device)
     backptr   = torch.full((N+1, N+1), -1,        dtype=torch.long, device=device)
 
-    # base case: empty span
+    # Base case: empty spans
     for i in range(N+1):
-        dp_map[i,i]    = 0.0
-        dp_inside[i,i] = 0.0  # log(1) = 0
+        dp_inside[i, i] = 0.0
+        dp_map[i, i]    = 0.0
 
-    # fill spans by increasing width
+    # Fill spans of width d=1..N
     for d in range(1, N+1):
-        if Lmax is not None and d > Lmax:
-            continue
-        for i in range(0, N-d+1):
+        for i in range(0, N - d + 1):
             j = i + d
 
-            # 1) Viterbi option: leaf
-            best_map_val = unary_scores[i, d] + gamma * d
-            best_k       = -1
+            # 1) LEAF option (only if d<=Lmax)
+            if Lmax is None or d <= Lmax:
+                leaf_score   = unary_scores[i, d] + gamma * d
+                best_map_val = leaf_score
+                best_k       = -1
+                inside_terms = [leaf_score]
+            else:
+                best_map_val = -float('inf')
+                best_k       = -1
+                inside_terms = []
 
-            # 1a) Inside option: leaf
-            #    we treat the unary leaf as one possible tree,
-            #    so dp_inside_leaf = φ(i,d) + γ·d  in log-space
-            inside_terms = [unary_scores[i, d] + gamma*d]
-
-            # now consider every binary split k
+            # 2) SPLIT options (always allowed, no child-length cap)
             for k in range(i+1, j):
-                if Lmax is not None and (k-i)>Lmax or (j-k)>Lmax:
-                    continue
-
-                # score for splitting (i,j) → (i,k),(k,j)
+                # score for splitting (i,j) → (i,k) + (k,j)
                 split_val = split_scores[i, k-i, j-k]
 
-                # 2) Viterbi update
-                cand_map = split_val + dp_map[i,k] + dp_map[k,j]
+                # Viterbi (MAP) update
+                cand_map = split_val + dp_map[i, k] + dp_map[k, j]
                 if cand_map > best_map_val:
                     best_map_val = cand_map
                     best_k       = k
 
-                # 2a) Inside accumulation: add the score of *this* split tree
-                #    in log-space we sum over all splits,
-                #    so we'll do a logsumexp over:
-                #     split_val + dp_inside[i,k] + dp_inside[k,j]
-                inside_terms.append(split_val
-                                    + dp_inside[i,k]
-                                    + dp_inside[k,j])
+                # Inside‐sum update
+                inside_terms.append(
+                    split_val
+                    + dp_inside[i, k]
+                    + dp_inside[k, j]
+                )
 
-            # finalize Viterbi cell
-            dp_map[i,j]  = best_map_val
-            backptr[i,j] = best_k
-
-            # finalize Inside cell via log-sum-exp
-            dp_inside[i,j] = torch.logsumexp(
-                                 torch.stack(inside_terms), dim=0
-                             )            
+            # Write out DP cells
+            dp_map[i, j]    = best_map_val
+            backptr[i, j]   = best_k
+            dp_inside[i, j] = torch.logsumexp(
+                                  torch.stack(inside_terms),
+                                  dim=0
+                               )
 
     return dp_inside, dp_map, backptr
 
@@ -550,9 +546,9 @@ def main(args) -> None:
     if args.save_dir:
         save_dir = Path(args.save_dir)
         name = save_dir.name
-        plot_dir = f'./plots/learn/{name}'
-        assert os.path.exists(plot_dir)
         assert os.path.exists(save_dir)
+        plot_dir = f'./plots/learn/{name}'
+        os.makedirs(plot_dir, exist_ok=True)        
         setattr(args, 'plot_dir', plot_dir)
     elif args.auto:
         cur_time = time.time()
@@ -562,6 +558,8 @@ def main(args) -> None:
         os.makedirs(args.save_dir, exist_ok=True)        
         logging.info(f"plots : {args.plot_dir}")
         logging.info(f"ckpts : {args.save_dir}")        
+    else:
+        raise NotImplementedError
     
     args_path = os.path.join(args.save_dir, 'args.json')
     if os.path.exists(args_path):
@@ -574,7 +572,7 @@ def main(args) -> None:
                 skip      = ["auto"],   # fields you don’t need to compare
             )
     else:        
-        json.dump(args.__dict__, open(args_path), 'w+')
+        json.dump(args.__dict__, open(args_path, 'w+'))
     logging.info(f"CUDA available : {torch.cuda.is_available()}")    
 
     # ---------------- load data --------------------------------------

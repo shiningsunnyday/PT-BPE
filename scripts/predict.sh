@@ -27,33 +27,33 @@ fi
 level="residue"
 case "$1" in
   1)
-    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746813758.8588822/bpe_iter=3920.pkl"
     task="conserved-site-prediction"
+    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746813758.8588822/bpe_iter=3920.pkl"
     ckpt_dir="./ckpts/1747270965.922862" # done
     ;;
   2)
-    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746813758.8587544/bpe_iter=5590.pkl"
     task="CatBio"
+    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746813758.8587544/bpe_iter=5590.pkl"
     ckpt_dir="./ckpts/1747272230.710532" # done
     ;;
   3)
-    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8771565/bpe_iter=2500.pkl"
     task="BindBio"
+    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8771565/bpe_iter=2500.pkl"
     ckpt_dir="./ckpts/1747272233.400883"
     ;;
   4)
-    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8771634/bpe_iter=7200.pkl"
     task="CatInt"
+    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8771634/bpe_iter=7200.pkl"
     ckpt_dir="./ckpts/1747272259.176812/" # done
     ;;
   5)
-    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8772147/bpe_iter=9990.pkl"
     task="repeat-motif-prediction"
-    ckpt_dir="./ckpts/1747271619.576858" # done
+    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8772147/bpe_iter=9990.pkl"    
+    ckpt_dir="./ckpts/1747271619.576858" # done    
     ;;
   6)
-    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1744875790.3072364/bpe_iter=6000.pkl"
     task="remote-homology-detection"
+    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1744875790.3072364/bpe_iter=6000.pkl"
     ckpt_dir="./ckpts/1744932629.834232"
     level="protein"
     ;;
@@ -72,9 +72,9 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --task ${task} \
   --pkl-data-file /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/data/struct_token_bench/processed_pickles/${task}.pkl \
   --level ${level} \
-  --test \
-  --save-dir ${ckpt_dir}
-  # --auto
+  --auto
+  # --test \
+  # --save-dir ${ckpt_dir} \
 
 # test
 # PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \

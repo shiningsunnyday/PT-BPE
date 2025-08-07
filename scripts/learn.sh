@@ -5,7 +5,7 @@
 #SBATCH --account kempner_mzitnik_lab
 #SBATCH -c 16 # number of cores
 #SBATCH --mem 200g # memory pool for all cores
-#SBATCH --gres=gpu:4 # gpu
+#SBATCH --gres=gpu:1 # gpu
 #SBATCH -t 3-00:00 # time (D-HH:MM)
 ##SBATCH -t 0-12:00 # time (D-HH:MM)
 #SBATCH -o /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_learn.%j.out # STDOUT
@@ -24,8 +24,12 @@ if [ $1 -eq 1 ]; then
   config="--config config_debug.json"
   runner="python"
   echo "debug"
+  export CUDA_VISIBLE_DEVICES=""
+  device="cpu"
 else
+  export NGPU=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
   debug=""
+  device="cuda"
   config="--config config.json"
   runner="torchrun --nproc_per_node=$NGPU"
 fi
@@ -42,17 +46,16 @@ else
   extra="--auto"
 fi
 
-export NGPU=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 case "$2" in
   1)
     mode="--mode unary"
     ;;
   2)
-    mode="--mode edge --max-seg-len 20"
+    mode="--mode binary --max-seg-len 20"
     ;;
   *)
     mode="--mode recursive --max-seg-len 20"
     ;;
 esac
 
-$runner bin/learn.py --data-dir $3 $config --cuda cuda --epochs 1000 --toy $4 --pad $5 --model "feats" $mode --l1 $6 --gamma $7 $extra $debug
+$runner bin/learn.py --data-dir $3 $config --cuda $device --epochs 1000 --toy $4 --pad $5 --model "feats" $mode --l1 $6 --gamma $7 $extra $debug

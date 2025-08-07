@@ -272,7 +272,7 @@ def save_circular_histogram_equal_counts(angles, path=None, bins=10, title=None)
     return edges[:-1], edges[1:], widths, counts
 
 
-def save_circular_histogram(angles, path=None, bins=10, title=None):
+def save_circular_histogram(angles, path=None, bins=10, title=None, cover=False):
     """
     Creates a circular (rose) histogram from a list of angle values (in radians, range -pi to pi)
     and saves the figure at the specified file path.
@@ -284,9 +284,8 @@ def save_circular_histogram(angles, path=None, bins=10, title=None):
     """
     # Convert angles from [-pi, pi] to [0, 2*pi]
     angles = np.array(angles)
-    angles = (angles + 2*np.pi) % (2*np.pi)
-    
-    counts, bin_edges = np.histogram(angles, bins=bins)
+    angles = (angles + 2*np.pi) % (2*np.pi)    
+    counts, bin_edges = np.histogram(angles, bins=bins, range=(0, 2*np.pi) if cover else None)
     widths = np.diff(bin_edges)
     bin_centers = bin_edges[:-1] + widths / 2
     if path is not None:

@@ -20,7 +20,8 @@ class BPE():
         rmsd_partition_min_size=4,
         num_partitions=3,
         max_num_strucs=500,
-        glue_opt=False
+        glue_opt=False,
+        glue_opt_prior=0.0
     ):
         """
         structures: list of dataset objects
@@ -39,6 +40,7 @@ class BPE():
         self.rmsd_partition_min_size = rmsd_partition_min_size
         self.rmsd_only = rmsd_partition_min_size == 0
         self.glue_opt = glue_opt
+        self.glue_opt_prior = glue_opt_prior
         if isinstance(num_partitions, dict):
             self.num_partitions = ThresholdDict(num_partitions)
         else:
@@ -316,10 +318,13 @@ class BPE():
             rot_loss = 0.5 * torch.sum((R_occ - R_new)**2)
             trans_loss = torch.sum((t_occ - t_new)**2)
             exit_frame_loss = wR*rot_loss + wt*trans_loss
-            prior = (circ_kde_prior(ω, self._bin_centers[length]['omega'], self._bin_weights[length]['omega'], kappa=50.)
-                + circ_kde_prior(θ, self._bin_centers[length]['C:1N:1CA'], self._bin_weights[length]['C:1N:1CA'], kappa=20.)
-                + circ_kde_prior(φ, self._bin_centers[length]['phi'], self._bin_weights[length]['phi'], kappa=20.))
-            loss = exit_frame_loss + lambda_prior * prior                        
+            if lambda_prior > 0.0:
+                prior = (circ_kde_prior(ω, self._bin_centers[length]['omega'], self._bin_weights[length]['omega'], kappa=50.)
+                    + circ_kde_prior(θ, self._bin_centers[length]['C:1N:1CA'], self._bin_weights[length]['C:1N:1CA'], kappa=20.)
+                    + circ_kde_prior(φ, self._bin_centers[length]['phi'], self._bin_weights[length]['phi'], kappa=20.))
+                loss = exit_frame_loss + lambda_prior * prior                        
+            else:
+                loss = exit_frame_loss            
             loss.backward()
             loss_log.append(loss.item())
             return loss
@@ -409,7 +414,7 @@ class BPE():
             t, i1, length,
             R_occ=R_occ, t_occ=t_occ,
             init_glue=init_glue,
-            wR=1.0, wt=0.1
+            wR=1.0, wt=0.1, lambda_prior=self.glue_opt_prior
         )
 
         # set the optimized glue and recompute coords
@@ -457,8 +462,8 @@ class BPE():
                 path = Path(path).with_name(name)
             for key in t.BOND_ANGLES+t.DIHEDRAL_ANGLES:
                 name = f"{key}_{self.bin_strategy}_{num_bins}.png"
-                if self.bin_strategy == "histogram":
-                    starts, ends, widths, counts = save_circular_histogram(vals[key], path=path, bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins")
+                if self.bin_strategy.startswith("histogram"):
+                    starts, ends, widths, counts = save_circular_histogram(vals[key], path=path, bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins", cover="cover" in self.bin_strategy)
                 elif self.bin_strategy == "uniform":
                     starts, ends, widths, counts = save_circular_histogram_equal_counts(vals[key], path=path, bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins")
                 else:

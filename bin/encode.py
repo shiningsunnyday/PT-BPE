@@ -156,7 +156,7 @@ def parse_args():
     parser.add_argument("--vis", type=str2bool, default=False)
     # hparams
     parser.add_argument("--res-init", type=str2bool, default=False, help="base token type, residue vs bond (default bond)")
-    parser.add_argument("--bin-strategy", help="how to bin values", default="histogram", choices=["histogram", "uniform"])
+    parser.add_argument("--bin-strategy", help="how to bin values", default="histogram", choices=["histogram", "histogram-cover", "uniform"])
     parser.add_argument("--bins", type=str2dict, help=":-separated number of bins per size step, example: 1-100:10-10 means 100 bins from token size 1 to 9, 10 bins from 10 onwards", default="1-10")
     parser.add_argument("--sec", type=str2bool, default=False, help="whether to compute sec structures to guide token discovery")
     parser.add_argument("--sec-eval", type=str2bool, default=False, help="whether to evaluate sec structure overlap")
@@ -179,6 +179,7 @@ def parse_args():
         help="max N for running medoids",
     )
     parser.add_argument("--glue-opt", type=str2bool, default=False, help="whether to opt the glue angles for rmsd keys")
+    parser.add_argument("--glue-opt-prior", type=float, default=0.0, help="whether to impose a prior loss in glue opt")
     parser.add_argument("--cache", action='store_true', help="whether to use cached data")
     parser.add_argument("--save-every", type=int, default=10, help="how often to dump")
     parser.add_argument("--plot-every", type=int, default=50, help="how often to plot")
@@ -292,7 +293,8 @@ def main():
                   compute_sec_structs=args.sec, 
                   plot_iou_with_sec_structs=args.sec_eval,                  
                   res_init=args.res_init,
-                  glue_opt=args.glue_opt)
+                  glue_opt=args.glue_opt,
+                  glue_opt_prior=args.glue_opt_prior)
         pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_init.pkl'), 'wb+'))
         ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
         np.save(ref_path, ref_coords)
@@ -312,7 +314,7 @@ def main():
     vis_paths = []    
     for t in range(_iter+1, 10000):
         ## visualization        
-        if args.vis and t in list(range(0,10)) + list(range(10,100,10)) + list(range(1000,10000,1000)):
+        if args.vis and t in list(range(0,10)) + list(range(10,100,10)) + list(range(100, 1000, 100)) + list(range(1000,10000,1000)):
             # Save current visualization.
             visual_path = os.path.join(args.save_dir, f"backbone_0_iter={t}.png")
             bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False, xlim=xlim, ylim=ylim, zlim=zlim)
