@@ -305,6 +305,7 @@ def sctm_designability(
         best_tm = 0.0
         for pred_pdb in pred_pdbs:
             best_tm = max(best_tm, tm_score(pred_pdb, bb))
+            print(best_tm)
 
         results[Path(bb).stem] = best_tm
     return results

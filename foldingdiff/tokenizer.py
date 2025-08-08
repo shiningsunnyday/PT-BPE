@@ -415,7 +415,7 @@ class Tokenizer:
         return frame_from_triad(*list(self.compute_coords(idx-3, 2)))
 
 
-    def exit_frame(self, idx, length):
+    def exit_frame(self, idx, length, ret_all=False):
         """
         Begin building coords from residue before idx
         Return exit frame of final residue (that idx+length belongs to)
@@ -424,8 +424,17 @@ class Tokenizer:
             raise ValueError(f"idx={idx} has to be start of residue")
         if length % 3 != 2:
             raise ValueError(f"idx+length-1 must end the last residue")
-        coords = self.compute_coords(idx-3, length+3)[-3:]
-        return frame_from_triad(*list(coords))
+        coords = self.compute_coords(idx-3, length+3)
+        if ret_all:
+            assert coords.shape[0] % 3 == 0
+            R_occs, t_occs = [], []
+            for i in range((length+1)//3):
+                R_occ, t_occ = frame_from_triad(*list(coords[3*i:3*(i+1)]))                
+                R_occs.append(R_occ)
+                t_occs.append(t_occ)
+            return R_occs, t_occs
+        else:            
+            return frame_from_triad(*list(coords[-3:]))
 
 
 

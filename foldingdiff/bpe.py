@@ -21,7 +21,8 @@ class BPE():
         num_partitions=3,
         max_num_strucs=500,
         glue_opt=False,
-        glue_opt_prior=0.0
+        glue_opt_prior=0.0,
+        glue_opt_method="all"
     ):
         """
         structures: list of dataset objects
@@ -41,6 +42,7 @@ class BPE():
         self.rmsd_only = rmsd_partition_min_size == 0
         self.glue_opt = glue_opt
         self.glue_opt_prior = glue_opt_prior
+        self.glue_opt_method = glue_opt_method
         if isinstance(num_partitions, dict):
             self.num_partitions = ThresholdDict(num_partitions)
         else:
@@ -165,7 +167,7 @@ class BPE():
                     ti2, start2, length2 = res_geo[size][medoids[p]]
                     t2 = self.tokenizers[ti2]
                     assert length1 == length2                    
-                    if start1 > 0 and self.glue_opt:                        
+                    if start1 > 0 and self.glue_opt and self.glue_opt_method == "each":                    
                         R_occ, t_occ = t1.exit_frame(start1, 3*((length1-2)//3)+2)
                         t1.set_token_geo(start1, length1, t2.token_geo(start2, length1))
                         self.opt_glue(t1, start1, 3*((length1-2)//3)+2, R_occ, t_occ)
@@ -173,14 +175,19 @@ class BPE():
                         t1.set_token_geo(start1, length1, t2.token_geo(start2, length1))
                     t1.tokens[start1//3] = (start1, (n, p), length1)
                     t1.bond_to_token_copy[start1] = t1.tokens[start1//3]
-
+                
 
                 for t in self.tokenizers:
                     if hasattr(t, "bond_to_token_copy"):
                         t.bond_to_token = t.bond_to_token_copy
                         delattr(t, "bond_to_token_copy")
             # quantize omega, phi, and C-N-CA angles
-            if not self.glue_opt:
+            if self.glue_opt:
+                if self.glue_opt_method == "all":
+                    for t in tqdm(self.tokenizers, desc="optimizing all glues"):
+                        R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
+                        self.opt_glue(t, 3, 3*t.n-4, R_occs, t_occs)
+            else:
                 for ti, t in enumerate(self.tokenizers):
                     # update omega, phi, and C-N-CA
                     for angle in ['omega', 'phi', 'C:1N:1CA']:
@@ -224,13 +231,19 @@ class BPE():
     
 
     @staticmethod
-    def fk_segment_torch(t, idx, length, ω, θ, φ):
+    def fk_segment_torch(t, idx, length, ω, θ, φ, ret_all=False):
         geo = t.token_geo(idx-3, length+3)
         for k in geo:
             geo[k] = torch.as_tensor(geo[k], device=ω.device, dtype=ω.dtype)
-        geo["omega"][0] = ω
-        geo["C:1N:1CA"][0] = θ
-        geo["phi"][0] = φ
+        if ret_all:
+            assert len(ω) == len(geo["omega"])
+            geo["omega"] = ω
+            geo["C:1N:1CA"] = θ
+            geo["phi"] = φ
+        else:
+            geo["omega"][0] = ω
+            geo["C:1N:1CA"][0] = θ
+            geo["phi"][0] = φ
         assert len(geo['N:CA']) == len(geo['CA:C'])
         assert len(geo['CA:C']) == len(geo.get('0C:1N', []))+1
         num_bonds = Tokenizer.num_bonds(geo)
@@ -248,14 +261,25 @@ class BPE():
             bond_angle_c_n=geo['CA:C:1N'],
             init_coords=[n_init,ca_init,c_init]
         )
-        return frame_from_triad_torch(*nerf.cartesian_coords[-3:].unbind(dim=0))
+        coords = nerf.cartesian_coords
+        if ret_all:
+            return zip(*(frame_from_triad_torch(*coords[3*i:3*(i+1)]) for i in range(1, t.n)))
+        else:
+            return frame_from_triad_torch(*coords[-3:].unbind(dim=0))
 
     def optimize_glues_entry_torch(self, t, idx, length, R_occ, t_occ,
                                 init_glue,  # (omega_{s-1}, theta_CNCA_s, phi_s)
                                 wR=1.0, wt=0.1, lambda_prior=0.1):
         # ---- fixed tensors from original chain ----
-        R_occ = torch.tensor(R_occ,  dtype=torch.float32)
-        t_occ = torch.tensor(t_occ,  dtype=torch.float32)
+        if isinstance(R_occ, list):
+            assert isinstance(t_occ, list)
+            R_occs = [torch.tensor(r_occ,  dtype=torch.float32) for r_occ in R_occ]
+            t_occs = [torch.tensor(t_occ,  dtype=torch.float32) for t_occ in t_occ]
+            ret_all = True
+        else:
+            R_occ = torch.tensor(R_occ,  dtype=torch.float32)
+            t_occ = torch.tensor(t_occ,  dtype=torch.float32)
+            ret_all = False
 
         # ---- initial glue triple as unconstrained raw params ----
         init = torch.tensor(init_glue, dtype=torch.float32)
@@ -313,10 +337,16 @@ class BPE():
 
         def closure():
             opt.zero_grad()
-            ω, θ, φ = wrap(raw)
-            R_new, t_new = BPE.fk_segment_torch(t, idx, length, ω, θ, φ)
-            rot_loss = 0.5 * torch.sum((R_occ - R_new)**2)
-            trans_loss = torch.sum((t_occ - t_new)**2)
+            if ret_all:
+                ωs, θs, φs= (wrap(x) for x in raw.unbind(-1))
+                R_news, t_news = BPE.fk_segment_torch(t, idx, length, ωs, θs, φs, ret_all=ret_all)                
+                rot_loss = sum((0.5 * torch.sum((R_occ - R_new)**2) for R_new, R_occ in zip(R_news, R_occs)))
+                trans_loss = sum(torch.sum((t_occ - t_new)**2) for t_new, t_occ in zip(t_news, t_occs))
+            else:
+                ω, θ, φ = wrap(raw)
+                R_new, t_new = BPE.fk_segment_torch(t, idx, length, ω, θ, φ, ret_all=ret_all)                
+                rot_loss = 0.5 * torch.sum((R_occ - R_new)**2)
+                trans_loss = torch.sum((t_occ - t_new)**2)
             exit_frame_loss = wR*rot_loss + wt*trans_loss
             if lambda_prior > 0.0:
                 prior = (circ_kde_prior(ω, self._bin_centers[length]['omega'], self._bin_weights[length]['omega'], kappa=50.)
@@ -330,12 +360,19 @@ class BPE():
             return loss
 
         opt.step(closure)
-        ω_opt, θ_opt, φ_opt = wrap(raw).detach().cpu().numpy()
-        ω_opt = snap_bin(self._thresholds[length]['omega'], ω_opt)
-        θ_opt = snap_bin(self._thresholds[length]['C:1N:1CA'], θ_opt)
-        φ_opt = snap_bin(self._thresholds[length]['phi'], φ_opt)
-        # print("loss trace (first 10):", loss_log[:10], "... last:", loss_log[-1])
-        return (ω_opt, θ_opt, φ_opt)
+        if ret_all:
+            ω_opts, θ_opts, φ_opts= (wrap(x) for x in raw.unbind(-1))
+            ω_opts = [snap_bin(self._thresholds[length]['omega'], ω_opt) for ω_opt in ω_opts]
+            θ_opts = [snap_bin(self._thresholds[length]['C:1N:1CA'], θ_opt) for θ_opt in θ_opts]
+            φ_opts = [snap_bin(self._thresholds[length]['phi'], φ_opt) for φ_opt in φ_opts]
+            return (ω_opts, θ_opts, φ_opts)
+        else:
+            ω_opt, θ_opt, φ_opt = wrap(raw).detach().cpu().numpy()
+            ω_opt = snap_bin(self._thresholds[length]['omega'], ω_opt)
+            θ_opt = snap_bin(self._thresholds[length]['C:1N:1CA'], θ_opt)
+            φ_opt = snap_bin(self._thresholds[length]['phi'], φ_opt)
+            # print("loss trace (first 10):", loss_log[:10], "... last:", loss_log[-1])
+            return (ω_opt, θ_opt, φ_opt)
 
 
     def optimize_glues_entry(self, t, idx, length, R_occ, t_occ,
@@ -408,7 +445,10 @@ class BPE():
             raise ValueError(f"i1={i1} has to be start of residue")
         if length % 3 != 2:
             raise ValueError(f"i1+length-1 must end the last residue")
-        init_glue = t.get_glue_left(i1)    # (psi_{s-1}, theta_CNCA_s, phi_s)        
+        if isinstance(R_occ, list):
+            init_glue = [t.get_glue_left(i) for i in range(i1, i1+3*len(R_occ), 3)]
+        else:
+            init_glue = t.get_glue_left(i1)    # (psi_{s-1}, theta_CNCA_s, phi_s)        
         # optimize
         best_glue = self.optimize_glues_entry_torch(
             t, i1, length,
@@ -418,10 +458,17 @@ class BPE():
         )
 
         # set the optimized glue and recompute coords
-        t.set_glue_left(
-            i1,
-            best_glue
-        )
+        if isinstance(init_glue, list):
+            for i, best_glue in enumerate(zip(*best_glue)):
+                t.set_glue_left(
+                    i1+3*i,
+                    best_glue
+                )                
+        else:
+            t.set_glue_left(
+                i1,
+                best_glue
+            )
         return t
     
     def _bin_side_chain(self, key):
