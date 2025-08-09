@@ -8,6 +8,8 @@ from collections import defaultdict
 from functools import partial
 from sortedcontainers import SortedDict
 from torch.optim import LBFGS
+from torch.multiprocessing import get_context
+from concurrent.futures import ProcessPoolExecutor, as_completed
 logger = logging.getLogger(__name__)
 
 class BPE():
@@ -182,11 +184,29 @@ class BPE():
                         t.bond_to_token = t.bond_to_token_copy
                         delattr(t, "bond_to_token_copy")
             # quantize omega, phi, and C-N-CA angles
-            if self.glue_opt:
-                if self.glue_opt_method == "all":
-                    for t in tqdm(self.tokenizers, desc="optimizing all glues"):
-                        R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
-                        self.opt_glue(t, 3, 3*t.n-4, R_occs, t_occs)
+            if self.glue_opt and self.glue_opt_method == "all":
+                    # if mp.get_start_method(allow_none=True) != "fork":
+                    #     mp.set_start_method("fork", force=True)
+                    pool  = ProcessPoolExecutor(
+                                max_workers=os.cpu_count())
+
+                    futures = [
+                        pool.submit(
+                            BPE._opt_glue_worker,
+                            t,                # cheap to serialise
+                            3*t.n - 4,
+                            dict(max_iter=20,
+                                line_search_fn='strong_wolfe')
+                        )
+                        for t in self.tokenizers
+                    ]
+
+                    for _ in tqdm(as_completed(futures), total=len(futures),
+                                desc="optimizing all glues"):
+                        pass
+                # for t in tqdm(self.tokenizers, desc="optimizing all glues"):
+                #     R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
+                #     self.opt_glue(t, 3, 3*t.n-4, R_occs, t_occs)
             else:
                 for ti, t in enumerate(self.tokenizers):
                     # update omega, phi, and C-N-CA
@@ -232,9 +252,10 @@ class BPE():
 
     @staticmethod
     def fk_segment_torch(t, idx, length, ω, θ, φ, ret_all=False):
+        device = ω.device
         geo = t.token_geo(idx-3, length+3)
         for k in geo:
-            geo[k] = torch.as_tensor(geo[k], device=ω.device, dtype=ω.dtype)
+            geo[k] = torch.as_tensor(geo[k], device=device, dtype=ω.dtype)
         if ret_all:
             assert len(ω) == len(geo["omega"])
             geo["omega"] = ω
@@ -250,9 +271,9 @@ class BPE():
         assert num_bonds%3 == 2
         n_init, ca_init, c_init = update_backbone_positions(N_INIT, CA_INIT, C_INIT, geo['CA:C'][0].item(), geo['N:CA'][0].item(), geo['tau'][0].item())
         nerf = NERFBuilder(
-            phi_dihedrals=torch.cat((torch.tensor([np.nan]), geo['phi'])),
-            psi_dihedrals=torch.cat((geo['psi'], torch.tensor([np.nan]))),
-            omega_dihedrals=torch.cat((geo['omega'], torch.tensor([np.nan]))),
+            phi_dihedrals=torch.cat((torch.tensor([np.nan], device=device), geo['phi'])),
+            psi_dihedrals=torch.cat((geo['psi'], torch.tensor([np.nan], device=device))),
+            omega_dihedrals=torch.cat((geo['omega'], torch.tensor([np.nan], device=device))),
             bond_len_n_ca=geo['N:CA'][1:],
             bond_len_ca_c=geo['CA:C'][1:],
             bond_len_c_n=geo['0C:1N'],
@@ -270,19 +291,20 @@ class BPE():
     def optimize_glues_entry_torch(self, t, idx, length, R_occ, t_occ,
                                 init_glue,  # (omega_{s-1}, theta_CNCA_s, phi_s)
                                 wR=1.0, wt=0.1, lambda_prior=0.1):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         # ---- fixed tensors from original chain ----
         if isinstance(R_occ, list):
             assert isinstance(t_occ, list)
-            R_occs = [torch.tensor(r_occ,  dtype=torch.float32) for r_occ in R_occ]
-            t_occs = [torch.tensor(t_occ,  dtype=torch.float32) for t_occ in t_occ]
+            R_occs = [torch.tensor(r_occ,  dtype=torch.float32, device=device) for r_occ in R_occ]
+            t_occs = [torch.tensor(t_occ,  dtype=torch.float32, device=device) for t_occ in t_occ]
             ret_all = True
         else:
-            R_occ = torch.tensor(R_occ,  dtype=torch.float32)
-            t_occ = torch.tensor(t_occ,  dtype=torch.float32)
+            R_occ = torch.tensor(R_occ,  dtype=torch.float32, device=device)
+            t_occ = torch.tensor(t_occ,  dtype=torch.float32, device=device)
             ret_all = False
 
         # ---- initial glue triple as unconstrained raw params ----
-        init = torch.tensor(init_glue, dtype=torch.float32)
+        init = torch.tensor(init_glue, dtype=torch.float32, device=device)
         raw   = torch.nn.Parameter(init)
 
         opt = LBFGS([raw], max_iter=20, line_search_fn='strong_wolfe')
@@ -438,6 +460,13 @@ class BPE():
                             best, best_val = cand, val
                             improved = True
         return tuple(best)
+
+    @staticmethod
+    def _opt_glue_worker(t, n, opt_kwargs):
+        torch.set_num_threads(1)               # avoid over-subscription
+
+        R_occs, t_occs = t.exit_frame(3, 3*t.n - 4, ret_all=True)
+        return opt_glue(t, 3, 3*t.n - 4, R_occs, t_occs, **opt_kwargs)        
 
     def opt_glue(self, t: Tokenizer, i1, length, R_occ, t_occ):
         # optimize angles left of residue starting at bond i1

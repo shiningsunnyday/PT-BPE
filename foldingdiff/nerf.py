@@ -48,7 +48,14 @@ class NERFBuilder:
                 for v in [phi_dihedrals, psi_dihedrals, omega_dihedrals]
             ]
         ):
+            assert all(
+                [
+                    isinstance(v, torch.Tensor)
+                    for v in [phi_dihedrals, psi_dihedrals, omega_dihedrals]
+                ]
+            )
             self.use_torch = True
+            self.device = phi_dihedrals.device
 
         self.phi = phi_dihedrals.squeeze()
         self.psi = psi_dihedrals.squeeze()
@@ -79,7 +86,7 @@ class NERFBuilder:
         """Build out the molecule"""
         retval = self.init_coords.copy()
         if self.use_torch:
-            retval = [torch.tensor(x) for x in retval]
+            retval = [torch.tensor(x, device=self.device) for x in retval]
 
         # The first value of phi at the N terminus is not defined
         # The last value of psi and omega at the C terminus are not defined

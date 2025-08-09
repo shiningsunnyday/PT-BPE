@@ -18,29 +18,37 @@ cd "/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff"
 # module load ncf/1.0.0-fasrc01; module load miniconda3/4.12.0-ncf; module load python/3.10.12-fasrc01
 # conda env create --prefix /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff --file environment.yml
 
-toy=$1
-data_dir=$2
+runner="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff/bin/python"
+
+if [ $1 -eq 1 ]; then
+  echo "debug"
+  runner="${runner} -m pdb -c continue"
+fi
+
+toy=$2
+data_dir=$3
 pad="512"
-bins=$3
-bin_strat=$4
+bins=$4
+bin_strat=$5
 sec="False"
 vis="True"
 res_init="True"
-save_every=$5
-plot_every=$6
-p_size=$7
-num_p=$8
-glue_opt=$9
-glue_opt_method=${10}
+save_every=$6
+plot_every=$7
+p_size=$8
+num_p=$9
+glue_opt=${10}
+glue_opt_method=${11}
 
-if [ -n "${11}" ]; then
-  extra="--save-dir ${11}"
+if [ -n "${12}" ]; then
+  extra="--save-dir ${12}"
 else
   extra="--auto"
 fi
-
+export CUDA_VISIBLE_DEVICES=""
+export OMP_NUM_THREADS=1
 PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
-  /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff/bin/python -m pdb -c continue bin/encode.py \
+  $runner bin/encode.py \
   --bin-strategy $bin_strat \
   --bins $bins \
   --res-init $res_init \
