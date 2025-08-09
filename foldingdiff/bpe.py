@@ -9,7 +9,7 @@ from functools import partial
 from sortedcontainers import SortedDict
 from torch.optim import LBFGS
 from torch.multiprocessing import get_context
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 logger = logging.getLogger(__name__)
 
 class BPE():
@@ -24,7 +24,8 @@ class BPE():
         max_num_strucs=500,
         glue_opt=False,
         glue_opt_prior=0.0,
-        glue_opt_method="all"
+        glue_opt_method="all",
+        seed=None
     ):
         """
         structures: list of dataset objects
@@ -55,6 +56,8 @@ class BPE():
         self.bin_strategy = bin_strategy
         print(self.bin_strategy)
         self.n = len(self.tokenizers)
+        self.seed = seed
+        self.rng = np.random.default_rng(self.seed)
         self.save_dir = save_dir
         self._step = 0
         self._times = []
@@ -92,10 +95,10 @@ class BPE():
             labels = []
             for i in range(t.n): # for each residue
                 start = 3*i
-                length = 3 if i < t.n-1 else 2
-                geo = t.token_geo(start, length)
-                self.quant_geo(geo)
+                length = 3 if i < t.n-1 else 2                
                 if length < self.rmsd_partition_min_size:
+                    geo = t.token_geo(start, length)                
+                    self.quant_geo(geo)
                     # quantized key
                     key = self._bin_val(geo)
                     key_str = BPE.hash_geo(key)
@@ -125,18 +128,43 @@ class BPE():
             for n, size in enumerate(res_geo):
                 # run k-medoids
                 # compute all the residue medoids
-                all_coords = []
-                all_occurs = []
-                for ti, start, length in res_geo[size]:
+                # decide how many participate    
+                N = len(res_geo[size])            
+                if N > self.max_num_strucs:
+                    active_inds = self.rng.choice(N, self.max_num_strucs, replace=False)
+                else:
+                    active_inds = np.arange(N)
+                active_coords = []
+                active_occurs = []
+                for i in tqdm(active_inds, desc=f"gathering {len(active_inds)} occurrences"):
+                    ti, start, length = res_geo[size][i]
                     t = self.tokenizers[ti]
                     # need to re-init this later
                     t.bond_to_token_copy = dict(t.bond_to_token)
                     coords = t.compute_coords(start, length)
-                    all_coords.append(coords)
-                    all_occurs.append((ti, start, length))
+                    active_coords.append(coords)
+                    active_occurs.append((ti, start, length))
 
-                # run k-medoids
-                medoids, assignments = k_medoids(all_coords, self.num_partitions[size], max_num_strucs=max(self.max_num_strucs, self.num_partitions[size]))
+                # run k-medoids                
+                medoid_inds = k_medoids(active_coords, self.num_partitions[size], rng=self.rng)                
+                # -------- final assignment for *all* structures ---------------------------                
+                compute_fn = partial(                                               # NEW
+                    BPE._compute_assignment,
+                    active_coords=active_coords,
+                    medoid_inds=medoid_inds
+                )
+                assignments = []
+                with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
+                    futures = [
+                        pool.submit(
+                            compute_fn,
+                            (self.tokenizers[ti], start, length)
+                        )
+                        for (ti, start, length) in res_geo[size]
+                    ]
+                    for future in tqdm(as_completed(futures), total=len(futures),
+                                desc="computing assignments"):
+                        assignments.append(future.result())
 
                 # vis the res medoids     
                 if size == 3:
@@ -146,8 +174,8 @@ class BPE():
                 else:
                     raise NotImplementedError
                 self._sphere_dict[k] = []
-                for p, m in enumerate(medoids):
-                    ti, i1, length = all_occurs[m]
+                for p, m in enumerate(medoid_inds):
+                    ti, i1, length = active_occurs[m]
                     t = self.tokenizers[ti]
                     struc = t.token_geo(i1, length)            
                     logger.info(f"res partition {p}: {struc}")
@@ -163,7 +191,9 @@ class BPE():
                     # track it in labels
                 # for each t for each token
                     # revise t.tokens
-                    # revise t.bond_to_token             
+                    # revise t.bond_to_token
+
+                medoids = [active_inds[m] for m in medoid_inds]
                 for (ti1, start1, length1), p in tqdm(zip(res_geo[size], assignments), desc="iterating over assignments"):
                     t1 = self.tokenizers[ti1]
                     ti2, start2, length2 = res_geo[size][medoids[p]]
@@ -187,9 +217,7 @@ class BPE():
             if self.glue_opt and self.glue_opt_method == "all":
                     # if mp.get_start_method(allow_none=True) != "fork":
                     #     mp.set_start_method("fork", force=True)
-                    pool  = ProcessPoolExecutor(
-                                max_workers=os.cpu_count())
-
+                    pool  = ProcessPoolExecutor(max_workers=os.cpu_count())
                     futures = [
                         pool.submit(
                             BPE._opt_glue_worker,
@@ -462,6 +490,14 @@ class BPE():
         return tuple(best)
 
     @staticmethod
+    def _compute_assignment(args, active_coords, medoid_inds):             # NEW
+        """Worker that returns the index of the closest medoid for one segment."""
+        t, start, length = args
+        coords = t.compute_coords(start, length)
+        costs = [compute_rmsd(coords, active_coords[idx]) for idx in medoid_inds]
+        return np.argmin(costs)
+
+    @staticmethod
     def _opt_glue_worker(t, n, opt_kwargs):
         torch.set_num_threads(1)               # avoid over-subscription
 
@@ -533,7 +569,8 @@ class BPE():
                 angles = t.angles_and_dists
                 for key in t.BOND_ANGLES+t.DIHEDRAL_ANGLES: # these are mostly fixed
                     t_vals = angles[key][angles[key].fillna(0)!=0.].tolist()
-                    vals[key] = vals.get(key, []) + t_vals
+                    vals[key] = vals.get(key, [])
+                    vals[key].extend(t_vals)
             if path is not None:
                 path = Path(path).with_name(name)
             for key in t.BOND_ANGLES+t.DIHEDRAL_ANGLES:
@@ -1123,19 +1160,44 @@ class BPE():
         logger.info(f"Start partitioning {k}")
         key_dict = json.loads(k)
         length = Tokenizer.num_bonds(key_dict)
-        all_occurs = []
-        all_coords = []
-        for i, index in self._geo_dict[k]:
-            t = self.tokenizers[i]
+        all_pos = list(self._geo_dict[k]) # for indexing
+        N = len(all_pos)
+        if N > self.max_num_strucs:
+            active_inds = self.rng.choice(N, self.max_num_strucs, replace=False)
+        else:
+            active_inds = np.arange(N)        
+        active_occurs = []
+        active_coords = []
+        for i in tqdm(active_inds, desc=f"gathering {len(active_inds)} occurrences"):
+            ti, index = all_pos[i]
+            t = self.tokenizers[ti]
             i1 = t.token_pos[index-1]
-            all_occurs.append((i, i1))
             coords = t.compute_coords(i1, length)
-            all_coords.append(coords)
-        medoids, assignments = k_medoids(all_coords, self.num_partitions[length])
+            active_occurs.append((i, i1))
+            active_coords.append(coords)
+        
+        # run k-medoids
+        medoid_inds = k_medoids(active_coords, self.num_partitions[length], rng=self.rng)
+        medoids = [active_inds[m] for m in medoid_inds]
+        assignments = []
+        with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
+            futures = [
+                pool.submit(
+                    compute_fn,
+                    (self.tokenizers[ti], 
+                    self.tokenizers[ti].token_pos[index-1], 
+                    length)
+                )
+                for (ti, index) in all_pos
+            ]
+            for future in tqdm(as_completed(futures), total=len(futures),
+                        desc="computing assignments"):
+                assignments.append(future.result())
+
         # _sphere_dict
         self._sphere_dict[k] = []
-        for p, m in enumerate(medoids):
-            i, i1 = all_occurs[m]         
+        for p, m in enumerate(medoid_inds):
+            i, i1 = active_occurs[m]
             t = self.tokenizers[i]
             struc = t.token_geo(i1, length)            
             logger.info(f"Partition {p}: {struc}")

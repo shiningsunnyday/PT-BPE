@@ -154,6 +154,7 @@ def parse_args():
     parser.add_argument("--pad", type=int, default=512, help="Max protein size")
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--vis", type=str2bool, default=False)
+    parser.add_argument("--num-vis", type=int, default=3, help="number of examples to visualize")
     # hparams
     parser.add_argument("--res-init", type=str2bool, default=False, help="base token type, residue vs bond (default bond)")
     parser.add_argument("--bin-strategy", help="how to bin values", default="histogram", choices=["histogram", "histogram-cover", "uniform"])
@@ -184,11 +185,13 @@ def parse_args():
     parser.add_argument("--cache", action='store_true', help="whether to use cached data")
     parser.add_argument("--save-every", type=int, default=10, help="how often to dump")
     parser.add_argument("--plot-every", type=int, default=50, help="how often to plot")
-    parser.add_argument("--num_ref", type=int, default=10, help="how many ref structures to eval error")
+    parser.add_argument("--num-ref", type=int, default=10, help="how many ref structures to eval error")
     args = parser.parse_args()
     # Post‐parse validation
     # if args.p_min_size == 0 and args.bins != {1: 1}:
     #     parser.error("--bins must be '1-1' when --p-min-size is 0")
+    if args.vis and args.num_vis > args.num_ref:
+        parser.error(f"num-ref={args.num_ref} must be >= num-vis={args.num_vis}")
     return args
 
 
@@ -300,39 +303,45 @@ def main():
         pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_init.pkl'), 'wb+'))
         ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
         np.save(ref_path, ref_coords)
-        xlim, ylim, zlim = None, None, None
-        visual_path = os.path.join(args.save_dir, f"backbone_0_iter=-1.png")
-        res = bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False, xlim=xlim, ylim=ylim, zlim=zlim)
-        xlim, ylim, zlim = tuple(res) # for later
+        xlims = [None for _ in range(args.num_vis)]
+        ylims = [None for _ in range(args.num_vis)]
+        zlims = [None for _ in range(args.num_vis)]
+        for ind in range(args.num_vis):
+            visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter=-1.png")
+            res = bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False, xlim=xlims[ind], ylim=ylims[ind], zlim=zlims[ind])
+            xlims[ind], ylims[ind], zlims[ind] = tuple(res) # for later
         # use this for sanity check
         bpe.initialize()
-        visual_path = os.path.join(args.save_dir, f"backbone_0_iter=init.png")
-        bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False, xlim=xlim, ylim=ylim, zlim=zlim)        
+        for ind in range(args.num_vis):
+            visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter=init.png")
+            bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False, xlim=xlims[ind], ylim=ylims[ind], zlim=zlims[ind])
         bpe.bin()    
         if args.debug: 
             bpe_debug = BPE(dataset.structures, bins=args.bins, save_dir=args.save_dir)
             bpe_debug.initialize()
             bpe_debug.old_bin()
-    vis_paths = []    
+    vis_paths = [[] for _ in range(args.num_vis)]    
     for t in range(_iter+1, 10000):
         ## visualization        
         if args.vis and t in list(range(0,10)) + list(range(10,100,10)) + list(range(100, 1000, 100)) + list(range(1000,10000,1000)):
             # Save current visualization.
-            visual_path = os.path.join(args.save_dir, f"backbone_0_iter={t}.png")
-            bpe.tokenizers[0].visualize(visual_path, vis_dihedral=False, xlim=xlim, ylim=ylim, zlim=zlim)
-            vis_paths.append(visual_path)            
-            # Define the output GIF path.
-            gif_path = os.path.join(args.save_dir, f"backbone_0_iter_up_to={t}.gif")            
-            # Read all PNG images and collect them as frames.
-            frames = [imageio.imread(png_file) for png_file in vis_paths]            
-            # Save the frames as a GIF with a 1 second delay per frame.
-            durations = [1] * len(frames)
-            try:
-                imageio.mimsave(gif_path, frames, format="GIF", duration=1, loop=0) 
-            except ValueError:
-                print(f"frames have different sizes")
-        bpe.step()        
-        bpe.tokenizers[0].bond_to_token.tree.visualize(os.path.join(args.save_dir, f'tokens_iter={t}.png'), horizontal_gap=0.5, font_size=6)
+            for ind in range(args.num_vis):
+                visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter={t}.png")
+                bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False, xlim=xlims[ind], ylim=ylims[ind], zlim=zlims[ind])
+                vis_paths[ind].append(visual_path)            
+                # Define the output GIF path.
+                gif_path = os.path.join(args.save_dir, f"backbone_{ind}_iter_up_to={t}.gif")            
+                # Read all PNG images and collect them as frames.
+                frames = [imageio.imread(png_file) for png_file in vis_paths[ind]]            
+                # Save the frames as a GIF with a 1 second delay per frame.
+                durations = [1] * len(frames)
+                try:
+                    imageio.mimsave(gif_path, frames, format="GIF", duration=1, loop=0) 
+                except ValueError:
+                    print(f"frames have different sizes")
+        bpe.step()
+        for ind in range(args.num_vis):
+            bpe.tokenizers[ind].bond_to_token.tree.visualize(os.path.join(args.save_dir, f'tokens_{ind}_iter={t}.png'), horizontal_gap=0.5, font_size=6)
         if t % args.save_every == 0:
             # save
             pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_iter={t}.pkl'), 'wb+'))

@@ -1,6 +1,7 @@
 from copy import deepcopy
 import numpy as np
 from typing import Optional 
+from tqdm import tqdm
 
 
 def kabsch(P, Q):
@@ -152,40 +153,31 @@ def k_medoids(
     max_iterations: int = 10,
     tol: float = 1e-4,
     *,
-    max_num_strucs: Optional[int] = None,
-    seed: Optional[int] = None,          
+    rng: Optional[int] = None,
 ):
     """
     Perform k-medoids clustering on a set of structures.
 
     ...
-    max_num_strucs : int, optional
-        If len(strucs) is larger than this value, run the algorithm only on a
-        random subset (size = max_num_strucs) and afterwards assign every
-        structure to the nearest medoid.
     seed : int or None, optional
         Random seed used for deterministic subsampling and medoid selection.
     """
     
     N = len(strucs)
-    k = min(k, N)
-    if max_num_strucs is not None and max_num_strucs < k:
-        raise ValueError("`max_num_strucs` must be >= k")
+    k = min(N, k)
+    if k > N:
+        raise ValueError(f"k={k} > N={N}")
 
-    rng = np.random.default_rng(seed)
-
-    # Decide which structures participate in the iterative part
-    if max_num_strucs is not None and N > max_num_strucs:
-        active_idx = rng.choice(N, size=max_num_strucs, replace=False)
-    else:
-        active_idx = np.arange(N)
+    active_idx = np.arange(N)
+    if rng is None:
+        rng = np.random.default_rng(None)
 
     # --- initialisation (unchanged except we draw from `active_idx`) -----------
     medoid_indices = rng.choice(active_idx, size=k, replace=False)
     medoids = [strucs[i] for i in medoid_indices]
 
     assignments = np.zeros(N, dtype=int)
-    for iteration in range(max_iterations):
+    for iteration in tqdm(range(max_iterations), desc="running k_medoids"):
         # -------- assignment step (only on the active subset) -----------------
         for i in active_idx:
             costs = [compute_rmsd(strucs[i], medoids[j]) for j in range(k)]
@@ -215,9 +207,4 @@ def k_medoids(
             print(f"Converged in {iteration + 1} iterations with total shift {total_shift:.6f}.")
             break
 
-    # -------- final assignment for *all* structures ---------------------------
-    for i, d in enumerate(strucs):
-        costs = [compute_rmsd(d, strucs[idx]) for idx in medoid_indices]
-        assignments[i] = np.argmin(costs)
-
-    return medoid_indices, assignments
+    return medoid_indices

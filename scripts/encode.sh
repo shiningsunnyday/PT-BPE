@@ -37,11 +37,12 @@ save_every=$6
 plot_every=$7
 p_size=$8
 num_p=$9
-glue_opt=${10}
-glue_opt_method=${11}
+max_num_strucs=${10}
+glue_opt=${11}
+glue_opt_method=${12}
 
-if [ -n "${12}" ]; then
-  extra="--save-dir ${12}"
+if [ -n "${13}" ]; then
+  extra="--save-dir ${13}"
 else
   extra="--auto"
 fi
@@ -62,6 +63,7 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --toy $toy \
   --p-min-size $p_size \
   --num-p $num_p \
+  --max-num-strucs $max_num_strucs \
   --glue-opt $glue_opt \
   --glue-opt-method $glue_opt_method \
   $extra

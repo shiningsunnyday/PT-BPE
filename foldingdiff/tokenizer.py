@@ -1,7 +1,7 @@
 import numpy as np
 from foldingdiff.angles_and_coords import *
 from foldingdiff.data_structures import *
-from foldingdiff.algo import compute_rmsd
+from foldingdiff.algo import compute_rmsd, kabsch
 from foldingdiff.nerf import *
 from foldingdiff.plotting import plot_backbone
 from types import SimpleNamespace
@@ -206,7 +206,11 @@ class Tokenizer:
         plot_backbone(coords, output_path, bts, title=f"{Path(self.fname).stem} bonds {i1}-{i1+length-1}", zoom_factor=1.0, **kwargs)
     
     def visualize(self, output_path, **kwargs):
-        coords = self.compute_coords()
+        coords = self.compute_coords() # (3*N)
+        if "ref_coords" in kwargs:
+            ref_coords = kwargs.pop("ref_coords") # (3*N, 3)
+            # before, align with kabsch
+            coords, _, _ = kabsch(ref_coords, coords)
         if self.bond_to_token:
             tokens = [self.bond_to_token[i] for i in sorted(self.bond_to_token)]
         else:
