@@ -165,8 +165,10 @@ def k_medoids(
     
     N = len(strucs)
     k = min(N, k)
-    if k > N:
-        raise ValueError(f"k={k} > N={N}")
+
+    if k == N:
+        print(f"k-medoids: k=N={k}, every struc is a medoid")
+        return list(range(N))
 
     active_idx = np.arange(N)
     if rng is None:

@@ -148,23 +148,23 @@ class BPE():
                 # run k-medoids                
                 medoid_inds = k_medoids(active_coords, self.num_partitions[size], rng=self.rng)                
                 # -------- final assignment for *all* structures ---------------------------                
-                compute_fn = partial(                                               # NEW
-                    BPE._compute_assignment,
-                    active_coords=active_coords,
-                    medoid_inds=medoid_inds
-                )
-                assignments = []
-                with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
-                    futures = [
+                
+                assignments = [None for _ in range(N)]
+                with ProcessPoolExecutor(
+                    max_workers=os.cpu_count(),
+                    initializer=BPE._init_assignment_worker,
+                    initargs=(active_coords, medoid_inds)
+                ) as pool:
+                    futures = {
                         pool.submit(
-                            compute_fn,
+                            BPE._compute_assignment_wrapper,
                             (self.tokenizers[ti], start, length)
-                        )
-                        for (ti, start, length) in res_geo[size]
-                    ]
+                        ): idx
+                        for idx, (ti, start, length) in enumerate(res_geo[size])
+                    }
                     for future in tqdm(as_completed(futures), total=len(futures),
                                 desc="computing assignments"):
-                        assignments.append(future.result())
+                        assignments[futures[future]] = future.result()
 
                 # vis the res medoids     
                 if size == 3:
@@ -496,6 +496,18 @@ class BPE():
         coords = t.compute_coords(start, length)
         costs = [compute_rmsd(coords, active_coords[idx]) for idx in medoid_inds]
         return np.argmin(costs)
+
+    @staticmethod
+    def _compute_assignment_wrapper(args):
+        return BPE._compute_assignment(args,
+                                    active_coords=ACTIVE_COORDS,
+                                    medoid_inds=MEDOID_INDS)
+    
+    @staticmethod
+    def _init_assignment_worker(ac, mi):
+        global ACTIVE_COORDS, MEDOID_INDS
+        ACTIVE_COORDS  = ac
+        MEDOID_INDS    = mi    
 
     @staticmethod
     def _opt_glue_worker(t, n, opt_kwargs):
@@ -1179,20 +1191,24 @@ class BPE():
         # run k-medoids
         medoid_inds = k_medoids(active_coords, self.num_partitions[length], rng=self.rng)
         medoids = [active_inds[m] for m in medoid_inds]
-        assignments = []
-        with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
-            futures = [
+        assignments = [None for _ in range(N)]
+        with ProcessPoolExecutor(
+            max_workers=os.cpu_count(),
+            initializer=BPE._init_assignment_worker,
+            initargs=(active_coords, medoid_inds)
+        ) as pool:
+            futures = {
                 pool.submit(
-                    compute_fn,
+                    BPE._compute_assignment_wrapper,
                     (self.tokenizers[ti], 
                     self.tokenizers[ti].token_pos[index-1], 
                     length)
-                )
-                for (ti, index) in all_pos
-            ]
+                ): idx
+                for idx, (ti, index) in enumerate(all_pos)
+            }
             for future in tqdm(as_completed(futures), total=len(futures),
                         desc="computing assignments"):
-                assignments.append(future.result())
+                assignments[futures[future]] = future.result()
 
         # _sphere_dict
         self._sphere_dict[k] = []
