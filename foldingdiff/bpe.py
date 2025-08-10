@@ -9,9 +9,21 @@ from functools import partial
 from sortedcontainers import SortedDict
 from torch.optim import LBFGS
 from torch.multiprocessing import get_context
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 logger = logging.getLogger(__name__)
 
+def _effective_cpus() -> int:
+    """Return the number of CPUs *actually* available to this task."""
+    if "SLURM_CPUS_PER_TASK" in os.environ:        
+        n = int(os.environ["SLURM_CPUS_PER_TASK"])
+        print(f"SLURM_CPUS_PER_TASK={n}")
+        return n
+    try:                                   # Linux cpuset / cgroups
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+        
 class BPE():
     def __init__(self, structures, bins, 
         bin_strategy="histogram",
@@ -86,11 +98,26 @@ class BPE():
         self._tokens = {}
         label_dict = {}
         res_geo = defaultdict(list)   
+        binned_bonds = [self._bin_val({Tokenizer.BOND_TYPES[i]: [0]} ) for i in range(3)]
 
-        for ti, t in enumerate(self.tokenizers):
-            # update avg bond lengths
-            for i in range(3*t.n-1):
-                t.set_token_geo(i, 1, self._bin_val({Tokenizer.BOND_TYPES[i%3]: [0]} ))
+        max_workers = _effective_cpus()
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            initializer=BPE._init_set_bond_length_worker,
+            initargs=(binned_bonds,)
+        ) as pool:
+            futures = [
+                pool.submit(
+                    BPE._set_bond_length_worker, t
+                )
+                for t in self.tokenizers
+            ]
+
+        for _ in tqdm(as_completed(futures), total=len(futures),
+                    desc="standardizing bond lengths"):
+            pass
+
+        for ti, t in tqdm(enumerate(self.tokenizers), desc="iterating over residue geos"):
             # update binned residue geo
             labels = []
             for i in range(t.n): # for each residue
@@ -126,6 +153,9 @@ class BPE():
             self._sphere_dict = {} # for rmsd sphere packing
             self._tokens = {}
             for n, size in enumerate(res_geo):
+                for t in self.tokenizers:
+                    # need to re-init this later
+                    t.bond_to_token_copy = dict(t.bond_to_token)
                 # run k-medoids
                 # compute all the residue medoids
                 # decide how many participate    
@@ -139,8 +169,6 @@ class BPE():
                 for i in tqdm(active_inds, desc=f"gathering {len(active_inds)} occurrences"):
                     ti, start, length = res_geo[size][i]
                     t = self.tokenizers[ti]
-                    # need to re-init this later
-                    t.bond_to_token_copy = dict(t.bond_to_token)
                     coords = t.compute_coords(start, length)
                     active_coords.append(coords)
                     active_occurs.append((ti, start, length))
@@ -150,8 +178,9 @@ class BPE():
                 # -------- final assignment for *all* structures ---------------------------                
                 
                 assignments = [None for _ in range(N)]
+                max_workers = _effective_cpus()
                 with ProcessPoolExecutor(
-                    max_workers=os.cpu_count(),
+                    max_workers=max_workers,
                     initializer=BPE._init_assignment_worker,
                     initargs=(active_coords, medoid_inds)
                 ) as pool:
@@ -164,7 +193,8 @@ class BPE():
                     }
                     for future in tqdm(as_completed(futures), total=len(futures),
                                 desc="computing assignments"):
-                        assignments[futures[future]] = future.result()
+                        idx = futures.pop(future)
+                        assignments[idx] = future.result()
 
                 # vis the res medoids     
                 if size == 3:
@@ -507,7 +537,19 @@ class BPE():
     def _init_assignment_worker(ac, mi):
         global ACTIVE_COORDS, MEDOID_INDS
         ACTIVE_COORDS  = ac
-        MEDOID_INDS    = mi    
+        MEDOID_INDS    = mi
+    
+    @staticmethod
+    def _init_set_bond_length_worker(bb):
+        global BINNED_BONDS
+        BINNED_BONDS = bb
+    
+    @staticmethod
+    def _set_bond_length_worker(t):
+        # update avg bond lengths
+        for i in range(3*t.n-1):
+            t.set_token_geo(i, 1, BINNED_BONDS[i%3])        
+
 
     @staticmethod
     def _opt_glue_worker(t, n, opt_kwargs):
@@ -1192,8 +1234,10 @@ class BPE():
         medoid_inds = k_medoids(active_coords, self.num_partitions[length], rng=self.rng)
         medoids = [active_inds[m] for m in medoid_inds]
         assignments = [None for _ in range(N)]
+        max_workers = _effective_cpus()
         with ProcessPoolExecutor(
-            max_workers=os.cpu_count(),
+            mp_context=ctx,
+            max_workers=max_workers,
             initializer=BPE._init_assignment_worker,
             initargs=(active_coords, medoid_inds)
         ) as pool:
@@ -1208,7 +1252,8 @@ class BPE():
             }
             for future in tqdm(as_completed(futures), total=len(futures),
                         desc="computing assignments"):
-                assignments[futures[future]] = future.result()
+                idx = futures.pop(future)
+                assignments[idx] = future.result()
 
         # _sphere_dict
         self._sphere_dict[k] = []
