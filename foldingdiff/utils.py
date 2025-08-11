@@ -62,8 +62,9 @@ def validate_args_match(current: Union[Namespace, Dict[str, Any]], loaded: Union
         if not has_item(current, name):
             raise AssertionError(f"Current args has no field '{name}'")
 
+        # directory/files
         cur_val = get_item(current, name)
-        # normalize directories to absolute paths
+        # normalize directories to absolute paths        
         if name.endswith("_dir") or name.endswith("_path"):
             loaded_val = os.path.abspath(loaded_val)
             cur_val    = os.path.abspath(cur_val)

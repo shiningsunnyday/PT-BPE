@@ -1,5 +1,6 @@
 from foldingdiff.potential_model import *
-from foldingdiff.modelling import *
+# from foldingdiff.modelling import *
+# from foldingdiff.old_potential_model import *
 from foldingdiff.tokenizer import Tokenizer
 from foldingdiff.plotting import plot_feature_importance
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
@@ -24,6 +25,7 @@ import os
 import logging
 import inspect
 import pickle
+import json
 from pathlib import Path
 
 # Configure logging (you can customize format and level here)
@@ -39,30 +41,37 @@ def get_default_args(func):
     }
 
 def parse_args():    
+    default_max_seg_len = 10000000000
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
+    # general params
+    parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--visualize", action='store_true')  
+    parser.add_argument("--auto", action='store_true', help='auto set folders')    
+    parser.add_argument("--save-dir")  
+    # data params
     parser.add_argument("--data-dir", type=str, default="cath", choices=[
          'cath', 'homo', 'ec', "bindint", "bindbio", "repeat", "catint", "catbio", "conserved", "test"
          ], help="Which dataset.")    
     parser.add_argument("--toy", type=int, default=10, 
                             help="Number of PDB files.")
     parser.add_argument("--pad", type=int, default=512, help="Max protein size")
-    parser.add_argument("--debug", action='store_true')    
-    parser.add_argument("--visualize", action='store_true')    
-    parser.add_argument("--epochs", type=int, default=10)
+    # training params
+    parser.add_argument("--epochs", type=int, default=10)    
     parser.add_argument("--cuda", default="cpu")
-    # run artifacts
-    parser.add_argument("--auto", action='store_true', help='auto set folders')
+    # feat preprocessing params
     parser.add_argument("--config", help='file to config compute_feats')
-    parser.add_argument("--batch_size", help='batch size for feat computation checkpointing', type=int, default=100)
-    parser.add_argument("--save-dir")
+    parser.add_argument("--batch_size", help='batch size for feat computation checkpointing', type=int, default=100)    
     # model params
     parser.add_argument("--model", default="bert", choices=["bert", "transformer", "feats"])
-    # hparams
     parser.add_argument("--mode", help="potential function mode, unary: 1D semi-CRF, binary: 2D, recursive: decomposition", choices=["unary", "binary", "recursive"])
+    # hparams
     parser.add_argument("--gamma", type=float, default=0.)
     parser.add_argument("--l1", type=float, default=0.01)
-    parser.add_argument("--max-seg-len", type=int, default=10000000000, help="Max length of segment")
-    return parser.parse_args()
+    parser.add_argument("--max-seg-len", type=int, default=default_max_seg_len, help="Max length of segment")
+    args = parser.parse_args()
+    if args.mode == "unary" and args.max_seg_len != default_max_seg_len:
+        parser.error(f"--max-seg-len should not be passed for unary mode")
+    return args
 
 
 def semi_crf_dp_and_map(out, N, gamma):
@@ -425,7 +434,7 @@ def obtain_span(t, a, b, bert=False):
         return np.array(span)
 
 
-def get_model(args, device, max_len):
+def get_model(args, device, max_len, config=None):
     if args.model == "transformer":
         encoder = AngleTransformer(d_model=32, nhead=4, num_layers=2, max_len=max_len)
     elif args.model == "bert":
@@ -456,30 +465,18 @@ def get_model(args, device, max_len):
         )        
     else:
         encoder = None
-    # === residue‑feat extractor and segment potential ===
-    res_feat = BackboneResidueFeaturizer()
-    agg      = SegmentFeatureAggregator(res_feat.out_dim, res_feat.labels)
-    agg_pair = SegmentPairFeatureAggregator(10, foldseek_feat_labels)
-    seg_mlp  = SegmentPotentialMLP(agg.out_dim, hidden=64)
-    seg_pair_mlp = SegmentPairPotentialMLP(agg_pair.out_dim, hidden=64)
     # Wrap everything in a single object (lightweight example)
     if args.mode == "unary":
         model = SemiCRFModel(
+            config=config,
             encoder=encoder,
-            res_featurizer=res_feat,
-            seg_aggregator=agg,
-            seg_potential=seg_mlp,
             length_bias=args.gamma,          # γ from your DP
             max_seg_len=args.max_seg_len,
             device=device
         )
     else:
         model = SemiCRF2DModel(
-            res_featurizer=res_feat,
-            seg_aggregator=agg,
-            seg_pair_aggregator=agg_pair,
-            seg_potential=seg_mlp,
-            seg_pair_potential=seg_pair_mlp,
+            config=config,
             length_bias=args.gamma,          # γ from your DP
             max_seg_len=args.max_seg_len,
             device=device
@@ -488,8 +485,9 @@ def get_model(args, device, max_len):
 
 
 class FeatDataset(Dataset):
-    def __init__(self, tokenizers, save_dir):
+    def __init__(self, tokenizers, config, save_dir):
         self.tokenizers = tokenizers
+        self.config = config
         self.save_dir = save_dir
         for t in self.tokenizers:
             prot_id = Path(t.fname).stem
@@ -510,6 +508,9 @@ class FeatDataset(Dataset):
             # this will go straight to stderr and flush immediately
             print(f"Failed to unpickle {path}: {e}", file=sys.stderr, flush=True)
             raise
+        for feat_type in feats:
+            if feat_type not in self.config or not self.config[feat_type]["enabled"]:
+                feats.pop(feat_type)
         return idx, t, feats
 
 
@@ -550,6 +551,7 @@ def main(args) -> None:
         plot_dir = f'./plots/learn/{name}'
         os.makedirs(plot_dir, exist_ok=True)        
         setattr(args, 'plot_dir', plot_dir)
+        resume = True
     elif args.auto:
         cur_time = time.time()
         setattr(args, 'plot_dir', f'./plots/learn/{cur_time}')
@@ -558,21 +560,24 @@ def main(args) -> None:
         os.makedirs(args.save_dir, exist_ok=True)        
         logging.info(f"plots : {args.plot_dir}")
         logging.info(f"ckpts : {args.save_dir}")        
+        resume = False
     else:
         raise NotImplementedError
     
-    args_path = os.path.join(args.save_dir, 'args.json')
-    if os.path.exists(args_path):
+    args_path = os.path.join(args.save_dir, 'args.json')    
+    if resume:
+        assert os.path.exists(args_path)
         print(f"loading args from {args_path}")
         loaded_args = json.load(open(args_path))
         if not args.debug:
             validate_args_match(
                 current   = args,
                 loaded    = loaded_args,
-                skip      = ["auto"],   # fields you don’t need to compare
+                skip      = ["debug", "visualize", "auto", "config", \
+                "epochs", "gamma", "l1", "max-seg-len"],   # fields you don’t need to compare
             )
     else:        
-        json.dump(args.__dict__, open(args_path, 'w+'))
+        json.dump(args.__dict__, open(args_path, 'w+'))        
     logging.info(f"CUDA available : {torch.cuda.is_available()}")    
 
     # ---------------- load data --------------------------------------
@@ -586,7 +591,7 @@ def main(args) -> None:
     # maximum token length for Transformer positional encodings
     max_len = max([3 * (3 * t.n - 1) - 2 for t in dataset])
 
-    # ---------------- build model ------------------------------------
+    # ---------------- build device ------------------------------------
     # --- 1) Detect distributed or not ---
     is_ddp = False
     if "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1:
@@ -599,8 +604,26 @@ def main(args) -> None:
         # single‐GPU (or CPU) fallback
         device = torch.device(args.cuda if torch.cuda.is_available() else "cpu")     
 
-    logging.info(f"Using device   : {device}")        
-    model = get_model(args, device, max_len=max_len)           # returns SemiCRFModel
+    # ---------------- build model ------------------------------------
+    logging.info(f"Using device   : {device}")       
+    if args.model == "feats":        
+        if args.config:
+            config = json.load(open(args.config))
+            config_args_path = os.path.join(args.save_dir, 'config.json')
+            if resume:   
+                assert os.path.exists(config_args_path)             
+                loaded_config = json.load(open(config_args_path))
+                try:
+                    validate_args_match(config, loaded_config)
+                except AssertionError as e:
+                    logging.error(e)
+            else:
+                json.dump(config, open(config_args_path, 'w+'))        
+            model = get_model(args, device, max_len=max_len, config=config)           # returns SemiCRFModel
+        else:
+            model = get_model(args, device, max_len=max_len)
+    else:
+        model = get_model(args, device, max_len=max_len)
     if is_ddp:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     logging.info(f"Model allocated on {next(model.parameters()).device}")
@@ -610,15 +633,13 @@ def main(args) -> None:
 
     # ---------------- precompute if needed ------------------------------------
     if args.model == "feats":
-        if args.config:
-            config = json.load(open(args.config))
         # compute feats in batches            
         if is_ddp:
             obj = model.module
         else:
             obj = model
         obj.compute_batch_feats(dataset, config, save_dir=args.save_dir, batch_size=args.batch_size)        
-        dataset = FeatDataset(dataset, args.save_dir)
+        dataset = FeatDataset(dataset, config, args.save_dir)
         # dataset = DataLoader(dataset, collate_fn=collate_fn, batch_size=1, num_workers=4, prefetch_factor=1, persistent_workers=True, pin_memory=True)
         if is_ddp:
             sampler = DistributedSampler(dataset)
@@ -631,9 +652,9 @@ def main(args) -> None:
             batch_size=1,
             shuffle=shuffle,
             sampler=sampler,
-            num_workers=4,
-            prefetch_factor=2, 
-            persistent_workers=True,
+            num_workers=0 if args.debug else 4,
+            prefetch_factor=None if args.debug else 2,
+            persistent_workers=False if args.debug else True,
             pin_memory=True,
             collate_fn=collate_fn,
         )
@@ -824,6 +845,4 @@ def main(args) -> None:
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.debug:
-        breakpoint()
     main(args)        

@@ -1,364 +1,22 @@
 import os
 import tempfile
 import subprocess
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from typing import List, Optional, Tuple, Dict
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import math
-import numpy as np
 from collections import defaultdict
 from functools import partial
 from tqdm import tqdm
 from pathlib import Path
-from pyzernike import ZernikeDescriptor
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
 from biotite.structure.io.pdb import PDBFile
 from Bio.PDB import PDBParser, DSSP
 import pickle
-from foldingdiff.foldseek import *
-
-HYDROPATHY = {
-    # Kyte–Doolittle index
-    "A": 1.8, "C": 2.5, "D":-3.5, "E":-3.5, "F": 2.8, "G":-0.4,
-    "H":-3.2, "I": 4.5, "K":-3.9, "L": 3.8, "M": 1.9, "N":-3.5,
-    "P":-1.6, "Q":-3.5, "R":-4.5, "S":-0.8, "T":-0.7, "V": 4.2,
-    "W":-0.9, "Y":-1.3, "X": 0.0, "-": 0.0,
-}
-
-def voxelize(coords, grid_size=64, padding=2.0):
-    """
-    Convert 3D points into a binary occupancy grid.
-    - coords: (n_points,3) numpy array
-    - grid_size: number of voxels per axis
-    - padding: extra Ångstroms around the min/max before voxelizing
-    """
-    # Compute bounding box
-    mins = coords.min(axis=0) - padding
-    maxs = coords.max(axis=0) + padding
-    # Voxel spacing
-    spacing = (maxs - mins) / (grid_size - 1)
-    # Initialize grid
-    grid = np.zeros((grid_size, grid_size, grid_size), dtype=np.float32)
-    # Map each atom into voxel coords
-    ijk = ((coords - mins) / spacing).astype(int)
-    # Clip to valid range
-    ijk = np.clip(ijk, 0, grid_size - 1)
-    # Set occupancy
-    for (i, j, k) in ijk:
-        grid[i, j, k] = 1.0
-    return grid
-
-
-def compute_3d_zernike(grid, order=8):
-    """
-    Compute the 3D Zernike descriptor up to a given order.
-    """
-    # Fit descriptor
-    zd = ZernikeDescriptor.fit(data=grid, order=order)
-    # Extract the invariant coefficients
-    coeffs = zd.get_coefficients()
-    return coeffs
-
-    
-
-class BackboneResidueFeaturizer(nn.Module):
-    """
-    Produce a tensor of shape (seq_len, feat_dim) for a single protein chain.
-    """
-    def __init__(self):
-        super().__init__()
-        self.aa_to_idx = {aa:i for i,aa in enumerate("ACDEFGHIKLMNPQRSTVWY")}
-        self.out_dim = 20 + 1 + 1 + 3 + 1 + 10         # AA one‑hot + hydropathy + disorder + 3‑state SS + pLDDT + embedding
-        self.labels = [f"aa_one_hot_{i}" for i in range(20)] + \
-                      ["hydropathy", "disorder"] + \
-                      [f"ss_{i}" for i in range(3)] + \
-                      ["plddt"] + \
-                      [f"embedding_{i}" for i in range(10)]
-        # self.one_hot_projector = nn.Linear(20, 20)
-        # self.hydropathy_projector = nn.Linear(1, 10)
-        self.embedding_projector = nn.Linear(2560, 10)
-
-    def forward(self, aa_seq:str,
-                      ss_pred:str=None,          # secondary structure 'H/E/C' string from e.g. PSIPRED
-                      disorder:np.ndarray=None,  # per‑res residue disorder score [0,1]
-                      plddt:np.ndarray=None,
-                      embedding:np.ndarray=None):    # AlphaFold confidence
-
-        L = len(aa_seq)
-        device = next(self.parameters()).device
-        one_hot = torch.zeros(L, 20).to(device)
-        hydro   = torch.zeros(L, 1).to(device)
-        for i, aa in enumerate(aa_seq):
-            if aa in self.aa_to_idx:
-                one_hot[i, self.aa_to_idx[aa]] = 1.0
-            hydro[i,0] = HYDROPATHY.get(aa, 0.0)
-
-        # Disorder (fallback 0.0)
-        if disorder is None: disorder = np.zeros(L)
-        disorder = torch.from_numpy(disorder).float().unsqueeze(-1)
-        disorder = disorder.to(device)
-
-        # Secondary structure to one‑hot
-        if ss_pred is None: ss_pred = "C"*L
-        ss_map = {"H":0, "E":1, "C":2}
-        ss_onehot = torch.zeros(L, 3).to(device)
-        for i, s in enumerate(ss_pred):
-            ss_onehot[i, ss_map.get(s,"C")] = 1.0
-        
-        if plddt is None: plddt = np.zeros(L)
-        plddt = torch.from_numpy(plddt).float().unsqueeze(-1) / 100.0  # scale 0…1
-        plddt = plddt.to(device)
-        if embedding is None: embedding = np.zeros(L, 2560)
-        embedding = torch.from_numpy(embedding).float().to(device)
-        embedding = self.embedding_projector(embedding)
-        return torch.cat([one_hot, hydro, disorder, ss_onehot, plddt, embedding], dim=-1)
-
-
-class SegmentFeatureAggregator(nn.Module):
-    """
-    Turn a span X[i:j] (tensor (len, feat_dim)) into a fixed vector.
-    We concatenate:
-      – mean of each feature over the span
-      – variance
-      – length (normalised)
-      – log‑length
-    """
-    def __init__(self, per_res_dim:int, per_res_labels: List[str]):
-        super().__init__()
-        self.per_res_dim = per_res_dim
-        self.per_res_labels = [f"{feat}_{suffix}" for feat in per_res_labels \
-            for suffix in ["mean", "std"]] + ["length", "log_length"]
-        self.out_dim = 2*per_res_dim + 2  # mean + var + len + log(len)
-
-    def forward(self, span:torch.Tensor):
-        # span: (L, per_res_dim)
-        mean = span.mean(dim=0)
-        var  = span.var(dim=0, unbiased=False)
-        L = span.size(0)
-        length = torch.tensor([L], dtype=span.dtype, device=span.device)
-        log_length = torch.log(length.float()+1e-6)
-        out = torch.cat([mean, var, length/500.0, log_length/6.0], dim=0)
-        assert out.shape[-1] == self.out_dim
-        return out
-
-
-class SegmentPairFeatureAggregator(nn.Module):
-    """
-    Turn a span X[i:j] (tensor (len, feat_dim)) into a fixed vector.
-    We concatenate:
-      – mean of each feature over the span
-      – variance
-      – length (normalised)
-      – log‑length
-    """
-    def __init__(self, per_res_dim:int, per_res_labels: List[str]):
-        super().__init__()
-        self.per_res_dim = per_res_dim
-        self.per_res_labels = [f"{feat}_{suffix}" for feat in per_res_labels \
-            for suffix in ["mean", "std"]] + ["length", "log_length"]
-        self.out_dim = 2*per_res_dim + 2  # mean + var + len + log(len)
-
-    def forward(self, span:torch.Tensor):
-        # span: (L, per_res_dim)
-        mean = span.mean(dim=0)
-        var  = span.var(dim=0, unbiased=False)
-        L = span.size(0)
-        length = torch.tensor([L], dtype=span.dtype, device=span.device)
-        log_length = torch.log(length.float()+1e-6)
-        out = torch.cat([mean, var, length/500.0, log_length/6.0], dim=0)
-        assert out.shape[-1] == self.out_dim
-        return out
-
-
-class SegmentPotentialMLP(nn.Module):
-    """
-    Attention-based potential:
-      - learns a per-feature attention over the agg_vec
-      - computes a context vector and maps it to a scalar potential
-      - returns both the potential and the attention weights
-    """
-    def __init__(self, agg_dim:int, attn_dim:int=32, hidden:int=64):
-        super().__init__()
-        # project each feature scalar → hidden
-        self.feature_proj = nn.Linear(1, attn_dim, bias=False)
-        # a learned query vector for scoring
-        self.query = nn.Parameter(torch.randn(attn_dim))
-        # final MLP on the weighted summary
-        self.mlp = nn.Sequential(
-            nn.Linear(attn_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, 1)
-        )
-    
-    def forward(self, agg_vec: torch.Tensor):
-        """
-        Args:
-          agg_vec: (batch, D)  the D semantic features for each segment
-        Returns:
-          phi    : (batch,)    the scalar log-potential
-          weights: (batch, D)  the attention weight on each feature
-        """
-        B, D = agg_vec.shape
-        # 1) Make it (batch, D, 1) so we can project each feature separately
-        x = agg_vec.unsqueeze(-1)              # (B, D, 1)
-        
-        # 2) Project each feature into attn_dim
-        K = self.feature_proj(x)               # (B, D, attn_dim)
-        # 3) Score each feature against the query vector
-        #    Dot-product: (B, D, attn_dim) · (attn_dim,) → (B, D)
-        scores = K @ self.query                # (B, D)
-        
-        # 4) Normalize into attention weights
-        weights = torch.softmax(scores, dim=-1) # (B, D)
-        
-        # 5) Compute context vector: weighted sum of the projected features
-        #    (B, D, attn_dim) * (B, D, 1) → sum dim=1 → (B, attn_dim)
-        ctx = (K * weights.unsqueeze(-1)).sum(dim=1)  # (B, attn_dim)
-        
-        # 6) Map to scalar potential
-        phi = self.mlp(ctx).squeeze(-1)        # (B,)
-        
-        return phi, weights
-
-
-
-class SegmentPairPotentialMLP(nn.Module):
-    """
-    Attention-based potential:
-      - learns a per-feature attention over the agg_vec
-      - computes a context vector and maps it to a scalar potential
-      - returns both the potential and the attention weights
-    """
-    def __init__(self, agg_dim:int, attn_dim:int=32, hidden:int=64):
-        super().__init__()
-        # project each feature scalar → hidden
-        self.feature_proj = nn.Linear(1, attn_dim, bias=False)
-        # a learned query vector for scoring
-        self.query = nn.Parameter(torch.randn(attn_dim))
-        # final MLP on the weighted summary
-        self.mlp = nn.Sequential(
-            nn.Linear(attn_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, 1)
-        )
-    
-    def forward(self, agg_vec: torch.Tensor):
-        """
-        Args:
-          agg_vec: (batch, D)  the D semantic features for each segment
-        Returns:
-          phi    : (batch,)    the scalar log-potential
-          weights: (batch, D)  the attention weight on each feature
-        """
-        B, D = agg_vec.shape
-        # 1) Make it (batch, D, 1) so we can project each feature separately
-        x = agg_vec.unsqueeze(-1)              # (B, D, 1)
-        
-        # 2) Project each feature into attn_dim
-        K = self.feature_proj(x)               # (B, D, attn_dim)
-        # 3) Score each feature against the query vector
-        #    Dot-product: (B, D, attn_dim) · (attn_dim,) → (B, D)
-        scores = K @ self.query                # (B, D)
-        
-        # 4) Normalize into attention weights
-        weights = torch.softmax(scores, dim=-1) # (B, D)
-        
-        # 5) Compute context vector: weighted sum of the projected features
-        #    (B, D, attn_dim) * (B, D, 1) → sum dim=1 → (B, attn_dim)
-        ctx = (K * weights.unsqueeze(-1)).sum(dim=1)  # (B, attn_dim)
-        
-        # 6) Map to scalar potential
-        phi = self.mlp(ctx).squeeze(-1)        # (B,)
-        
-        return phi, weights
-
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
-        """
-        Positional encoding module.
-        """
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        
-        # Create constant 'pe' matrix with values dependent on
-        # position and i (dimension).
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        # Div term: exponential decay factors
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)  # even indices
-        pe[:, 1::2] = torch.cos(position * div_term)  # odd indices
-        pe = pe.unsqueeze(0)  # shape: (1, max_len, d_model)
-        self.register_buffer('pe', pe)
-        
-    def forward(self, x):
-        # x shape: (batch, seq_len, d_model)
-        x = x + self.pe[:, :x.size(1)]
-        return self.dropout(x)
-
-
-class LongSequenceGRU(nn.Module):
-    def __init__(self, input_size=1, hidden_size=128, num_layers=1, bidirectional=False):
-        """
-        A lightweight GRU-based model to encode a sequence of dihedral angles,
-        now returning a per-timestep output after applying a fully connected layer.
-        """
-        super(LongSequenceGRU, self).__init__()
-        self.gru = nn.GRU(input_size=input_size,
-                          hidden_size=hidden_size,
-                          num_layers=num_layers,
-                          batch_first=True,
-                          bidirectional=bidirectional)
-        
-        self.embedding_size = hidden_size * (2 if bidirectional else 1)
-        
-        # Dense layer that will be applied to each timestep's hidden state.
-        self.fc = nn.Linear(self.embedding_size, 1)
-
-    def forward(self, x, lengths):
-        """
-        Forward pass.
-        
-        Parameters:
-          x (torch.Tensor): Padded tensor of shape (batch, max_seq_len, input_size).
-          lengths (list or torch.Tensor): The true lengths of each sequence in the batch.
-        
-        Returns:
-          out_all_steps (torch.Tensor): shape (batch, max_seq_len, 1), 
-                                        containing an output scalar for each time step.
-          hidden (torch.Tensor): The final hidden state(s) of shape 
-                                 (num_layers * num_directions, batch, hidden_size).
-        """
-        # Pack the padded sequence for efficient processing.
-        packed_x = nn.utils.rnn.pack_padded_sequence(
-            x, lengths, batch_first=True, enforce_sorted=False
-        )
-        
-        # Run the GRU
-        packed_out, hidden = self.gru(packed_x)  
-        # packed_out is a PackedSequence of shape (sum(all seq lengths), hidden_size * num_directions)
-        
-        # Convert back to a padded sequence so we have (batch, max_seq_len, hidden_dim)
-        # hidden_dim = hidden_size * num_directions
-        padded_out, _ = nn.utils.rnn.pad_packed_sequence(
-            packed_out, batch_first=True
-        )
-        # padded_out: (batch, max_seq_len, embedding_size)
-        
-        # Apply fully connected layer to each timestep. This yields (batch, max_seq_len, 1).
-        out_all_steps = self.fc(padded_out)
-        
-        # out_all_steps is (batch, max_seq_len, 1)
-        return out_all_steps, hidden
-
+from foldingdiff.feats import *
 
 # ---------------------------------------------------------------------
-# 2.  Semi‑CRF wrapper
+# Semi‑CRF wrapper
 # ---------------------------------------------------------------------
 
 class SemiCRFModel(nn.Module):
@@ -371,20 +29,19 @@ class SemiCRFModel(nn.Module):
     The `forward()` returns the *segment score table* out[i][l].
     """
     def __init__(
-        self,        
-        res_featurizer: BackboneResidueFeaturizer,
-        seg_aggregator: SegmentFeatureAggregator,
-        seg_potential: SegmentPotentialMLP,
+        self,
+        config,
         encoder: Optional[nn.Module] = None,
         length_bias: float = 0.0,
         max_seg_len: int = 100,
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = "cpu"
     ):
         super().__init__()
+        self.config          = config
         self.encoder         = encoder
-        self.featurizer      = res_featurizer
-        self.aggregator      = seg_aggregator
-        self.seg_mlp         = seg_potential
+        self.featurizer      = BackboneResidueFeaturizer(config, device=device)
+        self.aggregator      = SegmentFeatureAggregator(self.featurizer.out_dim, self.featurizer.labels)
+        self.seg_mlp         = SegmentPotentialMLP(self.aggregator.out_dim, hidden=64)
         self.gamma           = length_bias
         self.max_seg_len     = max_seg_len
         self.device          = device or torch.device("cpu")
@@ -622,13 +279,14 @@ class SemiCRFModel(nn.Module):
     def compute_feats(self, dataset, config):
         tasks = {
             "disorder":   lambda: self.compute_disorder(dataset, **config["disorder"]),
-            "embeddings": lambda: self.compute_embeddings(dataset, **config["embeddings"]),            
+            "embeddings": lambda: self.compute_embeddings(dataset, **config["embeddings"]),
             "sec":        lambda: self.compute_sec(dataset, **config["sec"]),
             "plddt":      lambda: self.compute_plddt(dataset, **config["plddt"]),
             "fps":        lambda: self.compute_fps(dataset, **config["fps"]),
         }
         for task in tasks:
-            tasks[task]()
+            if config[task]["enabled"]:
+                tasks[task]()
         
         # spin up one “worker” per compute_*, all running concurrently
         # with ThreadPoolExecutor(max_workers=len(tasks)) as exec:
@@ -703,7 +361,8 @@ class SemiCRFModel(nn.Module):
                     grid_size=64,
                     padding=2.0,
                     order=8,
-                    max_workers=20):
+                    max_workers=20,
+                    enabled=True):
         """
         Parallelize at the protein level.  Uses one process per protein
         and shows a tqdm bar as each finishes.
@@ -723,16 +382,19 @@ class SemiCRFModel(nn.Module):
                                 total=len(futures),
                                 desc="Computing fps"):
                     prot_id, fps_dict = fut.result()
-                    self.feats[prot_id]['fp'] = fps_dict
+                    self.feats[prot_id]['fps'] = fps_dict
         else:
             res = [SemiCRFModel._compute_protein_fps(args) for args in args_list]
             for prot_id, fps_dict in res:
-                self.feats[prot_id]['fp'] = fps_dict                
+                self.feats[prot_id]['fps'] = fps_dict                
 
 
     def compute_plddt(self,
                     dataset,
-                    max_workers=0, batch_size=1000, model_batch_size=10):
+                    max_workers=0, 
+                    batch_size=1000, 
+                    model_batch_size=10,
+                    enabled=True):
         """
         Parallelize at the protein level.  Uses one process per protein
         and shows a tqdm bar as each finishes.
@@ -764,7 +426,9 @@ class SemiCRFModel(nn.Module):
 
     def compute_disorder(self,
                     dataset,
-                    max_workers=20, batch_size=5):
+                    max_workers=20, 
+                    batch_size=5,
+                    enabled=True):
         """
         Parallelize at the protein level.  Uses one process per protein
         and shows a tqdm bar as each finishes.
@@ -792,7 +456,10 @@ class SemiCRFModel(nn.Module):
 
     def compute_embeddings(self,
                     dataset,
-                    max_workers=0, batch_size=1000, model_batch_size=10):
+                    max_workers=0, 
+                    batch_size=1000, 
+                    model_batch_size=10,
+                    enabled=True):
         """
         Parallelize at the protein level.  Uses one process per protein
         and shows a tqdm bar as each finishes.
@@ -812,17 +479,19 @@ class SemiCRFModel(nn.Module):
                                 desc="Computing embedding"):
                     prot_ids, embeddings = fut.result()
                     for i, prot_id in enumerate(prot_ids):
-                        self.feats[prot_id]['embedding'] = embeddings[i].cpu().numpy()
+                        self.feats[prot_id]['embeddings'] = embeddings[i].cpu().numpy()
         else:
             prot_ids, embeddings = func(dataset)
             for i, prot_id in enumerate(prot_ids):
-                self.feats[prot_id]['embedding'] = embeddings[i].cpu().numpy()                
+                self.feats[prot_id]['embeddings'] = embeddings[i].cpu().numpy()                
 
 
 
     def compute_sec(self,
                     dataset,
-                    max_workers=20, batch_size=20):        
+                    max_workers=20, 
+                    batch_size=20,
+                    enabled=True):        
         if max_workers:
             args_list = [dataset[i*batch_size:(i+1)*(batch_size)] for i in range((len(dataset)+batch_size-1)//batch_size)]
             ctx = mp.get_context('spawn')
@@ -878,10 +547,10 @@ class SemiCRFModel(nn.Module):
             L = len(aa_seq)
         
         # 2) pre‑compute residue‑level biochemical feature tensor (L, feat_dim)        
-        plddt = feats['plddt']
-        disorder = feats['disorder']
-        ss_pred = feats['sec']
-        embedding = feats['embedding']        
+        plddt = feats['plddt'] if self.config["plddt"]["enabled"] else None
+        disorder = feats['disorder'] if self.config["disorder"]["enabled"] else None
+        ss_pred = feats['sec'] if self.config["sec"]["enabled"] else None
+        embedding = feats['embeddings'] if self.config["embeddings"]["enabled"] else None    
         res_feats = self.featurizer(
             aa_seq, ss_pred=ss_pred,
             disorder=disorder,
@@ -932,7 +601,7 @@ class SemiCRFModel(nn.Module):
             for l in range(1, max_l + 1):
                 j = i + l
 
-                fp = feats['fp'][(i, j)]
+                fp = feats['fps'][(i, j)]
                 fp = torch.as_tensor(fp).to(self.device)
                 descr_score = self.zernike_projector(fp)
 
@@ -964,26 +633,21 @@ class SemiCRFModel(nn.Module):
 class SemiCRF2DModel(SemiCRFModel):
     def __init__(
         self,        
-        res_featurizer: BackboneResidueFeaturizer,
-        seg_aggregator: SegmentFeatureAggregator,
-        seg_pair_aggregator: SegmentPairFeatureAggregator,
-        seg_potential: SegmentPotentialMLP,
-        seg_pair_potential: SegmentPairPotentialMLP,
+        config,
         length_bias: float = 0.0,
         max_seg_len: int = 100,
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = "cpu"
     ):
         super().__init__(
-            res_featurizer=res_featurizer, 
-            seg_aggregator=seg_aggregator,
-            seg_potential=seg_potential,
+            config=config,
             length_bias=length_bias,
             max_seg_len=max_seg_len,
             device=device
         )
-        self.foldseek_projector = nn.Linear(22, 1)
-        self.seg_pair_mlp    = seg_pair_potential        
-        self.seg_pair_aggregator = seg_pair_aggregator
+        if config["foldseek"]["enabled"]:
+            self.foldseek_projector = nn.Linear(22, 1)
+        self.seg_pair_aggregator = SegmentPairFeatureAggregator(10, foldseek_feat_labels)
+        self.seg_pair_mlp    = SegmentPairPotentialMLP(self.seg_pair_aggregator.out_dim, hidden=64)                        
 
 
     def compute_feats(self, dataset, config):    
@@ -997,7 +661,8 @@ class SemiCRF2DModel(SemiCRFModel):
         }
         
         for task in tasks:
-            tasks[task]()
+            if config[task]["enabled"]:
+                tasks[task]()
         # spin up one “worker” per compute_*, all running concurrently
         # with ThreadPoolExecutor(max_workers=len(tasks)) as exec:
         #     future_to_name = {
@@ -1043,7 +708,8 @@ class SemiCRF2DModel(SemiCRFModel):
     def compute_foldseek(self,
                          dataset,
                          max_L,
-                         max_workers=20
+                         max_workers=20,
+                         enabled=True
     ):
         """
         Parallelize at the protein level.  Uses one process per protein
@@ -1086,7 +752,7 @@ class SemiCRF2DModel(SemiCRFModel):
         """
         Compute unary and pairwise segment scores for a protein sequence.
         Args:
-            feats (Dict): Dictionary of per-protein features, including 'plddt', 'disorder', 'sec', 'embedding', 'fp', 'foldseek'.
+            feats (Dict): Dictionary of per-protein features, including 'plddt', 'disorder', 'sec', 'embeddings', 'fps', 'foldseek'.
             aa_seq (str): Amino acid sequence string for the protein.
 
         Returns:
@@ -1100,10 +766,10 @@ class SemiCRF2DModel(SemiCRFModel):
         L = len(aa_seq)
         
         # 2) pre‑compute residue‑level biochemical feature tensor (L, feat_dim)        
-        plddt = feats['plddt']
-        disorder = feats['disorder']
-        ss_pred = feats['sec']
-        embedding = feats['embedding']        
+        plddt = feats['plddt'] if self.config["plddt"]["enabled"] else None
+        disorder = feats['disorder'] if self.config["disorder"]["enabled"] else None
+        ss_pred = feats['sec'] if self.config["sec"]["enabled"] else None
+        embedding = feats['embeddings'] if self.config["embeddings"]["enabled"] else None
         res_feats = self.featurizer(
             aa_seq, ss_pred=ss_pred,
             disorder=disorder,
@@ -1169,7 +835,7 @@ class SemiCRF2DModel(SemiCRFModel):
             max_l = min(self.max_seg_len, L - i)
             for l in range(1, max_l + 1):
                 j = i + l
-                fp = feats['fp'][(i, j)]
+                fp = feats['fps'][(i, j)]
                 fp = torch.as_tensor(fp, dtype=torch.float32).to(self.device)
                 descr_score = self.zernike_projector(fp)
                 # total score + length bias
@@ -1180,7 +846,7 @@ class SemiCRF2DModel(SemiCRFModel):
             for l2 in range(1, max_l2 + 1):
                 max_l1 = min(self.max_seg_len, i)
                 for l1 in range(1, max_l1 + 1):
-                    foldseek = feats['foldseek'][(i, l1, l2)]                    
+                    foldseek = feats['foldseek'][(i, l1, l2)]
                     foldseek = torch.as_tensor(foldseek, dtype=torch.float32).to(self.device)
                     foldseek = self.seg_pair_aggregator(foldseek)
                     descr_score = self.foldseek_projector(foldseek)
@@ -1206,80 +872,3 @@ class SemiCRF2DModel(SemiCRFModel):
     def precompute(self, feats, aa_seq):
         return self.forward(feats, aa_seq)   
     
-
-def zero_initialize(self):
-    # Loop over all named parameters and zero them
-    for name, param in self.named_parameters():
-        nn.init.constant_(param, 0.0)
-
-def l1_penalty(self):
-    """
-    Compute the sum of absolute values of all parameters in this module.
-    """
-    l1_sum = 0.0
-    for param in self.parameters():
-        l1_sum += param.abs().sum()
-    return l1_sum        
-
-
-
-
-    
-class AngleTransformer(nn.Module):
-    def __init__(self, input_size=1, d_model=64, nhead=8, num_layers=2, dropout=0.1, max_len=5000):
-        """
-        A lightweight Transformer-based model to encode a sequence of dihedral angles
-        into a single scalar.
-        
-        Parameters:
-            input_size (int): Dimensionality of each input token (1 if each angle is scalar).
-            d_model (int): Dimension of the model.
-            nhead (int): Number of attention heads.
-            num_layers (int): Number of Transformer encoder layers.
-            dropout (float): Dropout rate.
-        """
-        super(AngleTransformer, self).__init__()
-        self.input_linear = nn.Linear(input_size, d_model)  # project scalar to d_model
-        self.pos_encoder = PositionalEncoding(d_model, dropout, max_len=max_len)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dropout=dropout)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        # Final dense layer mapping the pooled representation to a scalar.
-        self.fc = nn.Linear(d_model, 1)
-        
-    def forward(self, x, lengths):
-        """
-        Parameters:
-            x (torch.Tensor): Padded tensor of shape (batch, max_seq_len, input_size).
-            lengths (list or torch.Tensor): Actual lengths for each sequence in the batch.
-            
-        Returns:
-            output (torch.Tensor): Tensor of shape (batch, 1) containing a scalar per sequence.
-        """
-        batch, seq_len, _ = x.size()
-        # Create key padding mask: True for padded positions.
-        # Assume that padding is at the end of each sequence.
-        mask = torch.zeros(batch, seq_len, dtype=torch.bool, device=x.device)
-        for i, L in enumerate(lengths):
-            if L < seq_len:
-                mask[i, L:] = True
-        
-        # Project input and add positional encoding.
-        x = self.input_linear(x)            # shape: (batch, seq_len, d_model)
-        x = self.pos_encoder(x)             # shape: (batch, seq_len, d_model)
-        
-        # Transformer expects shape (seq_len, batch, d_model)
-        x = x.transpose(0, 1)               # shape: (seq_len, batch, d_model)
-        # Process through Transformer encoder
-        encoded = self.transformer_encoder(x, src_key_padding_mask=mask)  # shape: (seq_len, batch, d_model)
-        encoded = encoded.transpose(0, 1)   # shape: (batch, seq_len, d_model)
-        return encoded
-        # # Pooling: Mean over non-padded timesteps for each sequence.
-        # pooled = []
-        # for i, L in enumerate(lengths):
-        #     # Take the mean over the first L timesteps
-        #     pooled.append(encoded[i, :L].mean(dim=0))
-        # pooled = torch.stack(pooled, dim=0)  # shape: (batch, d_model)
-        
-        # # Final dense layer to produce a single scalar per sequence.
-        # output = self.fc(pooled)            # shape: (batch, 1)
-        # return output

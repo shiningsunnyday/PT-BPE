@@ -22,16 +22,21 @@ cd "/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff"
 if [ $1 -eq 1 ]; then
   debug="--debug"
   config="--config config_debug.json"
-  runner="python"
+  runner="python -m pdb -c continue"
   echo "debug"
-  export CUDA_VISIBLE_DEVICES=""
   device="cpu"
 else
   export NGPU=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
+  if [ $NGPU -eq 1 ]; then
+    runner="python"
+    echo "runner is python"
+  else
+    runner="torchrun --nproc_per_node=$NGPU"
+    echo "runner is torchrun"
+  fi
   debug=""
   device="cuda"
   config="--config config.json"
-  runner="torchrun --nproc_per_node=$NGPU"
 fi
 
 if [ -n "$8" ]; then
@@ -58,4 +63,6 @@ case "$2" in
     ;;
 esac
 
-$runner bin/learn.py --data-dir $3 $config --cuda $device --epochs 1000 --toy $4 --pad $5 --model "feats" $mode --l1 $6 --gamma $7 $extra $debug
+cmd="$runner bin/learn.py --data-dir $3 $config --cuda $device --epochs 1000 --toy $4 --pad $5 --model "feats" $mode --l1 $6 --gamma $7 $extra $debug"
+echo $cmd
+$cmd
