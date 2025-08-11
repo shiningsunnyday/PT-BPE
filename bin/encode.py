@@ -271,38 +271,46 @@ def main():
             ref_coords = None
         N = len(bpe.tokenizers)
     else:
-        dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
-                                                use_cache=args.cache, 
-                                                debug=False, 
-                                                zero_center=False, 
-                                                toy=args.toy, 
-                                                pad=args.pad, 
-                                                secondary=args.sec)     
-        cleaned_structures = []
-        for i, struc in enumerate(dataset.structures):
-            if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
-                print(f"skipping {i}, {struc['fname']} because of missing dihedrals")
-            else:
-                cleaned_structures.append(struc)
-        logger.info(f"Removed {len(dataset.structures)-len(cleaned_structures)}/{len(dataset.structures)} structures with nan dihedrals.")
-        N = len(cleaned_structures)
-        dataset.structures = cleaned_structures        
-        bpe = BPE(dataset.structures, 
-                  bins=args.bins, 
-                  bin_strategy=args.bin_strategy, 
-                  save_dir=args.save_dir, 
-                  rmsd_partition_min_size=args.p_min_size, 
-                  num_partitions=args.num_p,
-                  max_num_strucs=args.max_num_strucs,
-                  compute_sec_structs=args.sec, 
-                  plot_iou_with_sec_structs=args.sec_eval,                  
-                  res_init=args.res_init,
-                  glue_opt=args.glue_opt,
-                  glue_opt_prior=args.glue_opt_prior,
-                  glue_opt_method=args.glue_opt_method)
-        pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_init.pkl'), 'wb+'))
-        ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
-        np.save(ref_path, ref_coords)
+        init_bpe_path = os.path.join(args.save_dir, f'bpe_init.pkl')
+        post_init_bpe_path = os.path.join(args.save_dir, f'bpe_post_init.pkl')
+        if Path(init_bpe_path).exists():
+            bpe = pickle.load(open(init_bpe_path, "rb"))
+        else:
+            dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
+                                                    use_cache=args.cache, 
+                                                    debug=False, 
+                                                    zero_center=False, 
+                                                    toy=args.toy, 
+                                                    pad=args.pad, 
+                                                    secondary=args.sec)     
+            cleaned_structures = []
+            for i, struc in enumerate(dataset.structures):
+                if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
+                    print(f"skipping {i}, {struc['fname']} because of missing dihedrals")
+                else:
+                    cleaned_structures.append(struc)
+            logger.info(f"Removed {len(dataset.structures)-len(cleaned_structures)}/{len(dataset.structures)} structures with nan dihedrals.")
+            N = len(cleaned_structures)
+            dataset.structures = cleaned_structures        
+            bpe = BPE(dataset.structures, 
+                    bins=args.bins, 
+                    bin_strategy=args.bin_strategy, 
+                    save_dir=args.save_dir, 
+                    rmsd_partition_min_size=args.p_min_size, 
+                    num_partitions=args.num_p,
+                    max_num_strucs=args.max_num_strucs,
+                    compute_sec_structs=args.sec, 
+                    plot_iou_with_sec_structs=args.sec_eval,                  
+                    res_init=args.res_init,
+                    glue_opt=args.glue_opt,
+                    glue_opt_prior=args.glue_opt_prior,
+                    glue_opt_method=args.glue_opt_method)
+            pickle.dump(bpe, open(init_bpe_path, 'wb+'))
+        if Path(ref_path).exists():
+            ref_coords = np.load(ref_path)
+        else:
+            ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
+            np.save(ref_path, ref_coords)
         xlims = [None for _ in range(args.num_vis)]
         ylims = [None for _ in range(args.num_vis)]
         zlims = [None for _ in range(args.num_vis)]
@@ -310,8 +318,11 @@ def main():
             visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter=-1.png")
             res = bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False, xlim=xlims[ind], ylim=ylims[ind], zlim=zlims[ind])
             xlims[ind], ylims[ind], zlims[ind] = tuple(res) # for later
-        # use this for sanity check
-        bpe.initialize()
+        if Path(post_init_bpe_path).exists():
+            bpe = pickle.load(open(post_init_bpe_path, "rb"))
+        else:
+            bpe.initialize()
+            pickle.dump(bpe, open(post_init_bpe_path, 'wb+'))
         for ind in range(args.num_vis):
             visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter=init.png")
             bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False, xlim=xlims[ind], ylim=ylims[ind], zlim=zlims[ind])

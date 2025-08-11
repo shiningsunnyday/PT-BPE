@@ -99,24 +99,24 @@ class BPE():
         label_dict = {}
         res_geo = defaultdict(list)   
         binned_bonds = [self._bin_val({Tokenizer.BOND_TYPES[i]: [0]} ) for i in range(3)]
-
         max_workers = _effective_cpus()
         with ProcessPoolExecutor(
             max_workers=max_workers,
             initializer=BPE._init_set_bond_length_worker,
             initargs=(binned_bonds,)
         ) as pool:
-            futures = [
+            futures = {
                 pool.submit(
                     BPE._set_bond_length_worker, t
-                )
-                for t in self.tokenizers
-            ]
+                ): idx
+                for idx, t in enumerate(self.tokenizers)
+            }
 
-        for _ in tqdm(as_completed(futures), total=len(futures),
+        for future in tqdm(as_completed(futures), total=len(futures),
                     desc="standardizing bond lengths"):
-            pass
-
+            idx = futures.pop(future)
+            self.tokenizers[idx] = future.result()
+        
         for ti, t in tqdm(enumerate(self.tokenizers), desc="iterating over residue geos"):
             # update binned residue geo
             labels = []
@@ -232,7 +232,7 @@ class BPE():
                     if start1 > 0 and self.glue_opt and self.glue_opt_method == "each":                    
                         R_occ, t_occ = t1.exit_frame(start1, 3*((length1-2)//3)+2)
                         t1.set_token_geo(start1, length1, t2.token_geo(start2, length1))
-                        self.opt_glue(t1, start1, 3*((length1-2)//3)+2, R_occ, t_occ)
+                        BPE.opt_glue(t1, start1, 3*((length1-2)//3)+2, R_occ, t_occ)
                     else:
                         t1.set_token_geo(start1, length1, t2.token_geo(start2, length1))
                     t1.tokens[start1//3] = (start1, (n, p), length1)
@@ -245,26 +245,29 @@ class BPE():
                         delattr(t, "bond_to_token_copy")
             # quantize omega, phi, and C-N-CA angles
             if self.glue_opt and self.glue_opt_method == "all":
-                    # if mp.get_start_method(allow_none=True) != "fork":
-                    #     mp.set_start_method("fork", force=True)
-                    pool  = ProcessPoolExecutor(max_workers=os.cpu_count())
-                    futures = [
-                        pool.submit(
-                            BPE._opt_glue_worker,
-                            t,                # cheap to serialise
-                            3*t.n - 4,
-                            dict(max_iter=20,
-                                line_search_fn='strong_wolfe')
-                        )
-                        for t in self.tokenizers
-                    ]
+                # if mp.get_start_method(allow_none=True) != "fork":
+                #     mp.set_start_method("fork", force=True)
+                pool  = ProcessPoolExecutor(
+                    max_workers=os.cpu_count(),
+                    initializer=BPE._init_opt_glue_worker,
+                    initargs=(self._bin_centers, self._thresholds, self.glue_opt_prior)
+                )
+                futures = {
+                    pool.submit(
+                        BPE._opt_glue_worker,
+                        t,                # cheap to serialise
+                        3*t.n - 4
+                    ): idx
+                    for idx, t in enumerate(self.tokenizers)
+                }
 
-                    for _ in tqdm(as_completed(futures), total=len(futures),
-                                desc="optimizing all glues"):
-                        pass
-                # for t in tqdm(self.tokenizers, desc="optimizing all glues"):
-                #     R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
-                #     self.opt_glue(t, 3, 3*t.n-4, R_occs, t_occs)
+                for future in tqdm(as_completed(futures), total=len(futures),
+                            desc="optimizing all glues"):
+                    idx = futures.pop(future)
+                    self.tokenizers[idx] = future.result()
+            # for t in tqdm(self.tokenizers, desc="optimizing all glues"):
+            #     R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
+            #     BPE.opt_glue(t, 3, 3*t.n-4, R_occs, t_occs)
             else:
                 for ti, t in enumerate(self.tokenizers):
                     # update omega, phi, and C-N-CA
@@ -346,9 +349,13 @@ class BPE():
         else:
             return frame_from_triad_torch(*coords[-3:].unbind(dim=0))
 
-    def optimize_glues_entry_torch(self, t, idx, length, R_occ, t_occ,
+    @staticmethod
+    def optimize_glues_entry_torch(t, idx, length, R_occ, t_occ,
                                 init_glue,  # (omega_{s-1}, theta_CNCA_s, phi_s)
-                                wR=1.0, wt=0.1, lambda_prior=0.1):
+                                wR=1.0, wt=0.1, 
+                                lambda_prior=0.1,
+                                bin_centers=None,
+                                thresholds=None):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         # ---- fixed tensors from original chain ----
         if isinstance(R_occ, list):
@@ -429,9 +436,9 @@ class BPE():
                 trans_loss = torch.sum((t_occ - t_new)**2)
             exit_frame_loss = wR*rot_loss + wt*trans_loss
             if lambda_prior > 0.0:
-                prior = (circ_kde_prior(ω, self._bin_centers[length]['omega'], self._bin_weights[length]['omega'], kappa=50.)
-                    + circ_kde_prior(θ, self._bin_centers[length]['C:1N:1CA'], self._bin_weights[length]['C:1N:1CA'], kappa=20.)
-                    + circ_kde_prior(φ, self._bin_centers[length]['phi'], self._bin_weights[length]['phi'], kappa=20.))
+                prior = (circ_kde_prior(ω, bin_centers[length]['omega'], self._bin_weights[length]['omega'], kappa=50.)
+                    + circ_kde_prior(θ, bin_centers[length]['C:1N:1CA'], self._bin_weights[length]['C:1N:1CA'], kappa=20.)
+                    + circ_kde_prior(φ, bin_centers[length]['phi'], self._bin_weights[length]['phi'], kappa=20.))
                 loss = exit_frame_loss + lambda_prior * prior                        
             else:
                 loss = exit_frame_loss            
@@ -442,15 +449,15 @@ class BPE():
         opt.step(closure)
         if ret_all:
             ω_opts, θ_opts, φ_opts= (wrap(x) for x in raw.unbind(-1))
-            ω_opts = [snap_bin(self._thresholds[length]['omega'], ω_opt) for ω_opt in ω_opts]
-            θ_opts = [snap_bin(self._thresholds[length]['C:1N:1CA'], θ_opt) for θ_opt in θ_opts]
-            φ_opts = [snap_bin(self._thresholds[length]['phi'], φ_opt) for φ_opt in φ_opts]
+            ω_opts = [snap_bin(thresholds[length]['omega'], ω_opt) for ω_opt in ω_opts]
+            θ_opts = [snap_bin(thresholds[length]['C:1N:1CA'], θ_opt) for θ_opt in θ_opts]
+            φ_opts = [snap_bin(thresholds[length]['phi'], φ_opt) for φ_opt in φ_opts]
             return (ω_opts, θ_opts, φ_opts)
         else:
             ω_opt, θ_opt, φ_opt = wrap(raw).detach().cpu().numpy()
-            ω_opt = snap_bin(self._thresholds[length]['omega'], ω_opt)
-            θ_opt = snap_bin(self._thresholds[length]['C:1N:1CA'], θ_opt)
-            φ_opt = snap_bin(self._thresholds[length]['phi'], φ_opt)
+            ω_opt = snap_bin(thresholds[length]['omega'], ω_opt)
+            θ_opt = snap_bin(thresholds[length]['C:1N:1CA'], θ_opt)
+            φ_opt = snap_bin(thresholds[length]['phi'], φ_opt)
             # print("loss trace (first 10):", loss_log[:10], "... last:", loss_log[-1])
             return (ω_opt, θ_opt, φ_opt)
 
@@ -545,20 +552,37 @@ class BPE():
         BINNED_BONDS = bb
     
     @staticmethod
+    def _init_opt_glue_worker(bc, th, gop):
+        global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
+        BIN_CENTERS = bc
+        THRESHOLDS = th
+        GLUE_OPT_PRIOR = gop
+    
+    @staticmethod
     def _set_bond_length_worker(t):
         # update avg bond lengths
         for i in range(3*t.n-1):
-            t.set_token_geo(i, 1, BINNED_BONDS[i%3])        
+            t.set_token_geo(i, 1, BINNED_BONDS[i%3])
+        return t
+
+    @staticmethod
+    def _opt_glue_worker(t, n):
+        torch.set_num_threads(1)               # avoid over-subscription
+        R_occs, t_occs = t.exit_frame(3, 3*t.n - 4, ret_all=True)
+        return BPE.opt_glue(t, 3, 3*t.n - 4, R_occs, t_occs)        
 
 
     @staticmethod
-    def _opt_glue_worker(t, n, opt_kwargs):
-        torch.set_num_threads(1)               # avoid over-subscription
-
-        R_occs, t_occs = t.exit_frame(3, 3*t.n - 4, ret_all=True)
-        return opt_glue(t, 3, 3*t.n - 4, R_occs, t_occs, **opt_kwargs)        
-
-    def opt_glue(self, t: Tokenizer, i1, length, R_occ, t_occ):
+    def opt_glue(t: Tokenizer, i1, length, R_occ, t_occ, glue_opt_prior=None, bin_centers=None, thresholds=None):
+        assert bin_centers or "BIN_CENTERS" in globals()
+        assert thresholds or "THRESHOLDS" in globals()
+        assert glue_opt_prior or "GLUE_OPT_PRIOR" in globals()
+        if bin_centers is None:
+            bin_centers = BIN_CENTERS
+        if thresholds is None:
+            thresholds = THRESHOLDS
+        if glue_opt_prior is None:
+            glue_opt_prior = GLUE_OPT_PRIOR
         # optimize angles left of residue starting at bond i1
         if i1 % 3:
             raise ValueError(f"i1={i1} has to be start of residue")
@@ -569,11 +593,14 @@ class BPE():
         else:
             init_glue = t.get_glue_left(i1)    # (psi_{s-1}, theta_CNCA_s, phi_s)        
         # optimize
-        best_glue = self.optimize_glues_entry_torch(
+        best_glue = BPE.optimize_glues_entry_torch(
             t, i1, length,
             R_occ=R_occ, t_occ=t_occ,
             init_glue=init_glue,
-            wR=1.0, wt=0.1, lambda_prior=self.glue_opt_prior
+            wR=1.0, wt=0.1, 
+            lambda_prior=glue_opt_prior,
+            bin_centers=bin_centers,
+            thresholds=thresholds
         )
 
         # set the optimized glue and recompute coords
@@ -1227,7 +1254,7 @@ class BPE():
             t = self.tokenizers[ti]
             i1 = t.token_pos[index-1]
             coords = t.compute_coords(i1, length)
-            active_occurs.append((i, i1))
+            active_occurs.append((ti, i1))
             active_coords.append(coords)
         
         # run k-medoids
@@ -1236,7 +1263,6 @@ class BPE():
         assignments = [None for _ in range(N)]
         max_workers = _effective_cpus()
         with ProcessPoolExecutor(
-            mp_context=ctx,
             max_workers=max_workers,
             initializer=BPE._init_assignment_worker,
             initargs=(active_coords, medoid_inds)
@@ -1258,8 +1284,8 @@ class BPE():
         # _sphere_dict
         self._sphere_dict[k] = []
         for p, m in enumerate(medoid_inds):
-            i, i1 = active_occurs[m]
-            t = self.tokenizers[i]
+            ti, i1 = active_occurs[m]
+            t = self.tokenizers[ti]
             struc = t.token_geo(i1, length)            
             logger.info(f"Partition {p}: {struc}")
             self._sphere_dict[k].append(struc)
@@ -1442,7 +1468,7 @@ class BPE():
                     if self.glue_opt:
                         R_occ, t_occ = t.exit_frame(i1, 3*((length1-2)//3)+2)
                         t.set_token_geo(i1, length, self._sphere_dict[key][p])
-                        self.opt_glue(t, i1, 3*((length1-2)//3)+2, R_occ, t_occ)
+                        BPE.opt_glue(t, i1, 3*((length1-2)//3)+2, R_occ, t_occ, self.glue_opt_prior, self._bin_centers, self._thresholds)
                     else:
                         t.set_token_geo(i1, length, self._sphere_dict[key][p])
                 step_times["step6"] += time.perf_counter() - start_time    
