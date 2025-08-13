@@ -178,7 +178,6 @@ class BPE():
                 # -------- final assignment for *all* structures ---------------------------                
                 
                 assignments = [None for _ in range(N)]
-                max_workers = _effective_cpus()
                 with ProcessPoolExecutor(
                     max_workers=max_workers,
                     initializer=BPE._init_assignment_worker,
@@ -248,7 +247,7 @@ class BPE():
                 # if mp.get_start_method(allow_none=True) != "fork":
                 #     mp.set_start_method("fork", force=True)
                 pool  = ProcessPoolExecutor(
-                    max_workers=os.cpu_count(),
+                    max_workers=max_workers,
                     initializer=BPE._init_opt_glue_worker,
                     initargs=(self._bin_centers, self._thresholds, self.glue_opt_prior)
                 )
@@ -1468,7 +1467,8 @@ class BPE():
                     if self.glue_opt:
                         R_occ, t_occ = t.exit_frame(i1, 3*((length1-2)//3)+2)
                         t.set_token_geo(i1, length, self._sphere_dict[key][p])
-                        BPE.opt_glue(t, i1, 3*((length1-2)//3)+2, R_occ, t_occ, self.glue_opt_prior, self._bin_centers, self._thresholds)
+                        # TODO: changes surrounding byte pairs, don't do it for now
+                        # BPE.opt_glue(t, i1, 3*((length1-2)//3)+2, R_occ, t_occ, self.glue_opt_prior, self._bin_centers, self._thresholds)
                     else:
                         t.set_token_geo(i1, length, self._sphere_dict[key][p])
                 step_times["step6"] += time.perf_counter() - start_time    

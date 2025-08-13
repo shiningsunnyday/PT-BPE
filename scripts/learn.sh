@@ -21,7 +21,8 @@ cd "/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff"
 
 if [ $1 -eq 1 ]; then
   debug="--debug"
-  config="--config config_debug.json"
+  config="--config ${10}"
+  echo "config ${10}"
   runner="python -m pdb -c continue"
   echo "debug"
   device="cpu"
@@ -39,30 +40,36 @@ else
   config="--config config.json"
 fi
 
-if [ -n "$8" ]; then
-  SAVE_DIR=$8
+vis="73 111 32 15 85"
+
+if [ -n "$9" ]; then
+  SAVE_DIR=$9
   # ID="${SAVE_DIR##*/}"
   # SRC="/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff/ckpts/$ID/"
   # DST="/n/netscratch/mzitnik_lab/Lab/${USER}/$ID/"
   # mkdir -p "$DST"
   # rsync -av --ignore-existing "${SRC}"*.pkl "$DST"
-  extra="--save-dir $8"
+  extra="--save-dir $9"
 else
   extra="--auto"
 fi
 
 case "$2" in
-  1)
-    mode="--mode unary"
+  1)    
+    if [ $3 -ne 10000000000 ]; then
+      echo "max-seg-len must be 10000000000"
+      exit 1
+    fi
+    mode="--mode unary --max-seg-len $3"
     ;;
   2)
-    mode="--mode binary --max-seg-len 20"
+    mode="--mode binary --max-seg-len $3"
     ;;
   *)
-    mode="--mode recursive --max-seg-len 20"
+    mode="--mode recursive --max-seg-len $3"
     ;;
 esac
 
-cmd="$runner bin/learn.py --data-dir $3 $config --cuda $device --epochs 1000 --toy $4 --pad $5 --model "feats" $mode --l1 $6 --gamma $7 $extra $debug"
+cmd="$runner bin/learn.py --data-dir $4 $config --cuda $device --epochs 1000 --vis-idxes $vis --toy $5 --pad $6 --model "feats" $mode --l1 $7 --gamma $8 $extra $debug"
 echo $cmd
 $cmd

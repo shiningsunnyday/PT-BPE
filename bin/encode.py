@@ -253,27 +253,28 @@ def main():
     _iter, ckpt = -1, ""
     for f in glob.glob(f"{args.save_dir}/bpe_iter=*.pkl"):
         f = Path(f).name
-        m = re.match("bpe_iter=(\d+)", f)
+        m = re.match("bpe_iter=(\d+).pkl", f)
         if m is None:
-            print(f)
-            raise
+            continue
         cur_iter = int(m.groups()[0])
         if cur_iter > _iter:
             _iter = cur_iter
             ckpt = f"{args.save_dir}/{f}"    
     ref_path = f"{args.save_dir}/ref_coords.npy"
+    lims_path = os.path.join(args.save_dir, f"lims.npy")
     if _iter > -1:
-        logger.info(f"loading {ckpt} at iter={_iter}")
+        logger.info(f"loading {ckpt} at iter={_iter}")        
         bpe = pickle.load(open(ckpt, 'rb'))
         if os.path.exists(ref_path):
             ref_coords = np.load(ref_path, allow_pickle=True)
         else:
             ref_coords = None
-        N = len(bpe.tokenizers)
+        xlims, ylims, zlims = map(lambda t: list(map(tuple, t)), tuple(np.load(lims_path)))        
     else:
         init_bpe_path = os.path.join(args.save_dir, f'bpe_init.pkl')
         post_init_bpe_path = os.path.join(args.save_dir, f'bpe_post_init.pkl')
         if Path(init_bpe_path).exists():
+            print(f"loading {init_bpe_path}")
             bpe = pickle.load(open(init_bpe_path, "rb"))
         else:
             dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
@@ -307,7 +308,7 @@ def main():
                     glue_opt_method=args.glue_opt_method)
             pickle.dump(bpe, open(init_bpe_path, 'wb+'))
         if Path(ref_path).exists():
-            ref_coords = np.load(ref_path)
+            ref_coords = np.load(ref_path, allow_pickle=True)
         else:
             ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
             np.save(ref_path, ref_coords)
@@ -316,9 +317,11 @@ def main():
         zlims = [None for _ in range(args.num_vis)]
         for ind in range(args.num_vis):
             visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter=-1.png")
-            res = bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False, xlim=xlims[ind], ylim=ylims[ind], zlim=zlims[ind])
-            xlims[ind], ylims[ind], zlims[ind] = tuple(res) # for later
+            res = bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False)
+            xlims[ind], ylims[ind], zlims[ind] = tuple(res) # for later        
+        np.save(lims_path, np.array([xlims, ylims, zlims]))
         if Path(post_init_bpe_path).exists():
+            print(f"loading {post_init_bpe_path}")
             bpe = pickle.load(open(post_init_bpe_path, "rb"))
         else:
             bpe.initialize()
@@ -331,6 +334,7 @@ def main():
             bpe_debug = BPE(dataset.structures, bins=args.bins, save_dir=args.save_dir)
             bpe_debug.initialize()
             bpe_debug.old_bin()
+    N = len(bpe.tokenizers)
     vis_paths = [[] for _ in range(args.num_vis)]    
     for t in range(_iter+1, 10000):
         ## visualization        
@@ -356,17 +360,19 @@ def main():
         if t % args.save_every == 0:
             # save
             pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_iter={t}.pkl'), 'wb+'))
+            pickle.dump(bpe.tokenizers[:args.num_ref], open(os.path.join(args.save_dir, f'bpe_iter={t}_ref.pkl'), 'wb+'))
             time_path = os.path.join(args.save_dir, f"times_iter={t}.png")            
             bpe.plot_times(time_path)
             if bpe.plot_iou_with_sec_structs:
                 iou_path = os.path.join(args.save_dir, f"iou_iter={t}.png")
                 bpe.plot_iou(iou_path)
         if t % args.plot_every == 0:
-            run_path = os.path.join(args.save_dir, f"run_iter={t}.png")            
+            run_path = os.path.join(args.save_dir, f"run_iter={t}.png")
             if ref_coords is not None:
-                plot(ref_coords, 
+                plot(bpe, ref_coords, 
                     Path(args.save_dir).name,
                     run_path, 
+                    prev_iter=(t-args.plot_every) if t else 0,
                     no_iters=t, 
                     step_iter=args.save_every, 
                     ratio=N/1000)

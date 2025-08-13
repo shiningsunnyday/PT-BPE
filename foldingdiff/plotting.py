@@ -359,17 +359,23 @@ def column_fill(handles, labels, ncol):
 
 
 
-def plot(ref_coords, d, output_path, no_iters=500, step_iter=10, ratio=1, num_random_baseline=10):
-    Ks, Ls, errs = [], [], []
-    for t in range(0, no_iters+1, step_iter):
-        path = f'./ckpts/{d}/bpe_iter={t}.pkl'
+def plot(bpe, ref_coords, d, output_path, no_iters=500, prev_iter=0, step_iter=10, ratio=1, num_random_baseline=10):    
+    if prev_iter:
+        prev_path = Path(output_path).parent / f"run_iter={prev_iter}.txt"
+        print(f"loading prev_path: {prev_path}")
+        prev = np.load(prev_path)
+        Ks, Ls, errs = map(list, tuple(prev))
+    else:
+        Ks, Ls, errs = [], [], []
+    for t in range(prev_iter, no_iters+1, step_iter):
+        path = f'./ckpts/{d}/bpe_iter={t}_ref.pkl'
         if not os.path.exists(path):
             break
-        bpe = pickle.load(open(path, 'rb'))
-        usage = [len(t.bond_to_token) for t in bpe.tokenizers]
+        tokenizers = pickle.load(open(path, 'rb'))
+        usage = [len(t.bond_to_token) for t in tokenizers]
         cur_coords = []
         for i in range(len(ref_coords)):
-            coord = bpe.tokenizers[i].compute_coords()
+            coord = tokenizers[i].compute_coords()
             assert ref_coords[i].shape == coord.shape
             cur_coords.append(coord)
         K = len(bpe._tokens)
@@ -380,6 +386,7 @@ def plot(ref_coords, d, output_path, no_iters=500, step_iter=10, ratio=1, num_ra
         Ks.append(K)
         Ls.append(L)
 
+    np.save(Path(output_path).with_suffix(".txt"), [Ks, Ls, errs])
     final_iter = t+1        
     # add a permutation test baseline
     # sample num_random_baseline random permutations
@@ -462,7 +469,7 @@ def plot(ref_coords, d, output_path, no_iters=500, step_iter=10, ratio=1, num_ra
 
 # bpe = pickle.load(open(f'./ckpts/{d}/bpe_iter=0.pkl', 'rb'))
 
-def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_factor=0.7, vis_dihedral=True, xlim=None, ylim=None, zlim=None, n_per_row=50):
+def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_factor=0.7, vis_dihedral=True, vis_bond_angle=True, xlim=None, ylim=None, zlim=None, n_per_row=50, bbox_inches=None):
     """
     Plots a protein backbone given an array of coordinates and saves the image as a PNG.
     
@@ -485,6 +492,8 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
           Factor for zooming in on the coordinate bounds.
       vis_dihedral : bool, optional
           Whether to visualize dihedral angles (turn off for readability)
+      vis_bond_angle : bool, optional
+          Whether to visualize bond angles
       xlim : (xmin, xmax) figure ranges, e.g. for consistency with previous iterations
       ylim, zlim : similar as xlim
     """
@@ -547,36 +556,37 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
     r = 0.3 * min_bond_length  # for bond-bond joint arc
     
     # Annotate each bond-bond joint with its angle.
-    for i in range(1, n_atoms - 1):
-        joint = coords[i]
-        v1 = coords[i-1] - joint
-        v2 = coords[i+1] - joint
-        norm1 = np.linalg.norm(v1)
-        norm2 = np.linalg.norm(v2)
-        if norm1 == 0 or norm2 == 0:
-            continue
-        u1 = v1 / norm1
-        u2 = v2 / norm2
-        dot_val = np.dot(u1, u2)
-        dot_val = np.clip(dot_val, -1.0, 1.0)
-        angle = np.arccos(dot_val)
-        
-        # Compute perpendicular vector in the plane.
-        w = u2 - np.dot(u1, u2) * u1
-        norm_w = np.linalg.norm(w)
-        if norm_w == 0:
-            continue
-        w = w / norm_w
-        
-        t_vals = np.linspace(0, angle, 50)
-        arc_points = np.array([joint + r * (np.cos(t) * u1 + np.sin(t) * w)
-                                for t in t_vals])
-        ax.plot(arc_points[:, 0], arc_points[:, 1], arc_points[:, 2],
-                color='black', linewidth=2)
-        mid_point = joint + r * (np.cos(angle/2) * u1 + np.sin(angle/2) * w)
-        txt = ax.text(mid_point[0], mid_point[1], mid_point[2],
-                      f"{angle:.2f}", color='black', fontweight='bold', fontsize=angle_font_size)
-        txt.set_path_effects([PathEffects.withStroke(linewidth=3, foreground='white')])
+    if vis_bond_angle:
+        for i in range(1, n_atoms - 1):
+            joint = coords[i]
+            v1 = coords[i-1] - joint
+            v2 = coords[i+1] - joint
+            norm1 = np.linalg.norm(v1)
+            norm2 = np.linalg.norm(v2)
+            if norm1 == 0 or norm2 == 0:
+                continue
+            u1 = v1 / norm1
+            u2 = v2 / norm2
+            dot_val = np.dot(u1, u2)
+            dot_val = np.clip(dot_val, -1.0, 1.0)
+            angle = np.arccos(dot_val)
+            
+            # Compute perpendicular vector in the plane.
+            w = u2 - np.dot(u1, u2) * u1
+            norm_w = np.linalg.norm(w)
+            if norm_w == 0:
+                continue
+            w = w / norm_w
+            
+            t_vals = np.linspace(0, angle, 50)
+            arc_points = np.array([joint + r * (np.cos(t) * u1 + np.sin(t) * w)
+                                    for t in t_vals])
+            ax.plot(arc_points[:, 0], arc_points[:, 1], arc_points[:, 2],
+                    color='black', linewidth=2)
+            mid_point = joint + r * (np.cos(angle/2) * u1 + np.sin(angle/2) * w)
+            txt = ax.text(mid_point[0], mid_point[1], mid_point[2],
+                        f"{angle:.2f}", color='black', fontweight='bold', fontsize=angle_font_size)
+            txt.set_path_effects([PathEffects.withStroke(linewidth=3, foreground='white')])
     
     # --- Torsion Loop: Draw rotating loop representing the dihedral angle ---
     # Dihedral angles require 4 consecutive points; use bond between p1 and p2.
@@ -687,7 +697,7 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
         loc='upper left')
     plt.subplots_adjust(right=0.50)
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300)
+    plt.savefig(output_path, dpi=300, bbox_inches=bbox_inches)
     plt.close(fig)
     print("Backbone plot saved to:", output_path)
     return xlim, ylim, zlim

@@ -26,6 +26,7 @@ import logging
 import inspect
 import pickle
 import json
+import re
 from pathlib import Path
 
 # Configure logging (you can customize format and level here)
@@ -45,7 +46,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
     # general params
     parser.add_argument("--debug", action='store_true')
-    parser.add_argument("--visualize", action='store_true')  
+    parser.add_argument("--vis-idxes", type=int, nargs='+', help="if given, only visualize these tokenizers")
     parser.add_argument("--auto", action='store_true', help='auto set folders')    
     parser.add_argument("--save-dir")  
     # data params
@@ -74,7 +75,7 @@ def parse_args():
     return args
 
 
-def semi_crf_dp_and_map(out, N, gamma):
+def semi_crf_dp_and_map(out, N):
     """
     out[i][l]: the (log-)score for a segment starting at i, of length l
                i.e. from x_{i} to x_{i + l - 1}, inclusive.
@@ -107,7 +108,7 @@ def semi_crf_dp_and_map(out, N, gamma):
 
         for l in range(1, k + 1):
             seg_score = out[k-l][l]
-            seg_score_with_len = seg_score + gamma*l
+            seg_score_with_len = seg_score
             # Score from k-l to k-1 is out[k-l][l]
             cand_part = log_a[k - l] + seg_score_with_len   # for log-partition
             alpha_candidates.append(cand_part)
@@ -131,8 +132,7 @@ def semi_crf_dp_and_map_2d(
     unary_scores: torch.Tensor,
     edge_scores: torch.Tensor,
     N: int,
-    Lmax: int,
-    gamma: float = 0.0
+    Lmax: int
 ):
     """
     2D semi-CRF forward: returns
@@ -164,7 +164,7 @@ def semi_crf_dp_and_map_2d(
         for l in range(1, max_l+1):
             i = k - l
             # unary + length bonus
-            u = unary_scores[i, l] + gamma * l
+            u = unary_scores[i, l]
 
             # consider all possible previous segment lengths lp
             prev_max_lp = min(Lmax, i)
@@ -189,8 +189,7 @@ def hierarchical_inside_and_map(
     unary_scores: torch.Tensor,
     split_scores: torch.Tensor,
     N: int,
-    Lmax: int = None,
-    gamma: float = 0.0
+    Lmax: int = None
 ):
     """
     Returns:
@@ -219,7 +218,7 @@ def hierarchical_inside_and_map(
 
             # 1) LEAF option (only if d<=Lmax)
             if Lmax is None or d <= Lmax:
-                leaf_score   = unary_scores[i, d] + gamma * d
+                leaf_score   = unary_scores[i, d]
                 best_map_val = leaf_score
                 best_k       = -1
                 inside_terms = [leaf_score]
@@ -508,7 +507,7 @@ class FeatDataset(Dataset):
             # this will go straight to stderr and flush immediately
             print(f"Failed to unpickle {path}: {e}", file=sys.stderr, flush=True)
             raise
-        for feat_type in feats:
+        for feat_type in list(feats):
             if feat_type not in self.config or not self.config[feat_type]["enabled"]:
                 feats.pop(feat_type)
         return idx, t, feats
@@ -573,7 +572,7 @@ def main(args) -> None:
             validate_args_match(
                 current   = args,
                 loaded    = loaded_args,
-                skip      = ["debug", "visualize", "auto", "config", \
+                skip      = ["debug", "visualize", "vis-idxes", "auto", "config", \
                 "epochs", "gamma", "l1", "max-seg-len"],   # fields you don’t need to compare
             )
     else:        
@@ -740,17 +739,17 @@ def main(args) -> None:
 
             # ---------- forward + Viterbi on semi‑CRF -----------------
             if args.mode == "unary":
-                log_a, map_a, best_lens = semi_crf_dp_and_map(out, N, gamma=args.gamma)
+                log_a, map_a, best_lens = semi_crf_dp_and_map(out, N)
                 best_seg = backtrace_map_segmentation(best_lens, N)
                 attn_stack = torch.stack([attn_scores[start][end-start] for start, end in best_seg], axis=0)
                 attn_agg = attn_stack.mean(axis=0)            
             elif args.mode == "binary":
-                log_alpha, map_alpha, backpointer = semi_crf_dp_and_map_2d(unary_out, edge_out, N, args.max_seg_len, args.gamma)
+                log_alpha, map_alpha, backpointer = semi_crf_dp_and_map_2d(unary_out, edge_out, N, args.max_seg_len)
                 best_seg = backtrace_map_segmentation_2d(backpointer, map_alpha, N)
                 attn_stack = torch.stack([unary_attn_scores[start][end-start] for start, end in best_seg], axis=0)
                 attn_agg = attn_stack.mean(axis=0)                                            
             else:
-                dp_inside, dp_map, backptr = hierarchical_inside_and_map(unary_out, edge_out, N, args.max_seg_len, args.gamma)
+                dp_inside, dp_map, backptr = hierarchical_inside_and_map(unary_out, edge_out, N, args.max_seg_len)
                 best_tree = backtrace_hierarchy(backptr, 0, N)
                 logging.info("best tree", best_tree)
             
@@ -810,10 +809,14 @@ def main(args) -> None:
                 best_dp = dp_map[0, N]
                 prob = torch.exp(best_dp - logZ).item()
             logging.info(f"epoch {epoch} idx {idx} prob {prob}")
-            if prob > 0.5:   # arbitrary threshold for visualisation
+            if args.vis_idxes and idx in args.vis_idxes and prob > 0.5:   # arbitrary threshold for visualisation
                 path = Path(os.path.join(args.save_dir, f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"))
                 attn_path = path.with_name(path.stem + "_attn" + path.suffix)
-                t.visualize(path, vis_dihedral=False)
+                if args.mode in ["unary", "binary"]:
+                    title = f"best_seg: {best_seg}"
+                else:
+                    title = None
+                t.visualize(path, vis_dihedral=False, bbox_inches="tight", vis_bond_angle=False, title=title)
                 plot_feature_importance(attn_agg.detach().cpu().numpy(), obj.aggregator.per_res_labels, attn_path)
                 if args.mode == "recursive":
                     path = Path(os.path.join(args.save_dir, f"epoch={epoch}_idx={idx}_p={prob:.3f}.png"))

@@ -621,7 +621,7 @@ class SemiCRFModel(nn.Module):
                     enc_score = 0.0
 
                 # total score + length bias
-                out[i][l] += enc_score + self.gamma * l
+                out[i][l] += enc_score - self.gamma
 
         return out, attn_out
 
@@ -831,39 +831,41 @@ class SemiCRF2DModel(SemiCRFModel):
                     index += 1
        
         # b) compute descr_scores
-        for i in range(L):
-            max_l = min(self.max_seg_len, L - i)
-            for l in range(1, max_l + 1):
-                j = i + l
-                fp = feats['fps'][(i, j)]
-                fp = torch.as_tensor(fp, dtype=torch.float32).to(self.device)
-                descr_score = self.zernike_projector(fp)
-                # total score + length bias
-                unary_out[i][l] += descr_score.squeeze()
+        if self.config["fps"]["enabled"]:
+            for i in range(L):
+                max_l = min(self.max_seg_len, L - i)
+                for l in range(1, max_l + 1):
+                    j = i + l
+                    fp = feats['fps'][(i, j)]
+                    fp = torch.as_tensor(fp, dtype=torch.float32).to(self.device)
+                    descr_score = self.zernike_projector(fp)
+                    # total score
+                    unary_out[i][l] += descr_score.squeeze()
 
-        for i in range(L):
-            max_l2 = min(self.max_seg_len, L - i)
-            for l2 in range(1, max_l2 + 1):
-                max_l1 = min(self.max_seg_len, i)
-                for l1 in range(1, max_l1 + 1):
-                    foldseek = feats['foldseek'][(i, l1, l2)]
-                    foldseek = torch.as_tensor(foldseek, dtype=torch.float32).to(self.device)
-                    foldseek = self.seg_pair_aggregator(foldseek)
-                    descr_score = self.foldseek_projector(foldseek)
-                    edge_out[i][l1][l2] += descr_score.squeeze()
+        if self.config["foldseek"]["enabled"]:
+            for i in range(L):
+                max_l2 = min(self.max_seg_len, L - i)
+                for l2 in range(1, max_l2 + 1):
+                    max_l1 = min(self.max_seg_len, i)
+                    for l1 in range(1, max_l1 + 1):
+                        foldseek = feats['foldseek'][(i, l1, l2)]
+                        foldseek = torch.as_tensor(foldseek, dtype=torch.float32).to(self.device)
+                        foldseek = self.seg_pair_aggregator(foldseek)
+                        descr_score = self.foldseek_projector(foldseek)
+                        edge_out[i][l1][l2] += descr_score.squeeze()
 
         # c) add length bias
         for i in range(L):
             max_l = min(self.max_seg_len, L - i)
             for l in range(1, max_l + 1):
-                unary_out[i][l] += self.gamma * l
+                unary_out[i][l] -= self.gamma
 
         for i in range(L):
             max_l2 = min(self.max_seg_len, L - i)
             for l2 in range(1, max_l2 + 1):
                 max_l1 = min(self.max_seg_len, i)
                 for l1 in range(1, max_l1 + 1):
-                    edge_out[i][l1][l2] += self.gamma * (l1+l2)
+                    edge_out[i][l1][l2] -= self.gamma
 
         return unary_out, unary_attn_out, edge_out, edge_attn_out
 
