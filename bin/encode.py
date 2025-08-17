@@ -157,6 +157,9 @@ def parse_args():
     parser.add_argument("--num-vis", type=int, default=3, help="number of examples to visualize")
     # hparams
     parser.add_argument("--res-init", type=str2bool, default=False, help="base token type, residue vs bond (default bond)")
+    parser.add_argument("--free-bonds", type=str2bool, default=False, help="whether to not standardize bond lengths")
+    parser.add_argument("--rmsd-super-res", type=str2bool, default=False, help="whether to resolve structures every new rmsd key")
+    parser.add_argument("--rmsd-only", type=str2bool, default=False, help="whether to not set rmsd keys")
     parser.add_argument("--bin-strategy", help="how to bin values", default="histogram", choices=["histogram", "histogram-cover", "uniform"])
     parser.add_argument("--bins", type=str2dict, help=":-separated number of bins per size step, example: 1-100:10-10 means 100 bins from token size 1 to 9, 10 bins from 10 onwards", default="1-10")
     parser.add_argument("--sec", type=str2bool, default=False, help="whether to compute sec structures to guide token discovery")
@@ -190,7 +193,7 @@ def parse_args():
     # Post‐parse validation
     # if args.p_min_size == 0 and args.bins != {1: 1}:
     #     parser.error("--bins must be '1-1' when --p-min-size is 0")
-    if args.vis and args.num_vis > args.num_ref:
+    if args.vis and args.num_ref and args.num_vis and args.num_vis > args.num_ref:
         parser.error(f"num-ref={args.num_ref} must be >= num-vis={args.num_vis}")
     return args
 
@@ -230,8 +233,8 @@ def main():
         validate_args_match(
             current   = args,
             loaded    = loaded_args,
-            skip      = ["auto", "ckpt_dir", "vis"],   # fields you don’t need to compare
-        )
+            skip      = ["auto", "save_dir", "vis"],   # fields you don’t need to compare
+        )        
     else:
         with open(args_path, "w") as f:
             for arg_name, arg_value in sorted(args.__dict__.items()):
@@ -265,14 +268,18 @@ def main():
     if _iter > -1:
         logger.info(f"loading {ckpt} at iter={_iter}")        
         bpe = pickle.load(open(ckpt, 'rb'))
-        if os.path.exists(ref_path):
-            ref_coords = np.load(ref_path, allow_pickle=True)
-        else:
-            ref_coords = None
+        N = len(bpe.tokenizers)    
+        num_vis = min(N, args.num_vis) if args.num_vis else N        
+        ref_coords = np.load(ref_path, allow_pickle=True)
+        num_ref = len(ref_coords)
         xlims, ylims, zlims = map(lambda t: list(map(tuple, t)), tuple(np.load(lims_path)))        
+        if args.save_dir != bpe.save_dir:
+            logger.info(f"resetting save_dir from {bpe.save_dir} to {args.save_dir}")
+            bpe.save_dir = args.save_dir
     else:
         init_bpe_path = os.path.join(args.save_dir, f'bpe_init.pkl')
         post_init_bpe_path = os.path.join(args.save_dir, f'bpe_post_init.pkl')
+        pre_init_glue_opt_path = os.path.join(args.save_dir, f'bpe_pre_glue_opt.pkl')
         if Path(init_bpe_path).exists():
             print(f"loading {init_bpe_path}")
             bpe = pickle.load(open(init_bpe_path, "rb"))
@@ -298,24 +305,34 @@ def main():
                     bin_strategy=args.bin_strategy, 
                     save_dir=args.save_dir, 
                     rmsd_partition_min_size=args.p_min_size, 
+                    rmsd_super_res=args.rmsd_super_res,
+                    rmsd_only=args.rmsd_only,
                     num_partitions=args.num_p,
                     max_num_strucs=args.max_num_strucs,
                     compute_sec_structs=args.sec, 
                     plot_iou_with_sec_structs=args.sec_eval,                  
                     res_init=args.res_init,
+                    std_bonds=not args.free_bonds,
                     glue_opt=args.glue_opt,
                     glue_opt_prior=args.glue_opt_prior,
                     glue_opt_method=args.glue_opt_method)
+                    
             pickle.dump(bpe, open(init_bpe_path, 'wb+'))
+
+        N = len(bpe.tokenizers)    
+        num_vis = min(N, args.num_vis) if args.num_vis else N
         if Path(ref_path).exists():
             ref_coords = np.load(ref_path, allow_pickle=True)
+            num_ref = len(ref_coords)
         else:
-            ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(min(N, args.num_ref))]
+            num_ref = min(N, args.num_ref) if args.num_ref else N
+            ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(num_ref)]
             np.save(ref_path, ref_coords)
-        xlims = [None for _ in range(args.num_vis)]
-        ylims = [None for _ in range(args.num_vis)]
-        zlims = [None for _ in range(args.num_vis)]
-        for ind in range(args.num_vis):
+        
+        xlims = [None for _ in range(num_vis)]
+        ylims = [None for _ in range(num_vis)]
+        zlims = [None for _ in range(num_vis)]
+        for ind in range(num_vis):
             visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter=-1.png")
             res = bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False)
             xlims[ind], ylims[ind], zlims[ind] = tuple(res) # for later        
@@ -324,9 +341,15 @@ def main():
             print(f"loading {post_init_bpe_path}")
             bpe = pickle.load(open(post_init_bpe_path, "rb"))
         else:
-            bpe.initialize()
+            if os.path.exists(pre_init_glue_opt_path):
+                print(f"loading {pre_init_glue_opt_path}")
+                bpe = pickle.load(open(pre_init_glue_opt_path, "rb"))
+            else:
+                bpe.initialize(path=os.path.join(args.save_dir, "hist_plot.png"))
+                pickle.dump(bpe, open(pre_init_glue_opt_path, "wb+"))
+            bpe.glue_opt_all()
             pickle.dump(bpe, open(post_init_bpe_path, 'wb+'))
-        for ind in range(args.num_vis):
+        for ind in range(num_vis):
             visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter=init.png")
             bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False, xlim=xlims[ind], ylim=ylims[ind], zlim=zlims[ind])
         bpe.bin()    
@@ -334,13 +357,13 @@ def main():
             bpe_debug = BPE(dataset.structures, bins=args.bins, save_dir=args.save_dir)
             bpe_debug.initialize()
             bpe_debug.old_bin()
-    N = len(bpe.tokenizers)
-    vis_paths = [[] for _ in range(args.num_vis)]    
+    
+    vis_paths = [[] for _ in range(num_vis)]    
     for t in range(_iter+1, 10000):
         ## visualization        
         if args.vis and t in list(range(0,10)) + list(range(10,100,10)) + list(range(100, 1000, 100)) + list(range(1000,10000,1000)):
             # Save current visualization.
-            for ind in range(args.num_vis):
+            for ind in range(num_vis):
                 visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter={t}.png")
                 bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False, xlim=xlims[ind], ylim=ylims[ind], zlim=zlims[ind])
                 vis_paths[ind].append(visual_path)            
@@ -355,24 +378,35 @@ def main():
                 except ValueError:
                     print(f"frames have different sizes")
         bpe.step()
-        for ind in range(args.num_vis):
+        for ind in range(num_vis):
             bpe.tokenizers[ind].bond_to_token.tree.visualize(os.path.join(args.save_dir, f'tokens_{ind}_iter={t}.png'), horizontal_gap=0.5, font_size=6)
         if t % args.save_every == 0:
-            # save
-            pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_iter={t}.pkl'), 'wb+'))
-            pickle.dump(bpe.tokenizers[:args.num_ref], open(os.path.join(args.save_dir, f'bpe_iter={t}_ref.pkl'), 'wb+'))
+            # save            
+            pickle.dump(bpe.tokenizers[:num_ref], open(os.path.join(args.save_dir, f'ref_tokenizers={t}.pkl'), 'wb+'))
+            # stats
+            stats_path = os.path.join(args.save_dir, f'stats={t}.json')
+            json.dump(
+                {
+                    "K": len(bpe._tokens),
+                    "L": np.mean([len(t.bond_to_token) for t in bpe.tokenizers])
+                },
+                open(stats_path, "w+")
+            )
             time_path = os.path.join(args.save_dir, f"times_iter={t}.png")            
             bpe.plot_times(time_path)
             if bpe.plot_iou_with_sec_structs:
                 iou_path = os.path.join(args.save_dir, f"iou_iter={t}.png")
                 bpe.plot_iou(iou_path)
+            # finally dump the iter
+            pickle.dump(bpe, open(os.path.join(args.save_dir, f'bpe_iter={t}.pkl'), 'wb+'))                
         if t % args.plot_every == 0:
             run_path = os.path.join(args.save_dir, f"run_iter={t}.png")
             if ref_coords is not None:
-                plot(bpe, ref_coords, 
-                    Path(args.save_dir).name,
-                    run_path, 
-                    prev_iter=(t-args.plot_every) if t else 0,
+                plot(bpe,
+                    len(bpe._tokens),
+                    ref_coords,
+                    run_path,
+                    prev_iter=(t-args.plot_every),
                     no_iters=t, 
                     step_iter=args.save_every, 
                     ratio=N/1000)

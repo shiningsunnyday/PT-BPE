@@ -8,6 +8,7 @@ from typing import Optional, Sequence, Union
 import pickle
 from copy import deepcopy
 import numpy as np
+import json
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as PathEffects
@@ -252,27 +253,32 @@ def equal_count_bin_edges(values, n_bins):
     return edges
 
 
-def save_circular_histogram_equal_counts(angles, path=None, bins=10, title=None):
+def save_histogram_equal_counts(angles, circular=True, path=None, bins=10, title=None):
     angles = np.asarray(angles)
-    # map from [-π,π] → [0,2π)
-    angles = (angles + 2*np.pi) % (2*np.pi)
+    if circular:
+        # map from [-π,π] → [0,2π)
+        angles = (angles + 2*np.pi) % (2*np.pi)
 
     # get variable-width edges so each bin has ~equal count
     edges = equal_count_bin_edges(angles, bins)
     counts, _   = np.histogram(angles, bins=edges)
     widths      = np.diff(edges)
     centers     = edges[:-1] + widths/2
+    default_title = "Circular Histogram (Equal‑Count Bins)" if circular else "Histogram (Equal-Count Bins)"
 
     if path is not None:            
-        fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
-        ax.bar(centers, counts, width=widths, bottom=0.0, edgecolor='black', align='center')
-        ax.set_title(title or "Circular Histogram (Equal‑Count Bins)")
+        if circular:
+            fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
+        else:
+            fig, ax = plt.subplots()
+        ax.bar(centers, counts, width=widths, bottom=0.0, edgecolor='black', align='center')        
+        ax.set_title(title or default_title)
         plt.savefig(path, bbox_inches='tight')
         plt.close()
     return edges[:-1], edges[1:], widths, counts
 
 
-def save_circular_histogram(angles, path=None, bins=10, title=None, cover=False):
+def save_histogram(angles, circular=True, path=None, bins=10, title=None, cover=False):
     """
     Creates a circular (rose) histogram from a list of angle values (in radians, range -pi to pi)
     and saves the figure at the specified file path.
@@ -284,16 +290,23 @@ def save_circular_histogram(angles, path=None, bins=10, title=None, cover=False)
     """
     # Convert angles from [-pi, pi] to [0, 2*pi]
     angles = np.array(angles)
-    angles = (angles + 2*np.pi) % (2*np.pi)    
-    counts, bin_edges = np.histogram(angles, bins=bins, range=(0, 2*np.pi) if cover else None)
+    if circular:
+        angles = (angles + 2*np.pi) % (2*np.pi)
+        counts, bin_edges = np.histogram(angles, bins=bins, range=(0, 2*np.pi) if cover else None)
+    else:
+        counts, bin_edges = np.histogram(angles, bins=bins)
     widths = np.diff(bin_edges)
     bin_centers = bin_edges[:-1] + widths / 2
+    default_title = "Circular Histogram (Rose Diagram)" if circular else "Histogram (Rose Diagram)"
     if path is not None:
         # Create a polar subplot
-        fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})    
+        if circular:
+            fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})    
+        else:
+            fig, ax = plt.subplots()
         # Create a bar plot for each bin in the polar coordinate system
         ax.bar(bin_centers, counts, width=widths, bottom=0.0, edgecolor='black', align='center')    
-        ax.set_title(title if title else "Circular Histogram (Rose Diagram)")
+        ax.set_title(title if title else default_title)
         plt.savefig(path, bbox_inches='tight')
         print("Histogram saved at", os.path.abspath(path))
         plt.close()
@@ -359,53 +372,57 @@ def column_fill(handles, labels, ncol):
 
 
 
-def plot(bpe, ref_coords, d, output_path, no_iters=500, prev_iter=0, step_iter=10, ratio=1, num_random_baseline=10):    
-    if prev_iter:
-        prev_path = Path(output_path).parent / f"run_iter={prev_iter}.txt"
+def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, step_iter=10, ratio=1, num_random_baseline=10, total_ticks=20):
+    N = len(bpe.tokenizers)
+    d = Path(output_path).parent
+    if prev_iter >= 0:
+        prev_path = d / f"run_iter={prev_iter}.npy"
         print(f"loading prev_path: {prev_path}")
         prev = np.load(prev_path)
-        Ks, Ls, errs = map(list, tuple(prev))
+        Ks, Ls, errs = map(list, tuple(prev))       
+        start_iter = prev_iter+step_iter 
     else:
         Ks, Ls, errs = [], [], []
-    for t in range(prev_iter, no_iters+1, step_iter):
-        path = f'./ckpts/{d}/bpe_iter={t}_ref.pkl'
+        tokenizers = bpe.tokenizers[:len(ref_coords)]
+        start_iter = 0
+    for t in range(start_iter, no_iters+1, step_iter):
+        path = f'{d}/ref_tokenizers={t}.pkl'
+        stats_path = f'{d}/stats={t}.json'
         if not os.path.exists(path):
             break
         tokenizers = pickle.load(open(path, 'rb'))
-        usage = [len(t.bond_to_token) for t in tokenizers]
+        assert len(tokenizers) == len(ref_coords)
+        stats = json.load(open(stats_path))
+        Ks.append(stats["K"])
+        Ls.append(stats["L"])
         cur_coords = []
         for i in range(len(ref_coords)):
             coord = tokenizers[i].compute_coords()
             assert ref_coords[i].shape == coord.shape
             cur_coords.append(coord)
-        K = len(bpe._tokens)
-        L = np.mean(usage)
         errors = [compute_rmsd(cur_coords[i], ref_coords[i]) for i in tqdm(range(len(ref_coords)))]
         err = np.mean(errors)
         errs.append(err)
-        Ks.append(K)
-        Ls.append(L)
-
-    np.save(Path(output_path).with_suffix(".txt"), [Ks, Ls, errs])
+    # cache
+    cur_path = d / f"run_iter={no_iters}.npy"
+    np.save(Path(output_path).with_suffix(".npy"), [Ks, Ls, errs])
     final_iter = t+1        
     # add a permutation test baseline
-    # sample num_random_baseline random permutations
-    ref_ts = bpe.tokenizers[:len(ref_coords)]
+    # sample num_random_baseline random permutations    
     ref_errs = []    
     for k in tqdm(range(num_random_baseline), "random angles baseline"):
         for key in ["tau","CA:C:1N","C:1N:1CA"]+["psi","omega","phi"]:
             bin_c = np.array(bpe._bin_counts[1][key])
             threshs = bpe._thresholds[1][key]
             keep_nan_resample_val = lambda val: np.random.uniform(*threshs[np.random.choice(len(bin_c), p=bin_c/bin_c.sum())]) if val==val else val
-            for t in ref_ts:
+            for t in tokenizers:
                 randvals = t.angles_and_dists[key].map(keep_nan_resample_val)
                 t.angles_and_dists[key] = randvals
         alt_coords = []        
-        errors = [compute_rmsd(ref_ts[i].compute_coords(), ref_coords[i]) for i in tqdm(range(len(ref_coords)))]
+        errors = [compute_rmsd(tokenizers[i].compute_coords(), ref_coords[i]) for i in tqdm(range(len(ref_coords)))]
         ref_errs.append(np.mean(errors))
     ref_err = np.mean(ref_errs)
 
-    N = len(bpe.tokenizers)    
     Ks = np.array(Ks)
     Ls = np.array(Ls)
     errs = np.array(errs)
@@ -423,6 +440,9 @@ def plot(bpe, ref_coords, d, output_path, no_iters=500, prev_iter=0, step_iter=1
             marker='o',
             label="L vs K",
             linewidth=2)
+
+    # keep around total_ticks x-ticks
+    skip = (len(Ks)+total_ticks-1)//(total_ticks)    
     # annotate intersection
     diff = np.abs(Ls - Ks/ratio)
     idx  = np.argmin(diff)        # index of closest approach
@@ -442,9 +462,13 @@ def plot(bpe, ref_coords, d, output_path, no_iters=500, prev_iter=0, step_iter=1
         arrowprops=dict(arrowstyle="->", color="orange"),
         color="orange"
     )
-    ax1.set_xlabel("K (Vocab Size) Each Round")
-    ax1.set_ylabel("L (#Motif-Tokens Per PDB)")
-    ax1.set_xticks(Ks)
+    if skip == 1:
+        ax1.set_xlabel("K (Vocab Size) Every Round")
+        ax1.set_xticks(Ks)
+    else:
+        ax1.set_xlabel(f"K (Vocab Size) Every {skip} Rounds")
+        ax1.set_xticks(Ks[0::skip])
+    ax1.set_ylabel("L (#Motif-Tokens Per PDB)")    
     # create a second y-axis for errors
     ax2 = ax1.twinx()
     ax2.plot(Ks, errs,
@@ -697,7 +721,7 @@ def plot_backbone(coords, output_path, atom_types, tokens=None, title="", zoom_f
         loc='upper left')
     plt.subplots_adjust(right=0.50)
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches=bbox_inches)
+    plt.savefig(output_path, bbox_inches=bbox_inches)
     plt.close(fig)
     print("Backbone plot saved to:", output_path)
     return xlim, ylim, zlim
@@ -723,43 +747,6 @@ def plot_times(times):
     # Label the axes
     
     return fig, ax
-
-
-def save_histogram(values, path, bins=10, title="", return_ax=False):
-    """
-    Creates a histogram from a list of values and saves it to the specified file path.
-    
-    Parameters:
-        values (list or array-like): The numerical values to plot.
-        path (str): The file path where the figure will be saved.
-        bins (int, optional): Number of bins for the histogram. Defaults to 10.
-        title (str, optional): Title for the histogram. Defaults to "Histogram" if not provided.
-        return_ax (bool, optional): If True, returns the matplotlib Axes object. Defaults to False.
-    
-    Returns:
-        ax (matplotlib.axes.Axes): The Axes object (only if return_ax is True).
-    """
-    # Create a figure and an axes.
-    fig, ax = plt.subplots()
-    
-    # Plot histogram using the axes object.
-    ax.hist(values, bins=bins, edgecolor='black')
-    
-    # Set title, xlabel, and ylabel.
-    if title:
-        ax.set_title(title)
-    else:
-        ax.set_title("Histogram")
-    ax.set_xlabel("Value")
-    ax.set_ylabel("Frequency")
-        
-    # Return the axes if requested; otherwise, close the figure.
-    if return_ax:
-        return fig, ax
-    else:
-        # Save the figure.
-        fig.savefig(path)        
-        plt.close(fig)
 
 
 def sorted_bar_plot(values, title="Sorted Bar Plot", ylabel="Value", save_path=None):

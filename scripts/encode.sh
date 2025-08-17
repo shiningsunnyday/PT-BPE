@@ -22,27 +22,33 @@ runner="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff/bin/python"
 
 if [ $1 -eq 1 ]; then
   echo "debug"
+  export SLURM_CPUS_PER_TASK=0
   runner="${runner} -m pdb -c continue"
 fi
 
 toy=$2
-data_dir=$3
+num_ref=$3
+num_vis=$4
+data_dir=$5
 pad="512"
-bins=$4
-bin_strat=$5
+bins=$6
+bin_strat=$7
 sec="False"
 vis="True"
 res_init="True"
-save_every=$6
-plot_every=$7
-p_size=$8
-num_p=$9
-max_num_strucs=${10}
-glue_opt=${11}
-glue_opt_method=${12}
+save_every=$8
+plot_every=$9
+rmsd_only=${10}
+p_size=${11}
+num_p=${12}
+max_num_strucs=${13}
+glue_opt=${14}
+glue_opt_method=${15}
+free_bonds=${16}
+rmsd_super_res=${17}
 
-if [ -n "${13}" ]; then
-  extra="--save-dir ${13}"
+if [ -n "${18}" ]; then
+  extra="--save-dir ${18}"
 else
   extra="--auto"
 fi
@@ -53,6 +59,7 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --bin-strategy $bin_strat \
   --bins $bins \
   --res-init $res_init \
+  --free-bonds $free_bonds \
   --sec $sec \
   --vis $vis \
   --data-dir $data_dir \
@@ -62,7 +69,11 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --pad $pad \
   --toy $toy \
   --p-min-size $p_size \
+  --rmsd-only $rmsd_only \
+  --rmsd-super-res $rmsd_super_res \
   --num-p $num_p \
+  --num-vis $num_vis \
+  --num-ref $num_ref \
   --max-num-strucs $max_num_strucs \
   --glue-opt $glue_opt \
   --glue-opt-method $glue_opt_method \

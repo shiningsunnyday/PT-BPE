@@ -29,6 +29,7 @@ class Tokenizer:
                 dtype=object
             )
         self._angles_and_dists = structure['angles'] # controls coords
+        self._angles_and_dists_orig = deepcopy(structure['angles']) # controls coords
         self._coords = structure['coords']
         self.beta_coords = structure['c_beta']
         idxes = structure['full_idxes']
@@ -127,13 +128,13 @@ class Tokenizer:
             self.reps[t] = np.mean(self.reps[t])
 
 
-    def _bond_length(self, idx):
+    def _bond_length(self, idx, orig=False):
         if idx == 0:
             return self._init_n_ca            
         elif idx == 1:
             return self._init_ca_c            
         else:
-            return self._angles_and_dists[Tokenizer.BOND_TYPES[idx%3]][(idx-2)//3]
+            return (self._angles_and_dists_orig if orig else self._angles_and_dists)[Tokenizer.BOND_TYPES[idx%3]][(idx-2)//3]
         
     def _set_bond_length(self, idx, value):
         if idx == 0:
@@ -144,12 +145,12 @@ class Tokenizer:
             # max is idx=3*n-2, which is .iloc[n-2], idx=3*n-1 would be n-1
             self._angles_and_dists[Tokenizer.BOND_TYPES[idx%3]].iloc[(idx-2)//3] = value
     
-    def _bond_angle(self, idx):
+    def _bond_angle(self, idx, orig=False):
         if idx == 0:
             return self._init_bond_angle
         else:
             # max is idx=3*n-3, which is 3*n-4 or n-2
-            return self._angles_and_dists[Tokenizer.BOND_ANGLES[idx%3]][(idx-1)//3]
+            return (self._angles_and_dists_orig if orig else self._angles_and_dists)[Tokenizer.BOND_ANGLES[idx%3]][(idx-1)//3]
     
     def _set_bond_angle(self, idx, value):
         if idx == 0:
@@ -157,15 +158,15 @@ class Tokenizer:
         else:
             self._angles_and_dists[Tokenizer.BOND_ANGLES[idx%3]].iloc[(idx-1)//3] = value
         
-    def _dihedral_angle(self, idx):
+    def _dihedral_angle(self, idx, orig=False):
         # max is idx=3*n-4, which is (3*n-3)//3=n-1
-        return self._angles_and_dists[Tokenizer.DIHEDRAL_ANGLES[idx%3]][(idx+1)//3]
+        return (self._angles_and_dists_orig if orig else self._angles_and_dists)[Tokenizer.DIHEDRAL_ANGLES[idx%3]][(idx+1)//3]
 
     def _set_dihedral_angle(self, idx, value):
         # max is idx=3*n-4, which is (3*n-3)//3=n-1
         self._angles_and_dists[Tokenizer.DIHEDRAL_ANGLES[idx%3]].iloc[(idx+1)//3] = value
 
-    def token_geo(self, idx, l):
+    def token_geo(self, idx, l, orig=False):
         """
         Here we want the geometry of bonds idx:idx+l
         To standardize, we always use the dists and angles representation
@@ -179,6 +180,7 @@ class Tokenizer:
             a) no dihedrals for first phi,psi,omega angles
             b) no tau, CA:C:1N, C:1N:CA for first angles
             c) no bond lengths for first N:CA, CA:C bonds
+        orig: whether to use the original copy (angles_and_dists_orig)
         """
         if idx+l-1 > 3*self.n-1: 
             raise ValueError(f"idx+l cannot exceed {3*self.n-1}")
@@ -186,21 +188,21 @@ class Tokenizer:
         # Bond dists
         for j in range(idx, idx+l):
             bt = Tokenizer.BOND_TYPES[j%3]
-            ans[bt] = ans.get(bt, []) + [self._bond_length(j)]
+            ans[bt] = ans.get(bt, []) + [self._bond_length(j, orig=orig)]
         # Bond angles
         for j in range(idx, idx+l-1):
             # bond j to j+1
             ang = Tokenizer.BOND_ANGLES[j%3]
-            ans[ang] = ans.get(ang, []) + [self._bond_angle(j)]
+            ans[ang] = ans.get(ang, []) + [self._bond_angle(j, orig=orig)]
         # Dihedral angles
         for j in range(idx, idx+l-2):
             # dihedral around j+1, aka between plane formed by bonds j,j+1 and j+1,j+2
             di = Tokenizer.DIHEDRAL_ANGLES[j%3]
-            ans[di] = ans.get(di, []) + [self._dihedral_angle(j)]
+            ans[di] = ans.get(di, []) + [self._dihedral_angle(j, orig=orig)]
         return ans
     
     def visualize_bonds(self, i1, length, output_path, **kwargs):
-        coords = self.compute_coords(i1, length)
+        coords = self.compute_coords(i1, length, orig=kwargs.pop("orig", False))
         # ATOM_TYPES[i1%3], ATOM_TYPES[i1%3+1], ..., ATOM_TYPES[i1%3+length]
         bts = [Tokenizer.ATOM_TYPES[(i1%3+i)%3] for i in range(length+1)]
         plot_backbone(coords, output_path, bts, title=f"{Path(self.fname).stem} bonds {i1}-{i1+length-1}", zoom_factor=1.0, **kwargs)
@@ -275,6 +277,10 @@ class Tokenizer:
     @property
     def angles_and_dists(self):
         return self._angles_and_dists
+    
+    @property
+    def angles_and_dists_orig(self):
+        return self._angles_and_dists_orig
     # plot_backbone([N_INIT,CA_INIT,C_INIT],'/n/home02/msun415/foldingdiff/test_before.png')
     # plot_backbone(list(update_backbone_positions(N_INIT, CA_INIT, C_INIT, geo['CA:C'][0], geo['N:CA'][0], 0.0)),'/n/home02/msun415/foldingdiff/test_after_after.png')
     @staticmethod
@@ -308,7 +314,7 @@ class Tokenizer:
         return nerf
     
 
-    def compute_coords(self, index=0, length=float("inf")):
+    def compute_coords(self, index=0, length=float("inf"), orig=False):
         """
         Compute coords for length atoms from position index
         We call token_geo to get the angular information
@@ -320,7 +326,7 @@ class Tokenizer:
         end = 3*(((index+length-1)+1)//3)+1 # end bond id, but we round it up so it's 1 (mod 3)
         off_start = index-start
         off_end = end-(index+length-1)
-        geo = self.token_geo(start, end-start+1) # round from nearest residues
+        geo = self.token_geo(start, end-start+1, orig=orig) # round from nearest residues
         geo_nerf = Tokenizer.geo_nerf(geo)
         # assert np.all(nerf.cartesian_coords == geo_nerf)
         coords = geo_nerf.cartesian_coords
@@ -422,7 +428,7 @@ class Tokenizer:
     def exit_frame(self, idx, length, ret_all=False):
         """
         Begin building coords from residue before idx
-        Return exit frame of final residue (that idx+length belongs to)
+        Return exit frame of final residue (that idx+length belongs to)        
         """
         if idx % 3:
             raise ValueError(f"idx={idx} has to be start of residue")

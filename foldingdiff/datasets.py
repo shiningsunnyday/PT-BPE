@@ -34,6 +34,7 @@ REPEAT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/repeat"
 CATINT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/activesite"
 CATBIO_DIR = LOCAL_DATA_DIR / "struct_token_bench/biolip2/catalytic"
 CONSERVED_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/conserved"
+PRETRAIN_DIR = LOCAL_DATA_DIR / "vqvae_pretrain/train"
 
 from foldingdiff import beta_schedules
 from foldingdiff.angles_and_coords import (
@@ -371,6 +372,8 @@ class CathCanonicalAnglesDataset(Dataset):
                 fnames = glob.glob(os.path.join(CATBIO_DIR, "*.pdb"))
             elif pdbs == "conserved":
                 fnames = glob.glob(os.path.join(CONSERVED_DIR, "*.pdb"))
+            elif pdbs == "pretrain":
+                fnames = glob.glob(os.path.join(PRETRAIN_DIR, "*.pdb"))
             else:
                 raise ValueError(f"Unknown pdb set: {pdbs}")
         # for debug

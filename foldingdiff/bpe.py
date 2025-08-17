@@ -31,7 +31,10 @@ class BPE():
         compute_sec_structs=False, 
         plot_iou_with_sec_structs=False,
         res_init=False,
+        std_bonds=True,
         rmsd_partition_min_size=4,
+        rmsd_super_res=False,
+        rmsd_only=False,
         num_partitions=3,
         max_num_strucs=500,
         glue_opt=False,
@@ -54,7 +57,8 @@ class BPE():
         self.compute_sec_structs = compute_sec_structs
         self.plot_iou_with_sec_structs = plot_iou_with_sec_structs
         self.rmsd_partition_min_size = rmsd_partition_min_size
-        self.rmsd_only = rmsd_partition_min_size == 0
+        self.rmsd_super_res = rmsd_super_res
+        self.rmsd_only = rmsd_only
         self.glue_opt = glue_opt
         self.glue_opt_prior = glue_opt_prior
         self.glue_opt_method = glue_opt_method
@@ -64,6 +68,7 @@ class BPE():
             self.num_partitions = num_partitions
         self.max_num_strucs = max_num_strucs
         self.res_init = res_init
+        self.std_bonds = std_bonds
         self.bins = bins
         self.bin_strategy = bin_strategy
         print(self.bin_strategy)
@@ -89,6 +94,34 @@ class BPE():
             self._init_tokens()        
             logger.info(f"_init_tokens took {time.perf_counter()-start_time}")
         logger.info(f"Initialize finish")
+    
+
+    def glue_opt_all(self):
+        logger.info("Glue opt all start")
+        max_workers = _effective_cpus()
+        if max_workers == 0:
+            global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
+            BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior
+            self.tokenizers = [BPE._opt_glue_worker(t, 3*t.n-4) for t in self.tokenizers]
+        else:
+            pool  = ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=BPE._init_opt_glue_worker,
+                initargs=(self._bin_centers, self._thresholds, self.glue_opt_prior)
+            )
+            futures = {
+                pool.submit(
+                    BPE._opt_glue_worker,
+                    t,                # cheap to serialise
+                    3*t.n - 4
+                ): idx
+                for idx, t in enumerate(self.tokenizers)
+            }
+            for future in tqdm(as_completed(futures), total=len(futures),
+                        desc="optimizing all glues"):
+                idx = futures.pop(future)
+                self.tokenizers[idx] = future.result()        
+        logger.info("Glue opt all finish")
 
 
     def _init_res_tokens(self):
@@ -98,24 +131,42 @@ class BPE():
         self._tokens = {}
         label_dict = {}
         res_geo = defaultdict(list)   
-        binned_bonds = [self._bin_val({Tokenizer.BOND_TYPES[i]: [0]} ) for i in range(3)]
         max_workers = _effective_cpus()
-        with ProcessPoolExecutor(
-            max_workers=max_workers,
-            initializer=BPE._init_set_bond_length_worker,
-            initargs=(binned_bonds,)
-        ) as pool:
-            futures = {
-                pool.submit(
-                    BPE._set_bond_length_worker, t
-                ): idx
-                for idx, t in enumerate(self.tokenizers)
-            }
+        super_res = self.rmsd_super_res if hasattr(self, "rmsd_super_res") else False
 
-        for future in tqdm(as_completed(futures), total=len(futures),
-                    desc="standardizing bond lengths"):
-            idx = futures.pop(future)
-            self.tokenizers[idx] = future.result()
+        if getattr(self, "std_bonds", True):
+            lookup = self._thresholds
+        else:
+            lookup = self._thresholds[1]
+        
+        relv_thresholds = {bt: lookup[bt] for bt in lookup if bt in Tokenizer.BOND_TYPES}
+        
+        # binned_bonds = [self._bin_val({Tokenizer.BOND_TYPES[i]: [0]}) for i in range(3)]
+        if max_workers == 0: # debug
+            global RELV_THRESHOLDS, STD_BONDS
+            RELV_THRESHOLDS, STD_BONDS = relv_thresholds, getattr(self, "std_bonds", True)
+            self.tokenizers = [BPE._set_bond_length_worker(t) for t in self.tokenizers]
+        else:
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=BPE._init_set_bond_length_worker,
+                initargs=(relv_thresholds,)
+            ) as pool:
+                futures = {
+                    pool.submit(
+                        BPE._set_bond_length_worker, t
+                    ): idx
+                    for idx, t in enumerate(self.tokenizers)
+                }
+            for future in tqdm(as_completed(futures), total=len(futures),
+                        desc="standardizing bond lengths"):
+                idx = futures.pop(future)
+                self.tokenizers[idx] = future.result()
+        
+        if self.glue_opt and self.glue_opt_method == "all":
+            for idx, t in enumerate(self.tokenizers):
+                R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
+                t.cached_all_frames = (R_occs, t_occs)
         
         for ti, t in tqdm(enumerate(self.tokenizers), desc="iterating over residue geos"):
             # update binned residue geo
@@ -178,22 +229,28 @@ class BPE():
                 # -------- final assignment for *all* structures ---------------------------                
                 
                 assignments = [None for _ in range(N)]
-                with ProcessPoolExecutor(
-                    max_workers=max_workers,
-                    initializer=BPE._init_assignment_worker,
-                    initargs=(active_coords, medoid_inds)
-                ) as pool:
-                    futures = {
-                        pool.submit(
-                            BPE._compute_assignment_wrapper,
-                            (self.tokenizers[ti], start, length)
-                        ): idx
-                        for idx, (ti, start, length) in enumerate(res_geo[size])
-                    }
-                    for future in tqdm(as_completed(futures), total=len(futures),
-                                desc="computing assignments"):
-                        idx = futures.pop(future)
-                        assignments[idx] = future.result()
+                if max_workers == 0:
+                    global ACTIVE_COORDS, MEDOID_INDS, ORIG
+                    ACTIVE_COORDS, MEDOID_INDS, ORIG = active_coords, medoid_inds, super_res
+                    for idx, (ti, start, length) in enumerate(res_geo[size]):
+                        assignments[idx] = BPE._compute_assignment_wrapper((self.tokenizers[ti], start, length))
+                else:
+                    with ProcessPoolExecutor(
+                        max_workers=max_workers,
+                        initializer=BPE._init_assignment_worker,
+                        initargs=(active_coords, medoid_inds, super_res)
+                    ) as pool:
+                        futures = {
+                            pool.submit(
+                                BPE._compute_assignment_wrapper,
+                                (self.tokenizers[ti], start, length)
+                            ): idx
+                            for idx, (ti, start, length) in enumerate(res_geo[size])
+                        }
+                        for future in tqdm(as_completed(futures), total=len(futures),
+                                    desc="computing assignments"):
+                            idx = futures.pop(future)
+                            assignments[idx] = future.result()
 
                 # vis the res medoids     
                 if size == 3:
@@ -206,7 +263,7 @@ class BPE():
                 for p, m in enumerate(medoid_inds):
                     ti, i1, length = active_occurs[m]
                     t = self.tokenizers[ti]
-                    struc = t.token_geo(i1, length)            
+                    struc = t.token_geo(i1, length, orig=super_res)
                     logger.info(f"res partition {p}: {struc}")
                     self._sphere_dict[k].append(struc)
                     key_vis_path = os.path.join(self.save_dir, f"init_size={size}_{p}.png")
@@ -225,15 +282,16 @@ class BPE():
                 medoids = [active_inds[m] for m in medoid_inds]
                 for (ti1, start1, length1), p in tqdm(zip(res_geo[size], assignments), desc="iterating over assignments"):
                     t1 = self.tokenizers[ti1]
-                    ti2, start2, length2 = res_geo[size][medoids[p]]
-                    t2 = self.tokenizers[ti2]
-                    assert length1 == length2                    
+                    # ti2, start2, length2 = res_geo[size][medoids[p]]
+                    # t2 = self.tokenizers[ti2]
+                    # assert length1 == length2                    
                     if start1 > 0 and self.glue_opt and self.glue_opt_method == "each":                    
                         R_occ, t_occ = t1.exit_frame(start1, 3*((length1-2)//3)+2)
-                        t1.set_token_geo(start1, length1, t2.token_geo(start2, length1))
-                        BPE.opt_glue(t1, start1, 3*((length1-2)//3)+2, R_occ, t_occ)
-                    else:
-                        t1.set_token_geo(start1, length1, t2.token_geo(start2, length1))
+                        t1.set_token_geo(start1, length1, self._tokens[(n, p)])
+                        # t2.token_geo(start2, length1, orig=super_res)
+                        BPE.opt_glue(t1, start1, 3*((length1-2)//3)+2, R_occ, t_occ) # already quantizes
+                    else:                        
+                        t1.set_token_geo(start1, length1, self._tokens[(n, p)])
                     t1.tokens[start1//3] = (start1, (n, p), length1)
                     t1.bond_to_token_copy[start1] = t1.tokens[start1//3]
                 
@@ -242,44 +300,20 @@ class BPE():
                     if hasattr(t, "bond_to_token_copy"):
                         t.bond_to_token = t.bond_to_token_copy
                         delattr(t, "bond_to_token_copy")
-            # quantize omega, phi, and C-N-CA angles
-            if self.glue_opt and self.glue_opt_method == "all":
-                # if mp.get_start_method(allow_none=True) != "fork":
-                #     mp.set_start_method("fork", force=True)
-                pool  = ProcessPoolExecutor(
-                    max_workers=max_workers,
-                    initializer=BPE._init_opt_glue_worker,
-                    initargs=(self._bin_centers, self._thresholds, self.glue_opt_prior)
-                )
-                futures = {
-                    pool.submit(
-                        BPE._opt_glue_worker,
-                        t,                # cheap to serialise
-                        3*t.n - 4
-                    ): idx
-                    for idx, t in enumerate(self.tokenizers)
-                }
-
-                for future in tqdm(as_completed(futures), total=len(futures),
-                            desc="optimizing all glues"):
-                    idx = futures.pop(future)
-                    self.tokenizers[idx] = future.result()
-            # for t in tqdm(self.tokenizers, desc="optimizing all glues"):
-            #     R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
-            #     BPE.opt_glue(t, 3, 3*t.n-4, R_occs, t_occs)
-            else:
-                for ti, t in enumerate(self.tokenizers):
-                    # update omega, phi, and C-N-CA
-                    for angle in ['omega', 'phi', 'C:1N:1CA']:
-                        relv_thresh = self._thresholds[1][angle]
-                        t.angles_and_dists[angle] = [sum(relv_thresh[BPE.get_ind((v+2*np.pi) % (2*np.pi), relv_thresh)])/2 if v==v else v for v in t.angles_and_dists[angle]]
-        else:
-            # quantize all angles  
+                        
+        if not (res_geo and self.glue_opt):
+            # quantize inter-token angles and maybe bonds
+            keys = Tokenizer.BOND_ANGLES+Tokenizer.DIHEDRAL_ANGLES
+            if not getattr(self, "std_bonds", True):
+                keys += Tokenizer.BOND_TYPES
             for ti, t in enumerate(self.tokenizers):
                 # update omega, phi, and C-N-CA
-                for angle in Tokenizer.DIHEDRAL_ANGLES+Tokenizer.BOND_ANGLES:
-                        relv_thresh = self._thresholds[1][angle]
-                        t.angles_and_dists[angle] = [sum(relv_thresh[BPE.get_ind((v+2*np.pi) % (2*np.pi), relv_thresh)])/2 if v==v else v for v in t.angles_and_dists[angle]]                    
+                for angle in keys:
+                    relv_thresh = self._thresholds[1][angle]
+                    t.angles_and_dists[angle] = [sum(relv_thresh[BPE.get_ind(
+                            v if angle in Tokenizer.BOND_TYPES else (v+2*np.pi)%(2*np.pi), 
+                            relv_thresh
+                        )])/2 if v==v else v for v in t.angles_and_dists[angle]]                    
             self._tokens = {n: json.loads(key_str) for key_str, n in label_dict.items()}
         logger.info(f"initialized {len(self._tokens)} residue-level tokens")     
 
@@ -297,10 +331,10 @@ class BPE():
 
         for ti, t in enumerate(self.tokenizers):
             # quantize bond lengths
-            for i in range(3*t.n-1):
-                t.set_token_geo(i, 1, self._bin_val({Tokenizer.BOND_TYPES[i%3]: [0]} ))
+            if getattr(self, "std_bonds", True):
+                for i in range(3*t.n-1):
+                    t.set_token_geo(i, 1, self._bin_val({Tokenizer.BOND_TYPES[i%3]: [0]}))
             # quantize bond angles
-            breakpoint()
 
             new_tokens = [(i,t.bond_labels[i],1) for i in range(3*t.n-1)]
             bond_to_token = {t[0]: t for t in new_tokens}
@@ -529,7 +563,7 @@ class BPE():
     def _compute_assignment(args, active_coords, medoid_inds):             # NEW
         """Worker that returns the index of the closest medoid for one segment."""
         t, start, length = args
-        coords = t.compute_coords(start, length)
+        coords = t.compute_coords(start, length, orig=ORIG)
         costs = [compute_rmsd(coords, active_coords[idx]) for idx in medoid_inds]
         return np.argmin(costs)
 
@@ -540,15 +574,17 @@ class BPE():
                                     medoid_inds=MEDOID_INDS)
     
     @staticmethod
-    def _init_assignment_worker(ac, mi):
-        global ACTIVE_COORDS, MEDOID_INDS
+    def _init_assignment_worker(ac, mi, o):
+        global ACTIVE_COORDS, MEDOID_INDS, ORIG
         ACTIVE_COORDS  = ac
         MEDOID_INDS    = mi
+        ORIG           = o
     
     @staticmethod
-    def _init_set_bond_length_worker(bb):
-        global BINNED_BONDS
-        BINNED_BONDS = bb
+    def _init_set_bond_length_worker(rt, sb):
+        global RELV_THRESHOLDS, STD_BONDS
+        RELV_THRESHOLDS = rt
+        STD_BONDS = sb
     
     @staticmethod
     def _init_opt_glue_worker(bc, th, gop):
@@ -561,14 +597,32 @@ class BPE():
     def _set_bond_length_worker(t):
         # update avg bond lengths
         for i in range(3*t.n-1):
-            t.set_token_geo(i, 1, BINNED_BONDS[i%3])
+            geo = t.token_geo(i, 1)
+            assert len(geo) == 1
+            key = list(geo)[0]
+            assert len(geo[key]) == 1 
+            if STD_BONDS:
+                assert len(RELV_THRESHOLDS[key]) == 1
+                ind = 0
+            else:
+                ind = BPE.get_ind(geo[key][0], RELV_THRESHOLDS[key])
+            val = sum(RELV_THRESHOLDS[key][ind])/2
+            t.set_token_geo(i, 1, {key: [val]})
         return t
 
     @staticmethod
     def _opt_glue_worker(t, n):
         torch.set_num_threads(1)               # avoid over-subscription
-        R_occs, t_occs = t.exit_frame(3, 3*t.n - 4, ret_all=True)
-        return BPE.opt_glue(t, 3, 3*t.n - 4, R_occs, t_occs)        
+        assert hasattr(t, "cached_all_frames") # init frames
+        R_occs, t_occs = t.cached_all_frames
+        assert len(R_occs) == len(t_occs) == t.n-1
+        cur_R_occs, cur_t_occs = [], []
+        for (start, _, length) in t.tokens[:-1]:
+            # need which exit frame for glue from this token to next
+            res_no = (start+length)//3+1 # this residue
+            cur_R_occs.append(R_occs[res_no-2]) # because the 0'th exit frame is for residue 2
+            cur_t_occs.append(t_occs[res_no-2])
+        return BPE.opt_glue(t, 3, 3*t.n - 4, cur_R_occs, cur_t_occs)        
 
 
     @staticmethod
@@ -588,7 +642,7 @@ class BPE():
         if length % 3 != 2:
             raise ValueError(f"i1+length-1 must end the last residue")
         if isinstance(R_occ, list):
-            init_glue = [t.get_glue_left(i) for i in range(i1, i1+3*len(R_occ), 3)]
+            init_glue = [t.get_glue_left(i+l) for (i, _, l) in t.tokens[:-1]]
         else:
             init_glue = t.get_glue_left(i1)    # (psi_{s-1}, theta_CNCA_s, phi_s)        
         # optimize
@@ -604,9 +658,10 @@ class BPE():
 
         # set the optimized glue and recompute coords
         if isinstance(init_glue, list):
-            for i, best_glue in enumerate(zip(*best_glue)):
+            for idx, best_glue in enumerate(zip(*best_glue)):
+                i, _, l = t.tokens[idx]
                 t.set_glue_left(
-                    i1+3*i,
+                    i+l,
                     best_glue
                 )                
         else:
@@ -636,6 +691,9 @@ class BPE():
         Due to circular angular data, we use circular histogram
         Thresholds: Dict{|token|: List[(bin_start, bin_end)]}
         """
+        keys = Tokenizer.BOND_ANGLES+Tokenizer.DIHEDRAL_ANGLES
+        if not getattr(self, "std_bonds", True):
+            keys += Tokenizer.BOND_TYPES
         self._thresholds = ThresholdDict()
         self._bin_counts = ThresholdDict()
         self._bin_centers = ThresholdDict()
@@ -645,41 +703,68 @@ class BPE():
             _bin_counts = {}
             # we will fix the bond lengths
             vals = {}
-            for t in self.tokenizers:
+            for t in self.tokenizers:                
                 angles = t.angles_and_dists
-                for key in t.BOND_ANGLES+t.DIHEDRAL_ANGLES: # these are mostly fixed
+                for key in keys: # these are mostly fixed
                     t_vals = angles[key][angles[key].fillna(0)!=0.].tolist()
+                    if key == "tau":
+                        t_vals.append(t._bond_angle(0))
+                    elif key == "N:CA":
+                        t_vals.append(t._bond_length(0))
+                    elif key == "CA:C":
+                        t_vals.append(t._bond_length(1))
                     vals[key] = vals.get(key, [])
                     vals[key].extend(t_vals)
-            if path is not None:
-                path = Path(path).with_name(name)
-            for key in t.BOND_ANGLES+t.DIHEDRAL_ANGLES:
+
+            for key in keys:
                 name = f"{key}_{self.bin_strategy}_{num_bins}.png"
+                if path is not None:
+                    path = Path(path).with_name(name)                
                 if self.bin_strategy.startswith("histogram"):
-                    starts, ends, widths, counts = save_circular_histogram(vals[key], path=path, bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins", cover="cover" in self.bin_strategy)
+                    starts, ends, widths, counts = save_histogram(vals[key], circular=(key not in Tokenizer.BOND_TYPES), path=path, bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins", cover="cover" in self.bin_strategy)
                 elif self.bin_strategy == "uniform":
-                    starts, ends, widths, counts = save_circular_histogram_equal_counts(vals[key], path=path, bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins")
+                    starts, ends, widths, counts = save_histogram_equal_counts(vals[key], circular=(key not in Tokenizer.BOND_TYPES), path=path, bins=self.bins[size], title=f"{self.bin_strategy} {key}, {num_bins} bins")
                 else:
                     raise NotImplementedError
-                logger.info(f"# bins: {len(counts)}, bin starts: {starts}, bin ends: {ends}, counts: {counts}")
-                
+                logger.info(f"# bins: {len(counts)}, bin starts: {starts}, bin ends: {ends}, counts: {counts}")            
                 for start, end, width, count in zip(starts, ends, widths, counts):
                     _thresholds[key] = _thresholds.get(key, []) + [(float(start), float(end))]
                     _bin_counts[key] = _bin_counts.get(key, []) + [count]                 
+                                
             self._thresholds[size] = _thresholds
             self._bin_counts[size] = _bin_counts
             self._bin_centers[size] = {k: torch.tensor(v, dtype=torch.float32).mean(axis=-1) for k, v in _thresholds.items()}
             self._bin_weights[size] = {k: torch.tensor(v, dtype=torch.float32)/sum(v) for k, v in _bin_counts.items()}
         
-        for i in range(3):
-            self._thresholds[Tokenizer.BOND_TYPES[i]] = [(Tokenizer.BOND_LENGTHS[i], Tokenizer.BOND_LENGTHS[i])]        
-    
+        if getattr(self, "std_bonds", True):
+            for i in range(3):
+                self._thresholds[Tokenizer.BOND_TYPES[i]] = [(Tokenizer.BOND_LENGTHS[i], Tokenizer.BOND_LENGTHS[i])]            
 
     @property
     def vocab_size(self):
         vocab = len(self._tokens)
         vocab += self.cum_bin_count()
         return vocab
+
+    
+    def capacity(self, tokenizer=False):
+        # number of bits to store all tokens
+        # plus tokenizers with uniform entropy if tokenizer
+        total = 0
+        for idx, token in self._tokens.items():
+            n = Tokenizer.num_bonds(token)
+            total += 4*(n+n-1+n-2)*8 # suppose we store bond lengths as floats, each 4 byte
+            # n-1 bond angles, n-2 dihedrals
+    
+        if tokenizer:
+            mbits = np.log2(len(self._tokens))
+            bbits = np.log2(self.bins[1])
+            for t in self.tokenizers:
+                tt = t.tokenize()
+                m = (len(tt)+3)//4
+                total += mbits * m
+                total += 3*(m-1)*bbits
+        return total
         
     
     def cum_bin_count(self, key=None):
@@ -823,7 +908,7 @@ class BPE():
         return ind
     
 
-    def compute_geo_key(self, token_pair, i, ignore_left=False, ignore_right=False):
+    def compute_geo_key(self, token_pair, tokenizer_or_index, ignore_left=False, ignore_right=False):
         """
         Compute the quantized geo key for token_pair
         token_pair: (idx1, _, l1) and (idx2, _, l2)
@@ -831,7 +916,10 @@ class BPE():
         ignore_left: whether to ignore the fact the left token is in a partitioned token   
         ignore_left: same for right   
         """
-        t = self.tokenizers[i]
+        if isinstance(tokenizer_or_index, int):
+            t = self.tokenizers[tokenizer_or_index]
+        else:
+            t = tokenizer_or_index
         try:
             (idx1, _, l1), (idx2, _, l2) = token_pair
         except:
@@ -915,10 +1003,11 @@ class BPE():
                     else:
                         quant = True
                 if quant:
-                    if k in Tokenizer.BOND_TYPES:
+                    if getattr(self, "std_bonds", True) and k in Tokenizer.BOND_TYPES:
                         lookup = self._thresholds
                     else:
-                        v = (v+2*np.pi) % (2*np.pi) # Convert to [0, 2*pi]
+                        if k not in Tokenizer.BOND_TYPES:
+                            v = (v+2*np.pi) % (2*np.pi) # Convert to [0, 2*pi]
                         lookup = self._thresholds[l1+l2]
                     ind = BPE.get_ind(v, lookup[k])
                     quant_vals.append(ind)
@@ -1002,7 +1091,7 @@ class BPE():
         key_dict_copy = {}
         for k, vals in key_dict.items():
             # assert np.all([isinstance(v, int) for v in vals])
-            if k in Tokenizer.BOND_TYPES:
+            if k in Tokenizer.BOND_TYPES and self.std_bonds:
                 relv_thresholds = self._thresholds
             else:
                 relv_thresholds = self._thresholds[size]
@@ -1124,7 +1213,7 @@ class BPE():
         bts = np.tile(Tokenizer.ATOM_TYPES, (end-start+2)//3)
         bts = bts[off_start: len(bts)-off_end]
         coords = coords[off_start: len(coords)-off_end] # offset
-        plot_backbone(coords, output_path, bts, title=key, zoom_factor=1.0)  
+        plot_backbone(coords, output_path, bts, zoom_factor=1.0)  
 
     
     def _update(self):
@@ -1238,9 +1327,10 @@ class BPE():
 
     def rmsd_partition(self, k):
         logger.info(f"Start partitioning {k}")
+        super_res = self.rmsd_super_res if hasattr(self, "rmsd_super_res") else False
         key_dict = json.loads(k)
         length = Tokenizer.num_bonds(key_dict)
-        all_pos = list(self._geo_dict[k]) # for indexing
+        all_pos = list(self._geo_dict[k]) # for indexing        
         N = len(all_pos)
         if N > self.max_num_strucs:
             active_inds = self.rng.choice(N, self.max_num_strucs, replace=False)
@@ -1252,7 +1342,7 @@ class BPE():
             ti, index = all_pos[i]
             t = self.tokenizers[ti]
             i1 = t.token_pos[index-1]
-            coords = t.compute_coords(i1, length)
+            coords = t.compute_coords(i1, length, orig=super_res)
             active_occurs.append((ti, i1))
             active_coords.append(coords)
         
@@ -1261,35 +1351,41 @@ class BPE():
         medoids = [active_inds[m] for m in medoid_inds]
         assignments = [None for _ in range(N)]
         max_workers = _effective_cpus()
-        with ProcessPoolExecutor(
-            max_workers=max_workers,
-            initializer=BPE._init_assignment_worker,
-            initargs=(active_coords, medoid_inds)
-        ) as pool:
-            futures = {
-                pool.submit(
-                    BPE._compute_assignment_wrapper,
-                    (self.tokenizers[ti], 
-                    self.tokenizers[ti].token_pos[index-1], 
-                    length)
-                ): idx
-                for idx, (ti, index) in enumerate(all_pos)
-            }
-            for future in tqdm(as_completed(futures), total=len(futures),
-                        desc="computing assignments"):
-                idx = futures.pop(future)
-                assignments[idx] = future.result()
+        if max_workers == 0:
+            global ACTIVE_COORDS, MEDOID_INDS, ORIG
+            ACTIVE_COORDS, MEDOID_INDS, ORIG = active_coords, medoid_inds, super_res
+            for idx, (ti, index) in enumerate(all_pos):
+                assignments[idx] = BPE._compute_assignment_wrapper((self.tokenizers[ti], self.tokenizers[ti].token_pos[index-1], length))
+        else:
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=BPE._init_assignment_worker,
+                initargs=(active_coords, medoid_inds, super_res)
+            ) as pool:
+                futures = {
+                    pool.submit(
+                        BPE._compute_assignment_wrapper,
+                        (self.tokenizers[ti], 
+                        self.tokenizers[ti].token_pos[index-1], 
+                        length)
+                    ): idx
+                    for idx, (ti, index) in enumerate(all_pos)
+                }
+                for future in tqdm(as_completed(futures), total=len(futures),
+                            desc="computing assignments"):
+                    idx = futures.pop(future)
+                    assignments[idx] = future.result()
 
         # _sphere_dict
         self._sphere_dict[k] = []
         for p, m in enumerate(medoid_inds):
             ti, i1 = active_occurs[m]
             t = self.tokenizers[ti]
-            struc = t.token_geo(i1, length)            
+            struc = t.token_geo(i1, length, orig=super_res)
             logger.info(f"Partition {p}: {struc}")
             self._sphere_dict[k].append(struc)
             key_vis_path = os.path.join(self.save_dir, f"key_iter={self._step}_{p}.png")
-            t.visualize_bonds(i1, length, key_vis_path)
+            t.visualize_bonds(i1, length, key_vis_path, orig=super_res)
         return assignments
 
 
@@ -1341,9 +1437,9 @@ class BPE():
         self.visualize(key, key_vis_path)
         vis_time = time.perf_counter()-vis_start_time
         # --- Step 0: Do RMSD packing if |token| >= rmsd_partition_min_size ---
-        if Tokenizer.num_bonds(key_dict) >= self.rmsd_partition_min_size \
-        and key not in self._sphere_dict \
-        and len(self._geo_dict[key]) > self.num_partitions[Tokenizer.num_bonds(key_dict)]:
+        if Tokenizer.num_bonds(key_dict) >= self.rmsd_partition_min_size:
+            if key in self._sphere_dict: # very rare for this to happen
+                breakpoint()
             # Step 0.1: populate _sphere_dict
             # Step 0.2: update geo
             # Step 0.3: update _geo_dict
@@ -1379,6 +1475,12 @@ class BPE():
         # we will running update token_pos
         start_time = time.perf_counter()
         vals = list(self._geo_dict[key])
+        uniq_idxes = set((v[0] for v in vals))
+        # if rmsd_key is not None and not self.rmsd_only and self.glue_opt and self.glue_opt_method == "all":
+        #     for idx in uniq_idxes:
+        #         t = self.tokenizers[idx]
+        #         R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
+        #         t.cached_all_frames = (R_occs, t_occs)        
         sort_val_idxes = sorted(range(len(vals)), key=lambda i: vals[i])
         step_times["sort"] += time.perf_counter() - start_time
         
@@ -1453,8 +1555,6 @@ class BPE():
             t.bond_to_token.pop(i2)
             if rmsd_key is not None:                
                 t.bond_to_token[i1] = (i1, (n, p), length)
-
-
             else:
                 t.bond_to_token[i1] = (i1, n, length)
             step_times["step2"] += time.perf_counter() - start_time            
@@ -1463,12 +1563,12 @@ class BPE():
             if rmsd_key is not None:
                 start_time = time.perf_counter()
                 i1 = t.token_pos[index-1]
-                if not self.rmsd_only: # don't set if rmsd_only                                                            
-                    if self.glue_opt:
-                        R_occ, t_occ = t.exit_frame(i1, 3*((length1-2)//3)+2)
+                if not self.rmsd_only:
+                    if i1 > 0 and self.glue_opt and self.glue_opt_method == "each":
+                        # update now
+                        R_occ, t_occ = t.exit_frame(i1, 3*((length-2)//3)+2)
                         t.set_token_geo(i1, length, self._sphere_dict[key][p])
-                        # TODO: changes surrounding byte pairs, don't do it for now
-                        # BPE.opt_glue(t, i1, 3*((length1-2)//3)+2, R_occ, t_occ, self.glue_opt_prior, self._bin_centers, self._thresholds)
+                        BPE.opt_glue(t, i1, 3*((length-2)//3)+2, R_occ, t_occ, self.glue_opt_prior, self._bin_centers, self._thresholds)
                     else:
                         t.set_token_geo(i1, length, self._sphere_dict[key][p])
                 step_times["step6"] += time.perf_counter() - start_time    
@@ -1511,6 +1611,51 @@ class BPE():
         #     t = self.tokenizers[i]
         #     t.tokens = list(filter(None, t.tokens))
         # step_times["update_tokens"] += time.perf_counter() - start_time
+
+        # -- Step 6 (cont.) for opt_glue
+        if rmsd_key is not None and not self.rmsd_only and self.glue_opt and self.glue_opt_method == "all":
+            max_workers = _effective_cpus()
+            if max_workers == 0:
+                global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
+                BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior
+                for idx in uniq_idxes:
+                    t = self.tokenizers[idx]
+                    t_copy = pickle.loads(pickle.dumps(t, protocol=pickle.HIGHEST_PROTOCOL))
+                    t_new = BPE._opt_glue_worker(t_copy, 3*t.n-4)
+                    # find all the changed (dihedral, omega, C-N-CA) triples
+                    for i1 in t.bond_to_token:
+                        _, _, l1 = t.bond_to_token[i1]
+                        if i1+l1 == 3*t.n-1:
+                            continue
+                        i2, _, l2 = t.bond_to_token[i1+l1]
+                        new_key = self.compute_geo_key(((i1, None, l1), (i2, None, l2)), t_new)
+                        old_key = self.compute_geo_key(((i1, None, l1), (i2, None, l2)), t)
+                        if new_key != old_key:
+                            self._geo_dict[old_key].remove((idx, i2))
+                            diff_count[old_key].append((idx, i1, l1+l2, "remove"))
+                            self._geo_dict[new_key].add((idx, i2))
+                            diff_count[new_key].append((idx, i1, l1+l2, "add"))
+                    self.tokenizers[idx] = t_new
+            else:
+                pool = ProcessPoolExecutor(
+                    max_workers=max_workers,
+                    initializer=BPE._init_opt_glue_worker,
+                    initargs=(self._bin_centers, self._thresholds, self.glue_opt_prior)
+                )
+                futures = {
+                    pool.submit(
+                        BPE._opt_glue_worker,
+                        t,                # cheap to serialise
+                        3*t.n - 4
+                    ): idx
+                    for idx, t in enumerate(self.tokenizers)
+                }
+                for future in tqdm(as_completed(futures), total=len(futures),
+                            desc="optimizing all glues"):
+                    idx = futures.pop(future)
+                    self.tokenizers[idx] = future.result()    
+                    
+
 
         self._step += 1
 
