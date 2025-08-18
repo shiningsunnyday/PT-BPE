@@ -6,6 +6,7 @@ from foldingdiff.datasets import FullCathCanonicalCoordsDataset
 from foldingdiff.bpe import *
 from foldingdiff.plotting import *
 from foldingdiff.utils import load_args_from_txt, validate_args_match
+from esm.utils.structure.protein_chain import ProteinChain
 import scipy.io
 import numpy as np
 import subprocess
@@ -290,7 +291,7 @@ def main():
                                                     zero_center=False, 
                                                     toy=args.toy, 
                                                     pad=args.pad, 
-                                                    secondary=args.sec)     
+                                                    secondary=args.sec)
             cleaned_structures = []
             for i, struc in enumerate(dataset.structures):
                 if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
@@ -299,7 +300,7 @@ def main():
                     cleaned_structures.append(struc)
             logger.info(f"Removed {len(dataset.structures)-len(cleaned_structures)}/{len(dataset.structures)} structures with nan dihedrals.")
             N = len(cleaned_structures)
-            dataset.structures = cleaned_structures        
+            dataset.structures = cleaned_structures       
             bpe = BPE(dataset.structures, 
                     bins=args.bins, 
                     bin_strategy=args.bin_strategy, 
@@ -328,6 +329,8 @@ def main():
             num_ref = min(N, args.num_ref) if args.num_ref else N
             ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(num_ref)]
             np.save(ref_path, ref_coords)
+        # for each ref, cache the ProteinChain
+        bpe.chains = [ProteinChain.from_pdb(bpe.tokenizers[i].fname) for i in range(num_ref)]
         
         xlims = [None for _ in range(num_vis)]
         ylims = [None for _ in range(num_vis)]
@@ -347,7 +350,8 @@ def main():
             else:
                 bpe.initialize(path=os.path.join(args.save_dir, "hist_plot.png"))
                 pickle.dump(bpe, open(pre_init_glue_opt_path, "wb+"))
-            bpe.glue_opt_all()
+            if args.glue_opt and args.glue_opt_method == "all":
+                bpe.glue_opt_all()
             pickle.dump(bpe, open(post_init_bpe_path, 'wb+'))
         for ind in range(num_vis):
             visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter=init.png")
@@ -388,7 +392,8 @@ def main():
             json.dump(
                 {
                     "K": len(bpe._tokens),
-                    "L": np.mean([len(t.bond_to_token) for t in bpe.tokenizers])
+                    "L": np.mean([len(t.bond_to_token) for t in bpe.tokenizers]),
+                    "bpr": bpe.capacity(tokenizer=True)
                 },
                 open(stats_path, "w+")
             )

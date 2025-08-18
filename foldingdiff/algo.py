@@ -10,67 +10,59 @@ def kabsch(P, Q):
     that aligns Q to P.
     
     Parameters:
-      P: numpy.ndarray of shape (N, 3)
-         Reference coordinates.
-      Q: numpy.ndarray of shape (N, 3)
-         Coordinates to be aligned.
+    P: numpy.ndarray of shape (N, 3)
+        Reference coordinates.
+    Q: numpy.ndarray of shape (N, 3)
+        Coordinates to be aligned.
     
     Returns:
-      Q_aligned: numpy.ndarray of shape (N, 3)
-         Q after applying the optimal rotation and translation.
-      R: numpy.ndarray of shape (3, 3)
-         Optimal rotation matrix.
-      t: numpy.ndarray of shape (3,)
-         Optimal translation vector.
+    Q_aligned: numpy.ndarray of shape (N, 3)
+        Q after applying the optimal rotation and translation.
+    R: numpy.ndarray of shape (3, 3)
+        Optimal rotation matrix.
+    t: numpy.ndarray of shape (3,)
+        Optimal translation vector.
     """
     # Compute centroids
     centroid_P = np.mean(P, axis=0)
-    centroid_Q = np.mean(Q, axis=0)
-    
+    centroid_Q = np.mean(Q, axis=0)    
     # Center the points
     P_centered = P - centroid_P
     Q_centered = Q - centroid_Q
-    
     # Compute covariance matrix
-    H = np.dot(Q_centered.T, P_centered)
-    
+    H = np.dot(P_centered.T, Q_centered)
     # Singular Value Decomposition
     U, S, Vt = np.linalg.svd(H)
-    V = Vt.T
-    
     # Compute rotation matrix
-    d = np.linalg.det(np.dot(V, U.T))
-    D = np.eye(3)
-    if d < 0:
-        D[2, 2] = -1  # Reflection correction
-    R = np.dot(V, np.dot(D, U.T))
-    
+    R = np.dot(U, Vt)
+    if np.linalg.det(R) < 0:
+        Vt[2, :] *= -1          # Reflection correction
+        R = np.dot(U, Vt)
     # Compute translation
-    t = centroid_P - np.dot(centroid_Q, R)
-    
-    # Apply rotation and translation to Q
-    Q_aligned = np.dot(Q, R) + t
-    
+    t = centroid_P - R @ centroid_Q          # correct side-multiplication
+    Q_aligned = (Q - centroid_Q) @ R.T + centroid_P
     return Q_aligned, R, t
+
 
 def compute_rmsd(P, Q):
     """
     Compute the RMSD between two sets of coordinates P and Q after optimal alignment using the Kabsch algorithm.
     
     Parameters:
-      P: numpy.ndarray of shape (N, 3)
-         Reference coordinates.
-      Q: numpy.ndarray of shape (N, 3)
-         Coordinates to be aligned.
+    P: numpy.ndarray of shape (N, 3)
+        Reference coordinates.
+    Q: numpy.ndarray of shape (N, 3)
+        Coordinates to be aligned.
     
     Returns:
-      rmsd: float
-         The root-mean-square deviation after alignment.
+    rmsd: float
+        The root-mean-square deviation after alignment.
     """
     Q_aligned, R, t = kabsch(P, Q)
     diff = P - Q_aligned
     rmsd = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
     return rmsd
+
 
 def compute_value_ranges(strucs):
     keys = list(strucs[0])
@@ -79,6 +71,7 @@ def compute_value_ranges(strucs):
         value_ranges[k] = [struc[k] for struc in strucs]
         value_ranges[k] = (min(value_ranges[k]), max(value_ranges[k]))
     return value_ranges
+
 
 def initialize(strucs, k):
     """

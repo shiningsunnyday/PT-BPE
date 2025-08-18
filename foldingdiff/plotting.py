@@ -20,6 +20,7 @@ import matplotlib.cm as cm
 import seaborn as sns
 from tqdm import tqdm
 from foldingdiff.algo import compute_rmsd
+from esm.utils.structure.protein_chain import ProteinChain
 from astropy.visualization import LogStretch
 from astropy.visualization.mpl_normalize import ImageNormalize
 
@@ -371,7 +372,7 @@ def column_fill(handles, labels, ncol):
     return new_h, new_l
 
 
-
+# plot(bpe, num_tokens, ref_coords, output_path, no_iters, prev_iter, step_iter, ratio, num_random_baseline, total_ticks)
 def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, step_iter=10, ratio=1, num_random_baseline=10, total_ticks=20):
     N = len(bpe.tokenizers)
     d = Path(output_path).parent
@@ -379,10 +380,11 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
         prev_path = d / f"run_iter={prev_iter}.npy"
         print(f"loading prev_path: {prev_path}")
         prev = np.load(prev_path)
-        Ks, Ls, errs = map(list, tuple(prev))       
-        start_iter = prev_iter+step_iter 
+        Ks, Ls, bprs, *errs = map(list, tuple(prev))
+        errs = list(zip(*errs))
+        start_iter = prev_iter+step_iter
     else:
-        Ks, Ls, errs = [], [], []
+        Ks, Ls, bprs, errs = [], [], [], []
         tokenizers = bpe.tokenizers[:len(ref_coords)]
         start_iter = 0
     for t in range(start_iter, no_iters+1, step_iter):
@@ -395,22 +397,31 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
         stats = json.load(open(stats_path))
         Ks.append(stats["K"])
         Ls.append(stats["L"])
+        bprs.append(stats["bpr"])
         cur_coords = []
         for i in range(len(ref_coords)):
             coord = tokenizers[i].compute_coords()
             assert ref_coords[i].shape == coord.shape
             cur_coords.append(coord)
-        errors = [compute_rmsd(cur_coords[i], ref_coords[i]) for i in tqdm(range(len(ref_coords)))]
-        err = np.mean(errors)
+        errors = []
+        for i in tqdm(range(len(ref_coords))):
+            # error = compute_rmsd(cur_coords[i], ref_coords[i]) 
+            chain_recon = ProteinChain.from_backbone_atom_coordinates(cur_coords[i].reshape(-1, 3, 3))
+            bb_rmsd = chain_recon.rmsd(bpe.chains[i], only_compute_backbone_rmsd=True)
+            lddt = np.array(chain_recon.lddt_ca(bpe.chains[i]))
+            # errors.append((error, bb_rmsd, lddt.mean()))
+            errors.append((bb_rmsd, lddt.mean()))
+        err = np.mean(errors, axis=0)
         errs.append(err)
-    # cache
-    cur_path = d / f"run_iter={no_iters}.npy"
-    np.save(Path(output_path).with_suffix(".npy"), [Ks, Ls, errs])
-    final_iter = t+1        
-    # add a permutation test baseline
-    # sample num_random_baseline random permutations    
-    ref_errs = []    
-    for k in tqdm(range(num_random_baseline), "random angles baseline"):
+    Ks = np.array(Ks)
+    Ls = np.array(Ls)
+    bprs = np.array(bprs)
+    errs = np.array(errs)        
+    cur_path = d / f"run_iter={no_iters}.npy" # cache
+    np.save(Path(output_path).with_suffix(".npy"), np.concatenate((np.stack((Ks, Ls, bprs), axis=0), errs.T), axis=0))
+    final_iter = t+1
+    ref_errs = [] # add a permutation test baseline 
+    for k in tqdm(range(num_random_baseline), "random angles baseline"): # sample num_random_baseline random permutations    
         for key in ["tau","CA:C:1N","C:1N:1CA"]+["psi","omega","phi"]:
             bin_c = np.array(bpe._bin_counts[1][key])
             threshs = bpe._thresholds[1][key]
@@ -418,42 +429,38 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
             for t in tokenizers:
                 randvals = t.angles_and_dists[key].map(keep_nan_resample_val)
                 t.angles_and_dists[key] = randvals
-        alt_coords = []        
-        errors = [compute_rmsd(tokenizers[i].compute_coords(), ref_coords[i]) for i in tqdm(range(len(ref_coords)))]
-        ref_errs.append(np.mean(errors))
-    ref_err = np.mean(ref_errs)
-
-    Ks = np.array(Ks)
-    Ls = np.array(Ls)
-    errs = np.array(errs)
+        alt_coords = [tokenizers[i].compute_coords() for i in range(len(ref_coords))]
+        errors = []
+        for i in tqdm(range(len(ref_coords))):
+            # error = compute_rmsd(alt_coords[i], ref_coords[i]) 
+            chain_recon = ProteinChain.from_backbone_atom_coordinates(alt_coords[i].reshape(-1, 3, 3))
+            bb_rmsd = chain_recon.rmsd(bpe.chains[i], only_compute_backbone_rmsd=True)
+            lddt = np.array(chain_recon.lddt_ca(bpe.chains[i]))
+            # errors.append((error, bb_rmsd, lddt.mean()))
+            errors.append((bb_rmsd, lddt.mean()))
+        ref_errs.append(np.mean(errors, axis=0))
+    ref_err = np.mean(ref_errs, axis=0)
     if ratio is None:
-        ratio = N/1000
-    # make figure + first (left) axis
-    fig, ax1 = plt.subplots(figsize=(8, 5))
-    # plot the diagonal L = K/ratio
+        ratio = N/1000    
+    fig, (ax1, ax_rmsd) = plt.subplots(1, 2, figsize=(16, 5)) # make figure + first (left) axis
+    # ---------------- left panel : L vs K + BPR on right ---------------
     x_diag = np.linspace(Ks.min(), Ks.max(), 100)
     ax1.plot(x_diag, x_diag/ratio,
             linestyle='--',
             label=f"L=K/ratio={ratio:.1f}")
-    # plot L vs K
     ax1.plot(Ks, Ls,
             marker='o',
             label="L vs K",
             linewidth=2)
-
-    # keep around total_ticks x-ticks
     skip = (len(Ks)+total_ticks-1)//(total_ticks)    
-    # annotate intersection
     diff = np.abs(Ls - Ks/ratio)
-    idx  = np.argmin(diff)        # index of closest approach
+    idx  = np.argmin(diff)      
     K_int, L_int = Ks[idx], Ls[idx]
-    # highlight the point
     ax1.scatter([K_int], [L_int],
                 color='orange',
                 s=100,
                 zorder=5,
                 label="Approx. Intersection")
-    # arrow + text
     ax1.annotate(
         f"K≈{K_int}", 
         xy=(K_int, L_int),
@@ -462,30 +469,70 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
         arrowprops=dict(arrowstyle="->", color="orange"),
         color="orange"
     )
-    if skip == 1:
-        ax1.set_xlabel("K (Vocab Size) Every Round")
-        ax1.set_xticks(Ks)
-    else:
-        ax1.set_xlabel(f"K (Vocab Size) Every {skip} Rounds")
-        ax1.set_xticks(Ks[0::skip])
-    ax1.set_ylabel("L (#Motif-Tokens Per PDB)")    
-    # create a second y-axis for errors
+    ax1.set_ylabel("L (# Motif-Tokens Per PDB)")    
+    ax1.set_xlabel("K (Vocab Size) Every Round" if skip == 1 else f"K (Vocab Size) Every {skip} Rounds")
+    ax1.set_xticks(Ks if skip == 1 else Ks[0::skip])
+    ax1.tick_params(axis="y", labelcolor='tab:orange')
+
     ax2 = ax1.twinx()
-    ax2.plot(Ks, errs,
-            marker='x',
-            linestyle=':',
-            label="Error",
-            linewidth=2,
-            color="tab:red")
-    ax2.set_ylabel("Error", color="tab:red")
-    # plot ref_err scalar as horizontal line, labeled on the y-axis
-    ax2.axhline(y=ref_err, color='tab:red', linestyle='--', label=f"Ref. Error ({num_random_baseline} permutations)")
-    ax2.tick_params(axis="y", labelcolor="tab:red")
-    # combined legend
+    ax2.plot(Ks, bprs,
+             marker='x',
+             linestyle=':',
+             color='tab:purple',
+             label="BPR")
+    ax2.set_ylabel("Bits-per-residue (BPR)", color='tab:purple')
+    ax2.tick_params(axis="y", labelcolor="tab:purple")    
+
     lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()    
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
-    ax1.set_title(f"L vs K for N={N} w/ {final_iter} BPE rounds")
+    ax1.set_title(f"L & Compression vs K for N={N} w/ {final_iter} BPE rounds")
+
+    # -------- right panel: BB-RMSD (left-y) & LDDT (right-y) ----------
+    ax_rmsd.plot(Ks, errs[:, 0],
+                 marker='s', linestyle='--', color='tab:red',
+                 label="Backbone RMSD")
+    ax_rmsd.axhline(y=ref_err[0], color='tab:red', linestyle=':',
+                    label=f"Ref. Backbone RMSD ({num_random_baseline} perm.)")
+    ax_rmsd.set_xlabel("K (Vocab Size)" if skip == 1
+                       else f"K (Vocab Size) Every {skip} Rounds")
+    ax_rmsd.set_ylabel("Backbone RMSD (Å)", color='tab:red')
+    ax_rmsd.tick_params(axis='y', labelcolor='tab:red')
+
+    ax_lddt = ax_rmsd.twinx()                           # second y-axis
+    ax_lddt.plot(Ks, errs[:, 1],
+                 marker='o', linestyle='--', color='tab:blue',
+                 label="LDDT (mean)")
+    ax_lddt.axhline(y=ref_err[1], color='tab:blue', linestyle=':',
+                    label=f"Ref. LDDT ({num_random_baseline} perm.)")
+    ax_lddt.set_ylabel("LDDT", color='tab:blue')
+    ax_lddt.tick_params(axis='y', labelcolor='tab:blue')
+    ax_rmsd.set_title("Backbone RMSD & LDDT vs K")
+
+    # -------------------- annotate best points ------------------------
+    best_rmsd_idx = np.argmin(errs[:, 0])
+    ax_rmsd.scatter(Ks[best_rmsd_idx], errs[best_rmsd_idx, 0],
+                    color='tab:red', zorder=5)
+    ax_rmsd.annotate(f"Lowest RMSD: {errs[best_rmsd_idx,0]:.2f}",
+                     xy=(Ks[best_rmsd_idx], errs[best_rmsd_idx,0]),
+                     xytext=(10, -15), textcoords="offset points",
+                     arrowprops=dict(arrowstyle="->", color='tab:red'),
+                     color='tab:red')
+
+    best_lddt_idx = np.argmax(errs[:, 1])
+    ax_lddt.scatter(Ks[best_lddt_idx], errs[best_lddt_idx, 1],
+                    color='tab:blue', zorder=5)
+    ax_lddt.annotate(f"Highest LDDT: {errs[best_lddt_idx,1]:.2f}",
+                     xy=(Ks[best_lddt_idx], errs[best_lddt_idx,1]),
+                     xytext=(10, 15), textcoords="offset points",
+                     arrowprops=dict(arrowstyle="->", color='tab:blue'),
+                     color='tab:blue')
+
+    # ---------------- combine legends for right panel -----------------
+    h1, l1 = ax_rmsd.get_legend_handles_labels()
+    h2, l2 = ax_lddt.get_legend_handles_labels()
+    ax_rmsd.legend(h1 + h2, l1 + l2, loc='best')
+    
     fig.tight_layout()
     plt.show()
     plt.savefig(output_path)

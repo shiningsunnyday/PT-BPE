@@ -18,7 +18,7 @@ cd "/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff"
 # module load ncf/1.0.0-fasrc01; module load miniconda3/4.12.0-ncf; module load python/3.10.12-fasrc01
 # conda env create --prefix /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff --file environment.yml
 
-runner="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff/bin/python"
+runner="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/esm_env/bin/python"
 
 if [ $1 -eq 1 ]; then
   echo "debug"

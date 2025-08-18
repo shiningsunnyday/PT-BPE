@@ -303,9 +303,7 @@ class BPE():
                         
         if not (res_geo and self.glue_opt):
             # quantize inter-token angles and maybe bonds
-            keys = Tokenizer.BOND_ANGLES+Tokenizer.DIHEDRAL_ANGLES
-            if not getattr(self, "std_bonds", True):
-                keys += Tokenizer.BOND_TYPES
+            keys = ['omega', 'C:1N:1CA', 'phi']
             for ti, t in enumerate(self.tokenizers):
                 # update omega, phi, and C-N-CA
                 for angle in keys:
