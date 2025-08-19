@@ -8,7 +8,7 @@ import logging
 from typing import *
 import ast
 from argparse import Namespace
-
+import pickle
 import requests
 
 import numpy as np
@@ -73,6 +73,10 @@ def validate_args_match(current: Union[Namespace, Dict[str, Any]], loaded: Union
             raise AssertionError(
                 f"Mismatch for '{name}': current={cur_val!r}  saved={loaded_val!r}"
             )
+
+
+def pickle_copy(t):
+    return pickle.loads(pickle.dumps(t, protocol=pickle.HIGHEST_PROTOCOL))
 
 
 def is_huggingface_hub_id(s: str) -> bool:

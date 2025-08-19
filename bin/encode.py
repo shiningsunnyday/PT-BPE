@@ -323,14 +323,12 @@ def main():
         N = len(bpe.tokenizers)    
         num_vis = min(N, args.num_vis) if args.num_vis else N
         if Path(ref_path).exists():
-            ref_coords = np.load(ref_path, allow_pickle=True)
+            ref_coords = list(np.load(ref_path, allow_pickle=True))
             num_ref = len(ref_coords)
         else:
             num_ref = min(N, args.num_ref) if args.num_ref else N
             ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(num_ref)]
-            np.save(ref_path, ref_coords)
-        # for each ref, cache the ProteinChain
-        bpe.chains = [ProteinChain.from_pdb(bpe.tokenizers[i].fname) for i in range(num_ref)]
+            np.save(ref_path, np.asarray(ref_coords, dtype=object), allow_pickle=True)
         
         xlims = [None for _ in range(num_vis)]
         ylims = [None for _ in range(num_vis)]

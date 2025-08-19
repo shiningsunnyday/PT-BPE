@@ -1,6 +1,8 @@
 from foldingdiff.tokenizer import *
 from foldingdiff.plotting import *
 from foldingdiff.algo import *
+from foldingdiff.utils import *
+import sys
 import heapq
 import json
 import logging
@@ -99,28 +101,43 @@ class BPE():
     def glue_opt_all(self):
         logger.info("Glue opt all start")
         max_workers = _effective_cpus()
+        N = len(self.tokenizers)
         if max_workers == 0:
             global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
             BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior
             self.tokenizers = [BPE._opt_glue_worker(t, 3*t.n-4) for t in self.tokenizers]
         else:
-            pool  = ProcessPoolExecutor(
-                max_workers=max_workers,
-                initializer=BPE._init_opt_glue_worker,
-                initargs=(self._bin_centers, self._thresholds, self.glue_opt_prior)
-            )
-            futures = {
-                pool.submit(
-                    BPE._opt_glue_worker,
-                    t,                # cheap to serialise
-                    3*t.n - 4
-                ): idx
-                for idx, t in enumerate(self.tokenizers)
-            }
-            for future in tqdm(as_completed(futures), total=len(futures),
-                        desc="optimizing all glues"):
-                idx = futures.pop(future)
-                self.tokenizers[idx] = future.result()        
+            os.makedirs(os.path.dirname(self._assignment_cache_path(f"init_glue_opt", 0)), exist_ok=True)
+            missing_jobs = []
+            for idx in range(N):
+                p = self._assignment_cache_path("init_glue_opt", idx, "pkl")
+                if os.path.isfile(p):                       # already computed
+                    try:
+                        self.tokenizers[idx] = pickle.load(open(p, "rb"))
+                    except:
+                        missing_jobs.append(idx)
+                else:                                       # still to be done
+                    missing_jobs.append(idx)
+            if missing_jobs:
+                pool  = ProcessPoolExecutor(
+                    max_workers=max_workers,
+                    initializer=BPE._init_opt_glue_worker,
+                    initargs=(self._bin_centers, self._thresholds, self.glue_opt_prior)
+                )
+                futures = {
+                    pool.submit(
+                        BPE._opt_glue_worker,
+                        t,                # cheap to serialise
+                        3*t.n - 4
+                    ): idx
+                    for idx, t in enumerate(self.tokenizers)
+                    if idx in missing_jobs
+                }
+                for future in tqdm(as_completed(futures), total=len(futures),
+                            desc="optimizing all glues"):
+                    idx = futures.pop(future)
+                    self.tokenizers[idx] = future.result()
+                    pickle.dump(self.tokenizers[idx], open(self._assignment_cache_path("init_glue_opt", idx, "pkl"), "wb+"))
         logger.info("Glue opt all finish")
 
 
@@ -132,41 +149,88 @@ class BPE():
         label_dict = {}
         res_geo = defaultdict(list)   
         max_workers = _effective_cpus()
+        N = len(self.tokenizers)
         super_res = self.rmsd_super_res if hasattr(self, "rmsd_super_res") else False
-
-        if getattr(self, "std_bonds", True):
-            lookup = self._thresholds
-        else:
-            lookup = self._thresholds[1]
-        
+        lookup = self._thresholds if getattr(self, "std_bonds", True) else self._thresholds[1]
         relv_thresholds = {bt: lookup[bt] for bt in lookup if bt in Tokenizer.BOND_TYPES}
-        
         # binned_bonds = [self._bin_val({Tokenizer.BOND_TYPES[i]: [0]}) for i in range(3)]
         if max_workers == 0: # debug
             global RELV_THRESHOLDS, STD_BONDS
             RELV_THRESHOLDS, STD_BONDS = relv_thresholds, getattr(self, "std_bonds", True)
-            self.tokenizers = [BPE._set_bond_length_worker(t) for t in self.tokenizers]
+            self.tokenizers = [BPE._set_bond_length_worker(t) for t in tqdm(self.tokenizers, desc="standardizing bond lengths")]
         else:
-            with ProcessPoolExecutor(
-                max_workers=max_workers,
-                initializer=BPE._init_set_bond_length_worker,
-                initargs=(relv_thresholds,)
-            ) as pool:
-                futures = {
-                    pool.submit(
-                        BPE._set_bond_length_worker, t
-                    ): idx
-                    for idx, t in enumerate(self.tokenizers)
-                }
-            for future in tqdm(as_completed(futures), total=len(futures),
-                        desc="standardizing bond lengths"):
-                idx = futures.pop(future)
-                self.tokenizers[idx] = future.result()
+            os.makedirs(os.path.dirname(self._assignment_cache_path(f"bond_std_tokenizers", 0)), exist_ok=True)
+            missing_jobs = []
+            for idx in range(N):
+                p = self._assignment_cache_path("bond_std_tokenizers", idx)
+                if os.path.isfile(p):                       # already computed
+                    try:
+                        self.tokenizers[idx] = pickle.load(open(p, "rb"))
+                    except:
+                        missing_jobs.append(idx)
+                else:                                       # still to be done
+                    missing_jobs.append(idx)            
+            if missing_jobs:
+                with ProcessPoolExecutor(
+                    max_workers=max_workers,
+                    initializer=BPE._init_set_bond_length_worker,
+                    initargs=(relv_thresholds, getattr(self, "std_bonds", True))
+                ) as pool:
+                    futures = {}
+                    for idx in tqdm(
+                        missing_jobs,
+                        total=len(missing_jobs),
+                        desc="submitting bond std jobs"
+                    ):
+                        future = pool.submit(
+                            BPE._set_bond_length_worker, 
+                            self.tokenizers[idx],
+                            self._assignment_cache_path("bond_std_tokenizers", idx)
+                        )
+                        futures[future] = idx
+
+                for future in tqdm(as_completed(futures), total=len(futures),
+                            desc="standardizing bond lengths"):
+                    idx = futures.pop(future)
+                    p = self._assignment_cache_path("bond_std_tokenizers", idx)
+                    self.tokenizers[idx] = pickle.load(open(p, "rb"))
         
-        if self.glue_opt and self.glue_opt_method == "all":
-            for idx, t in enumerate(self.tokenizers):
-                R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
-                t.cached_all_frames = (R_occs, t_occs)
+        if self.glue_opt and self.glue_opt_method == "all":            
+            os.makedirs(os.path.dirname(self._assignment_cache_path(f"exit_frame_cache", 0)), exist_ok=True)
+            missing_jobs = []
+            for idx in range(N):
+                p = self._assignment_cache_path("exit_frame_cache", idx)
+                if os.path.isfile(p):                       # already computed
+                    try:
+                        frames = np.load(p, allow_pickle=True)
+                        self.tokenizers[idx].cached_all_frames = (frames["R_occs"], frames["t_occs"])
+                    except:
+                        missing_jobs.append(idx)
+                else:                                       # still to be done
+                    missing_jobs.append(idx)
+            if missing_jobs:
+                with ProcessPoolExecutor(
+                    max_workers=max_workers                
+                ) as pool:
+                    arg_iter = (
+                        (
+                            idx,
+                            self.tokenizers[idx],                # cheap to serialise
+                            self._assignment_cache_path("exit_frame_cache", idx, "npz")
+                        )
+                        for idx in missing_jobs
+                    )                    
+                    for idx in tqdm(pool.map(BPE._cache_exit_frames,
+                                            arg_iter,
+                                            chunksize=10),              # keeps queue small
+                                    total=len(missing_jobs),
+                                    desc="caching exit frames"):
+                        p = self._assignment_cache_path("exit_frame_cache", idx, "npz")
+                        frames = np.load(p, allow_pickle=True)
+                        self.tokenizers[idx].cached_all_frames = (frames["R_occs"], frames["t_occs"])
+            # for idx, t in tqdm(enumerate(self.tokenizers), desc="caching exit frames"):
+            #     R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
+            #     t.cached_all_frames = (R_occs, t_occs)
         
         for ti, t in tqdm(enumerate(self.tokenizers), desc="iterating over residue geos"):
             # update binned residue geo
@@ -230,27 +294,44 @@ class BPE():
                 
                 assignments = [None for _ in range(N)]
                 if max_workers == 0:
-                    global ACTIVE_COORDS, MEDOID_INDS, ORIG
-                    ACTIVE_COORDS, MEDOID_INDS, ORIG = active_coords, medoid_inds, super_res
                     for idx, (ti, start, length) in enumerate(res_geo[size]):
-                        assignments[idx] = BPE._compute_assignment_wrapper((self.tokenizers[ti], start, length))
-                else:
-                    with ProcessPoolExecutor(
-                        max_workers=max_workers,
-                        initializer=BPE._init_assignment_worker,
-                        initargs=(active_coords, medoid_inds, super_res)
-                    ) as pool:
-                        futures = {
-                            pool.submit(
-                                BPE._compute_assignment_wrapper,
-                                (self.tokenizers[ti], start, length)
-                            ): idx
-                            for idx, (ti, start, length) in enumerate(res_geo[size])
-                        }
-                        for future in tqdm(as_completed(futures), total=len(futures),
-                                    desc="computing assignments"):
-                            idx = futures.pop(future)
-                            assignments[idx] = future.result()
+                        assignments[idx] = BPE._compute_assignment((self.tokenizers[ti], start, length), active_coords, medoid_inds, super_res)
+                else:   
+                    os.makedirs(os.path.dirname(self._assignment_cache_path(f"assignments_{size}", 0)), exist_ok=True)
+                    missing_jobs = []
+                    for idx in range(N):
+                        p = self._assignment_cache_path(f"assignments_{size}", idx)
+                        if os.path.isfile(p):                       # already computed
+                            try:
+                                assignments[idx] = int(np.load(p))
+                            except:
+                                missing_jobs.append(idx)
+                        else:                                       # still to be done
+                            missing_jobs.append(idx)
+
+                    # Skip the executor entirely if everything is cached ----------------------
+                    if missing_jobs:
+                        with ProcessPoolExecutor(
+                            max_workers=max_workers,
+                            initializer=BPE._init_assignment_worker,
+                            initargs=(active_coords, medoid_inds, super_res)
+                        ) as pool:
+                            arg_iter = (
+                                (
+                                    idx, 
+                                    self.tokenizers[ti], 
+                                    start, 
+                                    length, 
+                                    self._assignment_cache_path(f"assignments_{size}", idx)
+                                )
+                                for idx, (ti, start, length) in enumerate(res_geo[size])
+                                if idx in missing_jobs
+                            )
+                            for idx in tqdm(pool.map(BPE._compute_assignment_wrapper, arg_iter, chunksize=10),
+                                        total=len(missing_jobs),
+                                        desc="computing assignments"):
+                                p = self._assignment_cache_path(f"assignments_{size}", idx)
+                                assignments[idx] = int(np.load(p))
 
                 # vis the res medoids     
                 if size == 3:
@@ -558,18 +639,22 @@ class BPE():
         return tuple(best)
 
     @staticmethod
-    def _compute_assignment(args, active_coords, medoid_inds):             # NEW
+    def _compute_assignment(args, active_coords, medoid_inds, orig):             # NEW
         """Worker that returns the index of the closest medoid for one segment."""
         t, start, length = args
-        coords = t.compute_coords(start, length, orig=ORIG)
+        coords = t.compute_coords(start, length, orig=orig)
         costs = [compute_rmsd(coords, active_coords[idx]) for idx in medoid_inds]
         return np.argmin(costs)
 
     @staticmethod
     def _compute_assignment_wrapper(args):
-        return BPE._compute_assignment(args,
+        idx, t, start, length, path = args
+        ans = BPE._compute_assignment((t, start, length),
                                     active_coords=ACTIVE_COORDS,
-                                    medoid_inds=MEDOID_INDS)
+                                    medoid_inds=MEDOID_INDS,
+                                    orig=ORIG)
+        np.save(path, ans)
+        return idx
     
     @staticmethod
     def _init_assignment_worker(ac, mi, o):
@@ -591,8 +676,23 @@ class BPE():
         THRESHOLDS = th
         GLUE_OPT_PRIOR = gop
     
+
     @staticmethod
-    def _set_bond_length_worker(t):
+    def _cache_exit_frames(args):
+        idx, t, path = args
+        R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
+        np.savez(path, R_occs=R_occs, t_occs=t_occs)
+        return idx
+
+
+    def _assignment_cache_path(self, prefix: str, idx: int, ext: str = "npy") -> str:
+        """
+        Return the on-disk path of a cached assignment.
+        """
+        return os.path.join(self.save_dir, prefix, f"{idx}.{ext}")
+    
+    @staticmethod
+    def _set_bond_length_worker(t, path=None):
         # update avg bond lengths
         for i in range(3*t.n-1):
             geo = t.token_geo(i, 1)
@@ -606,7 +706,10 @@ class BPE():
                 ind = BPE.get_ind(geo[key][0], RELV_THRESHOLDS[key])
             val = sum(RELV_THRESHOLDS[key][ind])/2
             t.set_token_geo(i, 1, {key: [val]})
-        return t
+        if path:
+            pickle.dump(t, open(path, "wb+"))
+        else:
+            return t
 
     @staticmethod
     def _opt_glue_worker(t, n):
@@ -887,6 +990,8 @@ class BPE():
                 cur += nb
         return t_new
 
+    def tokenize(self, t):
+        breakpoint()
 
     @staticmethod
     def hash_geo(geo):
@@ -1350,10 +1455,8 @@ class BPE():
         assignments = [None for _ in range(N)]
         max_workers = _effective_cpus()
         if max_workers == 0:
-            global ACTIVE_COORDS, MEDOID_INDS, ORIG
-            ACTIVE_COORDS, MEDOID_INDS, ORIG = active_coords, medoid_inds, super_res
             for idx, (ti, index) in enumerate(all_pos):
-                assignments[idx] = BPE._compute_assignment_wrapper((self.tokenizers[ti], self.tokenizers[ti].token_pos[index-1], length))
+                assignments[idx] = BPE._compute_assignment((self.tokenizers[ti], self.tokenizers[ti].token_pos[index-1], length), active_coords, medoid_inds, super_res)
         else:
             with ProcessPoolExecutor(
                 max_workers=max_workers,
@@ -1362,10 +1465,13 @@ class BPE():
             ) as pool:
                 futures = {
                     pool.submit(
-                        BPE._compute_assignment_wrapper,
-                        (self.tokenizers[ti], 
-                        self.tokenizers[ti].token_pos[index-1], 
-                        length)
+                        BPE._compute_assignment,
+                        (
+                            self.tokenizers[ti], 
+                            self.tokenizers[ti].token_pos[index-1], 
+                            length
+                        ),
+                        active_coords, medoid_inds, super_res
                     ): idx
                     for idx, (ti, index) in enumerate(all_pos)
                 }
@@ -1617,9 +1723,8 @@ class BPE():
                 global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
                 BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior
                 for idx in uniq_idxes:
-                    t = self.tokenizers[idx]
-                    t_copy = pickle.loads(pickle.dumps(t, protocol=pickle.HIGHEST_PROTOCOL))
-                    t_new = BPE._opt_glue_worker(t_copy, 3*t.n-4)
+                    t = self.tokenizers[idx]                    
+                    t_new = BPE._opt_glue_worker(pickle_copy(t), 3*t.n-4)
                     # find all the changed (dihedral, omega, C-N-CA) triples
                     for i1 in t.bond_to_token:
                         _, _, l1 = t.bond_to_token[i1]
@@ -1643,15 +1748,30 @@ class BPE():
                 futures = {
                     pool.submit(
                         BPE._opt_glue_worker,
-                        t,                # cheap to serialise
+                        pickle_copy(self.tokenizers[idx]),                # cheap to serialise
                         3*t.n - 4
                     ): idx
-                    for idx, t in enumerate(self.tokenizers)
+                    for idx in uniq_idxes
                 }
                 for future in tqdm(as_completed(futures), total=len(futures),
                             desc="optimizing all glues"):
                     idx = futures.pop(future)
-                    self.tokenizers[idx] = future.result()    
+                    t = self.tokenizers[idx]
+                    t_new = future.result()
+                    # find all the changed (dihedral, omega, C-N-CA) triples
+                    for i1 in t.bond_to_token:
+                        _, _, l1 = t.bond_to_token[i1]
+                        if i1+l1 == 3*t.n-1:
+                            continue
+                        i2, _, l2 = t.bond_to_token[i1+l1]
+                        new_key = self.compute_geo_key(((i1, None, l1), (i2, None, l2)), t_new)
+                        old_key = self.compute_geo_key(((i1, None, l1), (i2, None, l2)), t)
+                        if new_key != old_key:
+                            self._geo_dict[old_key].remove((idx, i2))
+                            diff_count[old_key].append((idx, i1, l1+l2, "remove"))
+                            self._geo_dict[new_key].add((idx, i2))
+                            diff_count[new_key].append((idx, i1, l1+l2, "add"))                    
+                    self.tokenizers[idx] = t_new
                     
 
 
@@ -1731,6 +1851,26 @@ class BPE():
         # TODO: make more efficient
         if self.plot_iou_with_sec_structs:
             self.compute_iou()
-        logger.info(f"Step {self._step-1} took {time_elapsed}")                     
-        # logger.info(f"Step {self._step-1} took {time_elapsed}")                     
+        logger.info(f"Step {self._step-1} took {time_elapsed}")
+        # logger.info(f"Step {self._step-1} took {time_elapsed}")
 
+
+def debug():
+    bpe = pickle.load(open("/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1755590444.3852272/bpe_iter=81.pkl", "rb"))
+    dataset = FullCathCanonicalCoordsDataset("test", 
+                                            use_cache=False,
+                                            zero_center=False)
+
+    cleaned_structures = []
+    for i, struc in enumerate(dataset.structures):
+        if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
+            print(f"skipping {i}, {struc['fname']} because of missing dihedrals")
+        else:
+            cleaned_structures.append(struc)
+    t = Tokenizer(cleaned_structures[0])
+    bpe.tokenize(t)    
+
+
+if __name__ == "__main__":
+    breakpoint()
+    debug()

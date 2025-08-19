@@ -387,6 +387,7 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
         Ks, Ls, bprs, errs = [], [], [], []
         tokenizers = bpe.tokenizers[:len(ref_coords)]
         start_iter = 0
+    orig_chains = [ProteinChain.from_pdb(bpe.tokenizers[i].fname) for i in range(len(ref_coords))]
     for t in range(start_iter, no_iters+1, step_iter):
         path = f'{d}/ref_tokenizers={t}.pkl'
         stats_path = f'{d}/stats={t}.json'
@@ -406,9 +407,10 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
         errors = []
         for i in tqdm(range(len(ref_coords))):
             # error = compute_rmsd(cur_coords[i], ref_coords[i]) 
+            orig_chain = orig_chains[i]
             chain_recon = ProteinChain.from_backbone_atom_coordinates(cur_coords[i].reshape(-1, 3, 3))
-            bb_rmsd = chain_recon.rmsd(bpe.chains[i], only_compute_backbone_rmsd=True)
-            lddt = np.array(chain_recon.lddt_ca(bpe.chains[i]))
+            bb_rmsd = chain_recon.rmsd(orig_chain, only_compute_backbone_rmsd=True)
+            lddt = np.array(chain_recon.lddt_ca(orig_chain))
             # errors.append((error, bb_rmsd, lddt.mean()))
             errors.append((bb_rmsd, lddt.mean()))
         err = np.mean(errors, axis=0)
@@ -433,9 +435,10 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
         errors = []
         for i in tqdm(range(len(ref_coords))):
             # error = compute_rmsd(alt_coords[i], ref_coords[i]) 
+            orig_chain = orig_chains[i]
             chain_recon = ProteinChain.from_backbone_atom_coordinates(alt_coords[i].reshape(-1, 3, 3))
-            bb_rmsd = chain_recon.rmsd(bpe.chains[i], only_compute_backbone_rmsd=True)
-            lddt = np.array(chain_recon.lddt_ca(bpe.chains[i]))
+            bb_rmsd = chain_recon.rmsd(orig_chain, only_compute_backbone_rmsd=True)
+            lddt = np.array(chain_recon.lddt_ca(orig_chain))
             # errors.append((error, bb_rmsd, lddt.mean()))
             errors.append((bb_rmsd, lddt.mean()))
         ref_errs.append(np.mean(errors, axis=0))
@@ -515,7 +518,7 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
                     color='tab:red', zorder=5)
     ax_rmsd.annotate(f"Lowest RMSD: {errs[best_rmsd_idx,0]:.2f}",
                      xy=(Ks[best_rmsd_idx], errs[best_rmsd_idx,0]),
-                     xytext=(10, -15), textcoords="offset points",
+                     xytext=(10, 15), textcoords="offset points",
                      arrowprops=dict(arrowstyle="->", color='tab:red'),
                      color='tab:red')
 
@@ -524,7 +527,7 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
                     color='tab:blue', zorder=5)
     ax_lddt.annotate(f"Highest LDDT: {errs[best_lddt_idx,1]:.2f}",
                      xy=(Ks[best_lddt_idx], errs[best_lddt_idx,1]),
-                     xytext=(10, 15), textcoords="offset points",
+                     xytext=(10, -15), textcoords="offset points",
                      arrowprops=dict(arrowstyle="->", color='tab:blue'),
                      color='tab:blue')
 
