@@ -991,7 +991,64 @@ class BPE():
         return t_new
 
     def tokenize(self, t):
-        breakpoint()
+        if not self.res_init:
+            raise NotImplementedError
+        # init bond lengths
+        lookup = self._thresholds if getattr(self, "std_bonds", True) else self._thresholds[1]
+        relv_thresholds = {bt: lookup[bt] for bt in lookup if bt in Tokenizer.BOND_TYPES}            
+        global RELV_THRESHOLDS, STD_BONDS
+        RELV_THRESHOLDS, STD_BONDS = relv_thresholds, getattr(self, "std_bonds", True)        
+        t = BPE._set_bond_length_worker(t)
+        R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
+        t.cached_all_frames = (R_occs, t_occs)
+        res_geo = defaultdict(list)
+        for i in range(t.n): # for each residue
+            start = 3*i
+            length = 3 if i < t.n-1 else 2                
+            res_geo[length].append(start)
+        t.token_pos = [3*(i//3) for i in range(3*t.n-1)]
+        t.tokens = [(3*i, None, 3) for i in range(t.n-1)] + [(3*t.n-3, None, 2)]
+        t.bond_to_token = {t[0]: t for t in t.tokens}
+        for n, size in enumerate(res_geo):                
+            t.bond_to_token_copy = t.bond_to_token
+            geo = t.token_geo(0, 5) if size == 3 else t.token_geo(0, 2)
+            key_coords = []
+            for p in range(self.num_partitions[size]):
+                key = self._tokens[(n, p)]
+                for k in key:
+                    geo[k][:len(key[k])] = key[k]
+                key_coords.append(Tokenizer.geo_nerf(geo).cartesian_coords[:size])                
+            for start in res_geo[size]:
+                coords = t.compute_coords(start, length)                    
+                costs = [compute_rmsd(coords, c) for c in keys_coords]
+                p = np.argmin(costs)
+                if start > 0 and self.glue_opt and self.glue_opt_method == "each":
+                    R_occ, t_occ = t.exit_frame(start, 3*((size-2)//3)+2)
+                    t.set_token_geo(start, size, self._tokens[(n, p)])
+                    BPE.opt_glue(t, start, 3*((size-2)//3)+2, R_occ, t_occ)
+                else:
+                    t.set_token_geo(start, size, self._tokens[(n, p)])
+                    t.bond_to_token_copy[start] = t.tokens[start//3]
+                t.tokens[start//3] = (start, (n, p), size)
+                t.bond_to_token[start] = t.tokens[start//3]
+        if not self.glue_opt:
+            keys = ['omega', 'C:1N:1CA', 'phi']
+            for angle in keys:
+                relv_thresh = self._thresholds[1][angle]
+                t.angles_and_dists[angle] = [sum(relv_thresh[BPE.get_ind(
+                        v if angle in Tokenizer.BOND_TYPES else (v+2*np.pi)%(2*np.pi), 
+                        relv_thresh
+                    )])/2 if v==v else v for v in t.angles_and_dists[angle]]
+        elif self.glue_opt_method == "all":
+            global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
+            BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior            
+            t = BPE._opt_glue_worker(t, 3*t.n-4)
+        # .bin() for single tokenizer
+        # iterate through all keys in order
+            # .step() for single tokenizer (without popping new key)
+        
+            
+        
 
     @staticmethod
     def hash_geo(geo):
@@ -1856,6 +1913,7 @@ class BPE():
 
 
 def debug():
+    from foldingdiff.datasets import FullCathCanonicalCoordsDataset
     bpe = pickle.load(open("/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1755590444.3852272/bpe_iter=81.pkl", "rb"))
     dataset = FullCathCanonicalCoordsDataset("test", 
                                             use_cache=False,
