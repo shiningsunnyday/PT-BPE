@@ -25,7 +25,8 @@ def _effective_cpus() -> int:
         return len(os.sched_getaffinity(0))
     except AttributeError:
         return os.cpu_count() or 1
-        
+
+
 class BPE():
     def __init__(self, structures, bins, 
         bin_strategy="histogram",
@@ -199,7 +200,7 @@ class BPE():
             os.makedirs(os.path.dirname(self._assignment_cache_path(f"exit_frame_cache", 0)), exist_ok=True)
             missing_jobs = []
             for idx in range(N):
-                p = self._assignment_cache_path("exit_frame_cache", idx)
+                p = self._assignment_cache_path("exit_frame_cache", idx, "npz")
                 if os.path.isfile(p):                       # already computed
                     try:
                         frames = np.load(p, allow_pickle=True)
@@ -284,7 +285,14 @@ class BPE():
                 for i in tqdm(active_inds, desc=f"gathering {len(active_inds)} occurrences"):
                     ti, start, length = res_geo[size][i]
                     t = self.tokenizers[ti]
-                    coords = t.compute_coords(start, length)
+                    coords = t.compute_coords(start, length, super_res)
+                    # sanity check
+                    # geo_template = t.token_geo(0,5) if size == 3 else t.token_geo(0,2)
+                    # geo = t.token_geo(start, length)
+                    # for k in geo: geo_template[k][:len(geo[k])]=geo[k]
+                    # coords_template = Tokenizer.geo_nerf(geo_template).cartesian_coords[:size+1]
+                    # err = compute_rmsd(coords_template, coords)                    
+                    # sanity check end
                     active_coords.append(coords)
                     active_occurs.append((ti, start, length))
 
@@ -468,7 +476,8 @@ class BPE():
                                 lambda_prior=0.1,
                                 bin_centers=None,
                                 thresholds=None):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cpu"
         # ---- fixed tensors from original chain ----
         if isinstance(R_occ, list):
             assert isinstance(t_occ, list)
@@ -990,7 +999,7 @@ class BPE():
                 cur += nb
         return t_new
 
-    def tokenize(self, t):
+    def tokenize(self, t, t_post_init):
         if not self.res_init:
             raise NotImplementedError
         # init bond lengths
@@ -1010,18 +1019,23 @@ class BPE():
         t.tokens = [(3*i, None, 3) for i in range(t.n-1)] + [(3*t.n-3, None, 2)]
         t.bond_to_token = {t[0]: t for t in t.tokens}
         for n, size in enumerate(res_geo):                
-            t.bond_to_token_copy = t.bond_to_token
+            t.bond_to_token_copy = dict(t.bond_to_token)
             geo = t.token_geo(0, 5) if size == 3 else t.token_geo(0, 2)
             key_coords = []
-            for p in range(self.num_partitions[size]):
+            p = 0
+            while (n, p) in self._tokens:
                 key = self._tokens[(n, p)]
                 for k in key:
                     geo[k][:len(key[k])] = key[k]
-                key_coords.append(Tokenizer.geo_nerf(geo).cartesian_coords[:size])                
+                p += 1
+                key_coords.append(Tokenizer.geo_nerf(geo).cartesian_coords[:size+1])
+                assert compute_rmsd(key_coords[-1], Tokenizer.key_coords(key)) < 1e-10
             for start in res_geo[size]:
-                coords = t.compute_coords(start, length)                    
-                costs = [compute_rmsd(coords, c) for c in keys_coords]
+                coords = t.compute_coords(start, size)                    
+                costs = [compute_rmsd(coords, c) for c in key_coords]
                 p = np.argmin(costs)
+                if t_post_init.bond_to_token[start][1] != (n, p):
+                    breakpoint()
                 if start > 0 and self.glue_opt and self.glue_opt_method == "each":
                     R_occ, t_occ = t.exit_frame(start, 3*((size-2)//3)+2)
                     t.set_token_geo(start, size, self._tokens[(n, p)])
@@ -1030,7 +1044,9 @@ class BPE():
                     t.set_token_geo(start, size, self._tokens[(n, p)])
                     t.bond_to_token_copy[start] = t.tokens[start//3]
                 t.tokens[start//3] = (start, (n, p), size)
-                t.bond_to_token[start] = t.tokens[start//3]
+                t.bond_to_token_copy[start] = t.tokens[start//3]
+            t.bond_to_token = t.bond_to_token_copy
+        delattr(t, "bond_to_token_copy")
         if not self.glue_opt:
             keys = ['omega', 'C:1N:1CA', 'phi']
             for angle in keys:
@@ -1041,12 +1057,21 @@ class BPE():
                     )])/2 if v==v else v for v in t.angles_and_dists[angle]]
         elif self.glue_opt_method == "all":
             global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
-            BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior            
-            t = BPE._opt_glue_worker(t, 3*t.n-4)
+            BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior
+            t = BPE._opt_glue_worker(pickle_copy(t), 3*t.n-4)
         # .bin() for single tokenizer
+        geo_dict = self.bin_helper(t)
         # iterate through all keys in order
-            # .step() for single tokenizer (without popping new key)
-        
+        uniq_keys = sorted(set(map(lambda t: t[0], self._tokens)))
+        geo_keys = list(self._sphere_dict) # assume in order of addition
+        assert len(uniq_keys) == len(geo_keys)
+        for n, key in zip(uniq_keys, geo_keys):
+            if n < 2:
+                continue            
+            if key in geo_dict:
+                # if in geo_dict, .step() for single tokenizer (without popping new key)                
+                t = self.step_helper(geo_dict, t, key, n)
+        breakpoint()
             
         
 
@@ -1176,6 +1201,135 @@ class BPE():
             geo[k] = quant_vals
         geo_key = self.hash_geo(geo)
         return geo_key
+    
+    def bin_helper(self, t):
+        # bin but as a helper function for given tokenizer t
+        geo_dict = defaultdict(set)
+        p1 = 0 # first ptr
+        p2 = p1+1
+        for j in range(len(t.bond_to_token)-1): # num tokens
+            while t.token_pos[p2] == p1:
+                p2 += 1
+            token_pair = (t.bond_to_token[p1], t.bond_to_token[p2])
+            geo_key = self.compute_geo_key(token_pair, t)
+            (i1, _, l1), (i2, _, l2) = token_pair
+            geo_dict[geo_key].add(i2) # store the start of the second token
+            p1 = p2
+        return geo_dict
+    
+    def step_helper(self, geo_dict, t, key, n):
+        """
+        geo_dict: similar to self._geo_dict but for t only
+        t: tokenizer
+        key: which freq key to step on
+        """
+        key_dict = json.loads(key)
+        length = Tokenizer.num_bonds(key_dict)
+        vals = list(geo_dict[key])
+        rmsd_key = key
+        medoid_coords = [Tokenizer.key_coords(geo) for geo in self._sphere_dict[key]]
+        assignments = [
+            np.argmin([compute_rmsd(t.compute_coords(start, length, orig=orig), med) for med in medoid_coords]
+                for start in vals)
+        ]
+        sort_val_idxes = sorted(range(len(vals)), key=lambda i: vals[i])        
+        last_i1 = None
+        for idx in sort_val_idxes:  # _geo_dict is sorted
+            index = vals[idx]
+            p = assignments[idx]
+            i2 = index  # start of second token
+            i1 = t.token_pos[index-1]  # start of prev token
+            l1 = i2 - i1
+            l2 = length - l1
+            overlaps = last_i1 is not None and (last_i1+length > i1) # overlaps
+            not_present = index not in geo_dict[key]
+            if overlaps != not_present:
+                breakpoint()
+            if overlaps:
+                continue
+            else:
+                assert ((l1 > 0) and (l2 > 0) and (l1 + l2 == length))                
+            geo_key = self.compute_geo_key(((i1, None, l1), (i2, None, l2)), t)
+            if geo_key != key: # should never happen
+                breakpoint()
+                continue
+
+            # --- Step 1: Decrement key ---
+            geo_dict[key].remove(index)
+
+            # --- Step 3 and 4: Decrement left and right key pair freq. ---
+            if i1:
+                i0 = t.token_pos[i1 - 1]
+                l0 = i1 - i0
+                left_key = self.compute_geo_key(((i0, None, l0), (i1, None, l1)), t)
+            else:
+                left_key = None
+            if i2 + l2 < len(t.token_pos):
+                i3 = i2 + l2
+                l3 = 0
+                while i3 + l3 < len(t.token_pos) and t.token_pos[i3 + l3] == i3:
+                    l3 += 1
+                right_key = self.compute_geo_key(((i2, None, l2), (i3, None, l3)), t) # 
+            else:
+                right_key = None
+
+            if left_key:
+                geo_dict[left_key].remove(i1)
+            if right_key:
+                geo_dict[right_key].remove(i3)
+
+            # --- Step 2: Update t.token_pos and t.bond_to_token ---
+            for j in range(i2, i2 + l2):
+                t.token_pos[j] = i1                 
+            t.bond_to_token.pop(i2)
+            t.bond_to_token[i1] = (i1, (n, p), length)
+
+            # --- Step 6: For RMSD keys, set geo now
+            i1 = t.token_pos[index-1]
+            if not self.rmsd_only:
+                if i1 > 0 and self.glue_opt and self.glue_opt_method == "each":
+                    # update now
+                    R_occ, t_occ = t.exit_frame(i1, 3*((length-2)//3)+2)
+                    t.set_token_geo(i1, length, self._sphere_dict[key][p])
+                    BPE.opt_glue(t, i1, 3*((length-2)//3)+2, R_occ, t_occ, self.glue_opt_prior, self._bin_centers, self._thresholds)
+                else:
+                    t.set_token_geo(i1, length, self._sphere_dict[key][p])
+            # --- Step 5: Increment new pairs ---                     
+            if left_key:
+                new_left_key = self.compute_geo_key(((i0, None, l0), (i1, None, l1 + l2)), t)
+                geo_dict[new_left_key].add(i1)
+            if right_key:
+                assert i1+l1+l2 == i3
+                new_right_key = self.compute_geo_key(((i1, None, l1 + l2), (i3, None, l3)), t)
+                geo_dict[new_right_key].add(i3)
+                           
+            last_i1 = i1
+
+        # -- Step 6 (cont.) for opt_glue
+        if not self.rmsd_only and self.glue_opt and self.glue_opt_method == "all":
+            global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
+            BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior                 
+            t_new = BPE._opt_glue_worker(pickle_copy(t), 3*t.n-4)
+            # find all the changed (dihedral, omega, C-N-CA) triples
+            for i1 in t.bond_to_token:
+                _, _, l1 = t.bond_to_token[i1]
+                if i1+l1 == 3*t.n-1:
+                    continue
+                i2, _, l2 = t.bond_to_token[i1+l1]
+                new_key = self.compute_geo_key(((i1, None, l1), (i2, None, l2)), t_new)
+                old_key = self.compute_geo_key(((i1, None, l1), (i2, None, l2)), t)
+                if new_key != old_key:
+                    geo_dict[old_key].remove(i2)
+                    geo_dict[new_key].add(i2)
+                # in some rare instances, new_key is an existing token, so we max out its priority
+                if new_key in self._sphere_dict:
+                    pass
+            t = t_new
+        return t
+                
+                    
+        
+
 
     def bin(self):
         """
@@ -1597,14 +1751,18 @@ class BPE():
         key_vis_path = os.path.join(self.save_dir, f"key_iter={self._step}.png")
         self.visualize(key, key_vis_path)
         vis_time = time.perf_counter()-vis_start_time
+        recurring = False
         # --- Step 0: Do RMSD packing if |token| >= rmsd_partition_min_size ---
         if Tokenizer.num_bonds(key_dict) >= self.rmsd_partition_min_size:
             if key in self._sphere_dict: # very rare for this to happen
+                # compute assignments directly without partitioning
+                recurring = True
                 breakpoint()
-            # Step 0.1: populate _sphere_dict
-            # Step 0.2: update geo
-            # Step 0.3: update _geo_dict
-            assignments = self.rmsd_partition(key)
+            else:
+                # Step 0.1: populate _sphere_dict
+                # Step 0.2: update geo
+                # Step 0.3: update _geo_dict
+                assignments = self.rmsd_partition(key)
             rmsd_key = key
         else:
             rmsd_key = None
@@ -1614,9 +1772,10 @@ class BPE():
         n = len(self._tokens)
         if rmsd_key is None:
             self._tokens[n] = key_dict        
-        else: # create a collection of tokens
-            for p, token_p in enumerate(self._sphere_dict[key]):
-                self._tokens[(n, p)] = token_p
+        else: # create a collection of tokens as long as key isn't already present
+            if not recurring:
+                for p, token_p in enumerate(self._sphere_dict[key]):
+                    self._tokens[(n, p)] = token_p
         # standardize and replace all occurrences
         # update 3 data structures: t.token_pos, _geo_dict, and pqueue
         # we will track which keys to remove/add, and later infer change to pqueue
@@ -1795,6 +1954,10 @@ class BPE():
                             diff_count[old_key].append((idx, i1, l1+l2, "remove"))
                             self._geo_dict[new_key].add((idx, i2))
                             diff_count[new_key].append((idx, i1, l1+l2, "add"))
+                        # in some rare instances, new_key is an existing token, so we max out its priority
+                        if new_key in self._sphere_dict:
+                            breakpoint()
+
                     self.tokenizers[idx] = t_new
             else:
                 pool = ProcessPoolExecutor(
@@ -1914,19 +2077,24 @@ class BPE():
 
 def debug():
     from foldingdiff.datasets import FullCathCanonicalCoordsDataset
-    bpe = pickle.load(open("/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1755590444.3852272/bpe_iter=81.pkl", "rb"))
+    d = "1755655949.3713498"
+    i = 20
+    bpe = pickle.load(open(f"/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/{d}/bpe_iter={i}.pkl", "rb"))
+    bpe_post_init = pickle.load(open(f"/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/{d}/bpe_post_init.pkl", "rb"))
     dataset = FullCathCanonicalCoordsDataset("test", 
                                             use_cache=False,
-                                            zero_center=False)
-
+                                            zero_center=False)    
     cleaned_structures = []
     for i, struc in enumerate(dataset.structures):
         if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
             print(f"skipping {i}, {struc['fname']} because of missing dihedrals")
         else:
             cleaned_structures.append(struc)
-    t = Tokenizer(cleaned_structures[0])
-    bpe.tokenize(t)    
+
+    index = 0
+    t = Tokenizer(cleaned_structures[index])
+    t_post_init = bpe_post_init.tokenizers[index]
+    bpe.tokenize(t, t_post_init)
 
 
 if __name__ == "__main__":

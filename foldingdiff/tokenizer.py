@@ -201,6 +201,36 @@ class Tokenizer:
             ans[di] = ans.get(di, []) + [self._dihedral_angle(j, orig=orig)]
         return ans
     
+    @staticmethod
+    def key_coords(key):
+        # check how many bonds
+        length = Tokenizer.num_bonds(key)
+        # figure out whether key starts with N:CA, CA:C, or 0C:1N
+        bt_cts = sorted([(len(key.get(bt, [])), bt) for bt in Tokenizer.BOND_TYPES])
+        ba_cts = sorted([(len(key.get(ba, [])), ba) for ba in Tokenizer.BOND_ANGLES])
+        da_cts = sorted([(len(key.get(da, [])), da) for da in Tokenizer.DIHEDRAL_ANGLES])
+        if bt_cts[2][0] > bt_cts[1][0]:
+            index = Tokenizer.BOND_TYPES.index(bt_cts[2][1])
+        elif ba_cts[2][0] > ba_cts[1][0]:
+            index = Tokenizer.BOND_ANGLES.index(ba_cts[2][1])
+        elif da_cts[2][0] > da_cts[1][0]:
+            assert da_cts[2][0] > da_cts[1][0]
+            index = Tokenizer.DIHEDRAL_ANGLES.index(da_cts[2][1])
+        else:
+            breakpoint()
+        start = 3*(index//3)
+        end = 3*(((index+length-1)+1)//3)+1 # end bond id, but we round it up so it's 1 (mod 3)
+        off_start = index-start
+        t = Tokenizer(Tokenizer.init_structure((end-start+2)//3))
+        # off_start, ..., off_start+length-1 set bonds
+        # off_start, ..., off_start+length-2 set bond angles
+        # off_start, ..., off_start+length-3 dihedral angles
+        t.set_token_geo(off_start, length, key)
+        coords = t.compute_coords()
+        return coords[off_start:off_start+length+1]
+        
+
+    
     def visualize_bonds(self, i1, length, output_path, **kwargs):
         coords = self.compute_coords(i1, length, orig=kwargs.pop("orig", False))
         # ATOM_TYPES[i1%3], ATOM_TYPES[i1%3+1], ..., ATOM_TYPES[i1%3+length]
@@ -283,6 +313,7 @@ class Tokenizer:
         return self._angles_and_dists_orig
     # plot_backbone([N_INIT,CA_INIT,C_INIT],'/n/home02/msun415/foldingdiff/test_before.png')
     # plot_backbone(list(update_backbone_positions(N_INIT, CA_INIT, C_INIT, geo['CA:C'][0], geo['N:CA'][0], 0.0)),'/n/home02/msun415/foldingdiff/test_after_after.png')
+
     @staticmethod
     def geo_nerf(geo):
         """

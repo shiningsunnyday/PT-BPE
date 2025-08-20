@@ -186,6 +186,7 @@ def parse_args():
     parser.add_argument("--glue-opt", type=str2bool, default=False, help="whether to opt the glue angles for rmsd keys")
     parser.add_argument("--glue-opt-prior", type=float, default=0.0, help="whether to impose a prior loss in glue opt")
     parser.add_argument("--glue-opt-method", choices=["each", "all"], default="each", help="optimize each glue after rounding or all glues together")
+    parser.add_argument("--seed", type=int, default=0, help="random seed for bpe's rng")
     parser.add_argument("--cache", action='store_true', help="whether to use cached data")
     parser.add_argument("--save-every", type=int, default=10, help="how often to dump")
     parser.add_argument("--plot-every", type=int, default=50, help="how often to plot")
@@ -316,7 +317,8 @@ def main():
                     std_bonds=not args.free_bonds,
                     glue_opt=args.glue_opt,
                     glue_opt_prior=args.glue_opt_prior,
-                    glue_opt_method=args.glue_opt_method)
+                    glue_opt_method=args.glue_opt_method,
+                    seed=args.seed)
                     
             pickle.dump(bpe, open(init_bpe_path, 'wb+'))
 

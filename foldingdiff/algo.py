@@ -163,41 +163,43 @@ def k_medoids(
         print(f"k-medoids: k=N={k}, every struc is a medoid")
         return list(range(N))
 
-    active_idx = np.arange(N)
     if rng is None:
         rng = np.random.default_rng(None)
 
+    D = np.empty((N, N), dtype=np.float32)
+    for i in tqdm(range(N), desc="Pre-computing distance matrix -- outer loop"):
+        for j in range(i, N):
+            d = compute_rmsd(strucs[i], strucs[j])
+            D[i, j] = D[j, i] = d        
+
     # --- initialisation (unchanged except we draw from `active_idx`) -----------
-    medoid_indices = rng.choice(active_idx, size=k, replace=False)
-    medoids = [strucs[i] for i in medoid_indices]
+    medoid_indices = rng.choice(np.arange(N), size=k, replace=False)
 
     assignments = np.zeros(N, dtype=int)
     for iteration in tqdm(range(max_iterations), desc="running k_medoids"):
         # -------- assignment step (only on the active subset) -----------------
-        for i in active_idx:
-            costs = [compute_rmsd(strucs[i], medoids[j]) for j in range(k)]
-            assignments[i] = np.argmin(costs)
+        for i in range(N):
+            assignments[i] = np.argmin(D[i, medoid_indices])
 
         # -------- update step --------------------------------------------------
         total_shift = 0.0
-        new_medoids, new_medoid_indices = [], []
+        new_medoid_indices = []
         for j in range(k):
-            cluster_members = [idx for idx in active_idx if assignments[idx] == j]
+            cluster_members = [idx for idx in range(N) if assignments[idx] == j]
             if not cluster_members:
                 new_idx = rng.choice(N)              # re-initialise from *all* data
             else:
                 # pick candidate with minimal total intra-cluster distance
                 dists = [
-                    sum(compute_rmsd(strucs[c], strucs[m]) for m in cluster_members)
+                    sum(D[c, m] for m in cluster_members)
                     for c in cluster_members
                 ]
                 new_idx = cluster_members[int(np.argmin(dists))]
-            shift = compute_rmsd(medoids[j], strucs[new_idx])
+            shift = D[medoid_indices[j], new_idx]
             total_shift += shift
-            new_medoids.append(strucs[new_idx])
             new_medoid_indices.append(new_idx)
 
-        medoids, medoid_indices = new_medoids, new_medoid_indices
+        medoid_indices = new_medoid_indices
         if total_shift < tol:
             print(f"Converged in {iteration + 1} iterations with total shift {total_shift:.6f}.")
             break
