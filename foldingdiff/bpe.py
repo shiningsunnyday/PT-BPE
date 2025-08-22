@@ -162,7 +162,7 @@ class BPE():
         else:
             os.makedirs(os.path.dirname(self._assignment_cache_path(f"bond_std_tokenizers", 0)), exist_ok=True)
             missing_jobs = []
-            for idx in range(N):
+            for idx in tqdm(range(N), desc="loading bond std tokenizers"):
                 p = self._assignment_cache_path("bond_std_tokenizers", idx)
                 if os.path.isfile(p):                       # already computed
                     try:
@@ -199,7 +199,7 @@ class BPE():
         if self.glue_opt and self.glue_opt_method == "all":            
             os.makedirs(os.path.dirname(self._assignment_cache_path(f"exit_frame_cache", 0)), exist_ok=True)
             missing_jobs = []
-            for idx in range(N):
+            for idx in tqdm(range(N), desc="loading exit frame cache"):
                 p = self._assignment_cache_path("exit_frame_cache", idx, "npz")
                 if os.path.isfile(p):                       # already computed
                     try:
@@ -298,48 +298,36 @@ class BPE():
 
                 # run k-medoids                
                 medoid_inds = k_medoids(active_coords, self.num_partitions[size], rng=self.rng)                
-                # -------- final assignment for *all* structures ---------------------------                
-                
-                assignments = [None for _ in range(N)]
+                # -------- final assignment for *all* structures ---------------------------                                                
                 if max_workers == 0:
+                    assignments = [None for _ in range(N)]
                     for idx, (ti, start, length) in enumerate(res_geo[size]):
                         assignments[idx] = BPE._compute_assignment((self.tokenizers[ti], start, length), active_coords, medoid_inds, super_res)
                 else:   
-                    os.makedirs(os.path.dirname(self._assignment_cache_path(f"assignments_{size}", 0)), exist_ok=True)
-                    missing_jobs = []
-                    for idx in range(N):
-                        p = self._assignment_cache_path(f"assignments_{size}", idx)
-                        if os.path.isfile(p):                       # already computed
-                            try:
-                                assignments[idx] = int(np.load(p))
-                            except:
-                                missing_jobs.append(idx)
-                        else:                                       # still to be done
-                            missing_jobs.append(idx)
+                    fname = os.path.join(self.save_dir, f"assignments_{size}.npy")
+                    if not os.path.exists(fname):
+                        # fill with sentinel -1 so you know what is still missing
+                        np.lib.format.open_memmap(fname, mode='w+', dtype=np.int32, shape=(N,))[:] = -1
+                    assignments = np.load(fname, mmap_mode='r+')
+                    missing_jobs = np.where(assignments == -1)[0]
 
-                    # Skip the executor entirely if everything is cached ----------------------
-                    if missing_jobs:
+                    if len(missing_jobs):
                         with ProcessPoolExecutor(
-                            max_workers=max_workers,
-                            initializer=BPE._init_assignment_worker,
-                            initargs=(active_coords, medoid_inds, super_res)
+                                max_workers=max_workers,
+                                initializer=BPE._init_assignment_worker,
+                                initargs=(active_coords,
+                                        medoid_inds,
+                                        super_res,
+                                        self.tokenizers,
+                                        res_geo[size],
+                                        fname)
                         ) as pool:
-                            arg_iter = (
-                                (
-                                    idx, 
-                                    self.tokenizers[ti], 
-                                    start, 
-                                    length, 
-                                    self._assignment_cache_path(f"assignments_{size}", idx)
-                                )
-                                for idx, (ti, start, length) in enumerate(res_geo[size])
-                                if idx in missing_jobs
-                            )
-                            for idx in tqdm(pool.map(BPE._compute_assignment_wrapper, arg_iter, chunksize=10),
-                                        total=len(missing_jobs),
-                                        desc="computing assignments"):
-                                p = self._assignment_cache_path(f"assignments_{size}", idx)
-                                assignments[idx] = int(np.load(p))
+                            for _ in tqdm(pool.map(BPE._assignment_worker, missing_jobs,
+                                                        chunksize=5000),   # big chunk
+                                                total=len(missing_jobs),
+                                                desc="computing assignments"):
+                                pass
+                        assignments.flush()
 
                 # vis the res medoids     
                 if size == 3:
@@ -648,29 +636,33 @@ class BPE():
         return tuple(best)
 
     @staticmethod
-    def _compute_assignment(args, active_coords, medoid_inds, orig):             # NEW
+    def _compute_assignment(args):             # NEW
         """Worker that returns the index of the closest medoid for one segment."""
-        t, start, length = args
-        coords = t.compute_coords(start, length, orig=orig)
-        costs = [compute_rmsd(coords, active_coords[idx]) for idx in medoid_inds]
+        ti, start, length = args
+        t = TOKENIZERS[ti]
+        coords = t.compute_coords(start, length, orig=ORIG)
+        costs = [compute_rmsd(coords, ACTIVE_COORDS[idx]) for idx in MEDOID_INDS]
         return np.argmin(costs)
 
-    @staticmethod
-    def _compute_assignment_wrapper(args):
-        idx, t, start, length, path = args
-        ans = BPE._compute_assignment((t, start, length),
-                                    active_coords=ACTIVE_COORDS,
-                                    medoid_inds=MEDOID_INDS,
-                                    orig=ORIG)
-        np.save(path, ans)
-        return idx
     
     @staticmethod
-    def _init_assignment_worker(ac, mi, o):
-        global ACTIVE_COORDS, MEDOID_INDS, ORIG
-        ACTIVE_COORDS  = ac
-        MEDOID_INDS    = mi
-        ORIG           = o
+    def _init_assignment_worker(ac, mi, o, tok_list=None, rg=None, fname=None):
+        global ACTIVE_COORDS, MEDOID_INDS, ORIG, TOKENIZERS, RES_GEO
+        if fname is not None:
+            global ASSIGN
+            ASSIGN = np.load(fname, mmap_mode='r+')
+        ACTIVE_COORDS = ac
+        MEDOID_INDS = mi
+        ORIG = o
+        TOKENIZERS = tok_list
+        RES_GEO = rg
+
+    @staticmethod
+    def _compute_assignment_wrapper(idx):
+        ti, start, length = RES_GEO[idx]        
+        ans = BPE._compute_assignment((ti, start, length))
+        return ans
+
     
     @staticmethod
     def _init_set_bond_length_worker(rt, sb):
@@ -684,6 +676,12 @@ class BPE():
         BIN_CENTERS = bc
         THRESHOLDS = th
         GLUE_OPT_PRIOR = gop
+
+
+    @staticmethod
+    def _assignment_worker(idx):                                          # lightweight
+        if ASSIGN[idx] == -1:                                  # still empty
+            ASSIGN[idx] = BPE._compute_assignment_wrapper(idx)
     
 
     @staticmethod
@@ -691,7 +689,7 @@ class BPE():
         idx, t, path = args
         R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
         np.savez(path, R_occs=R_occs, t_occs=t_occs)
-        return idx
+        return idx      
 
 
     def _assignment_cache_path(self, prefix: str, idx: int, ext: str = "npy") -> str:
@@ -1071,7 +1069,9 @@ class BPE():
             if key in geo_dict:
                 # if in geo_dict, .step() for single tokenizer (without popping new key)                
                 t = self.step_helper(geo_dict, t, key, n)
-        breakpoint()
+        t_true = self.tokenizers[next((i for i in range(len(self.tokenizers)) if self.tokenizers[i].fname == t.fname))]
+        assert t.bond_to_token == t_true.bond_to_token
+        assert (t.angles_and_dists != t_true.angles_and_dists).sum().sum() == 6
             
         
 
@@ -1223,14 +1223,15 @@ class BPE():
         t: tokenizer
         key: which freq key to step on
         """
+        super_res = self.rmsd_super_res if hasattr(self, "rmsd_super_res") else False
         key_dict = json.loads(key)
         length = Tokenizer.num_bonds(key_dict)
         vals = list(geo_dict[key])
         rmsd_key = key
         medoid_coords = [Tokenizer.key_coords(geo) for geo in self._sphere_dict[key]]
         assignments = [
-            np.argmin([compute_rmsd(t.compute_coords(start, length, orig=orig), med) for med in medoid_coords]
-                for start in vals)
+            np.argmin([compute_rmsd(t.compute_coords(start, length, orig=super_res), med) for med in medoid_coords])
+                for start in vals
         ]
         sort_val_idxes = sorted(range(len(vals)), key=lambda i: vals[i])        
         last_i1 = None
@@ -1672,17 +1673,12 @@ class BPE():
             with ProcessPoolExecutor(
                 max_workers=max_workers,
                 initializer=BPE._init_assignment_worker,
-                initargs=(active_coords, medoid_inds, super_res)
+                initargs=(active_coords, medoid_inds, super_res, self.tokenizers)
             ) as pool:
                 futures = {
                     pool.submit(
                         BPE._compute_assignment,
-                        (
-                            self.tokenizers[ti], 
-                            self.tokenizers[ti].token_pos[index-1], 
-                            length
-                        ),
-                        active_coords, medoid_inds, super_res
+                        (ti, self.tokenizers[ti].token_pos[index-1], length)
                     ): idx
                     for idx, (ti, index) in enumerate(all_pos)
                 }
@@ -2091,10 +2087,10 @@ def debug():
         else:
             cleaned_structures.append(struc)
 
-    index = 0
-    t = Tokenizer(cleaned_structures[index])
-    t_post_init = bpe_post_init.tokenizers[index]
-    bpe.tokenize(t, t_post_init)
+    for index in range(len(bpe.tokenizers)):
+        t = Tokenizer(cleaned_structures[index])
+        t_post_init = bpe_post_init.tokenizers[index]
+        bpe.tokenize(t, t_post_init)
 
 
 if __name__ == "__main__":

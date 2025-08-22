@@ -185,16 +185,13 @@ def k_medoids(
         total_shift = 0.0
         new_medoid_indices = []
         for j in range(k):
-            cluster_members = [idx for idx in range(N) if assignments[idx] == j]
-            if not cluster_members:
-                new_idx = rng.choice(N)              # re-initialise from *all* data
+            members = np.where(assignments == j)[0]      # indices of cluster j
+            if members.size == 0:                        # empty cluster → re-seed
+                new_idx = rng.integers(N)
             else:
                 # pick candidate with minimal total intra-cluster distance
-                dists = [
-                    sum(D[c, m] for m in cluster_members)
-                    for c in cluster_members
-                ]
-                new_idx = cluster_members[int(np.argmin(dists))]
+                intra = D[np.ix_(members, members)].sum(axis=1)
+                new_idx = members[np.argmin(intra)]
             shift = D[medoid_indices[j], new_idx]
             total_shift += shift
             new_medoid_indices.append(new_idx)

@@ -219,8 +219,8 @@ def main():
         save_dir = Path(args.save_dir)
         name = save_dir.name
         plot_dir = os.path.join(args.base_dir, f'./plots/learn/{name}')
-        assert os.path.exists(plot_dir)
-        assert os.path.exists(save_dir)
+        os.makedirs(plot_dir, exist_ok=True)
+        os.makedirs(save_dir, exist_ok=True)
         setattr(args, 'plot_dir', plot_dir)
     elif args.auto:
         cur_time = time.time()
@@ -389,11 +389,13 @@ def main():
             pickle.dump(bpe.tokenizers[:num_ref], open(os.path.join(args.save_dir, f'ref_tokenizers={t}.pkl'), 'wb+'))
             # stats
             stats_path = os.path.join(args.save_dir, f'stats={t}.json')
+            K = len(bpe._tokens)
+            L = np.mean([len(t.bond_to_token) for t in bpe.tokenizers])
             json.dump(
                 {
-                    "K": len(bpe._tokens),
-                    "L": np.mean([len(t.bond_to_token) for t in bpe.tokenizers]),
-                    "bpr": bpe.capacity(tokenizer=True)
+                    "K": K,
+                    "L": L,
+                    "bpr": bpe.capacity(tokenizer=True)/(N*L)
                 },
                 open(stats_path, "w+")
             )

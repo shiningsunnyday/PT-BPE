@@ -22,7 +22,7 @@ runner="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/esm_env/bin/python"
 
 if [ $1 -eq 1 ]; then
   echo "debug"
-  export SLURM_CPUS_PER_TASK=0
+  # export SLURM_CPUS_PER_TASK=0
   runner="${runner} -m pdb -c continue"
 fi
 
@@ -53,7 +53,7 @@ else
   extra="--auto"
 fi
 export CUDA_VISIBLE_DEVICES=""
-export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS=8
 PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   $runner bin/encode.py \
   --bin-strategy $bin_strat \
