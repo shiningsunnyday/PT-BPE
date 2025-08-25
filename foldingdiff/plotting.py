@@ -433,7 +433,7 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
                 t.angles_and_dists[key] = randvals
         alt_coords = [tokenizers[i].compute_coords() for i in range(len(ref_coords))]
         errors = []
-        for i in tqdm(range(len(ref_coords))):
+        for i in range(len(ref_coords)):
             # error = compute_rmsd(alt_coords[i], ref_coords[i]) 
             orig_chain = orig_chains[i]
             chain_recon = ProteinChain.from_backbone_atom_coordinates(alt_coords[i].reshape(-1, 3, 3))
@@ -473,7 +473,7 @@ def plot(bpe, num_tokens, ref_coords, output_path, no_iters=500, prev_iter=0, st
         color="orange"
     )
     ax1.set_ylabel("L (# Motif-Tokens Per PDB)")    
-    ax1.set_xlabel("K (Vocab Size) Every Round" if skip == 1 else f"K (Vocab Size) Every {skip} Rounds")
+    ax1.set_xlabel(f"K (Vocab Size) Every {skip*step_iter} Rounds")
     ax1.set_xticks(Ks if skip == 1 else Ks[0::skip])
     ax1.tick_params(axis="y", labelcolor='tab:orange')
 
