@@ -46,9 +46,10 @@ glue_opt=${14}
 glue_opt_method=${15}
 free_bonds=${16}
 rmsd_super_res=${17}
+glue_opt_every=${18}
 
-if [ -n "${18}" ]; then
-  extra="--save-dir ${18}"
+if [ -n "${19}" ]; then
+  extra="--save-dir ${19}"
 else
   extra="--auto"
 fi
@@ -77,4 +78,5 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --max-num-strucs $max_num_strucs \
   --glue-opt $glue_opt \
   --glue-opt-method $glue_opt_method \
+  --glue-opt-every $glue_opt_every \
   $extra
