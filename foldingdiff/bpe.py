@@ -698,7 +698,7 @@ class BPE():
         return os.path.join(self.save_dir, prefix, f"{idx}.{ext}")
     
     @staticmethod
-    def _set_bond_length_worker(t, path=None):
+    def _set_bond_length_worker(t, path=None, strict=True):
         # update avg bond lengths
         for i in range(3*t.n-1):
             geo = t.token_geo(i, 1)
@@ -709,7 +709,12 @@ class BPE():
                 assert len(RELV_THRESHOLDS[key]) == 1
                 ind = 0
             else:
-                ind = BPE.get_ind(geo[key][0], RELV_THRESHOLDS[key])
+                if not strict and geo[key][0] < RELV_THRESHOLDS[key][0][0]:
+                    ind = 0
+                elif not strict and geo[key][0] > RELV_THRESHOLDS[key][-1][1]:
+                    ind = -1
+                else:
+                    ind = BPE.get_ind(geo[key][0], RELV_THRESHOLDS[key])
             val = sum(RELV_THRESHOLDS[key][ind])/2
             t.set_token_geo(i, 1, {key: [val]})
         if path:
@@ -1009,7 +1014,7 @@ class BPE():
         relv_thresholds = {bt: lookup[bt] for bt in lookup if bt in Tokenizer.BOND_TYPES}            
         global RELV_THRESHOLDS, STD_BONDS
         RELV_THRESHOLDS, STD_BONDS = relv_thresholds, getattr(self, "std_bonds", True)        
-        t = BPE._set_bond_length_worker(t)
+        t = BPE._set_bond_length_worker(t, strict=False)
         R_occs, t_occs = t.exit_frame(3, 3*t.n-4, ret_all=True)
         t.cached_all_frames = (R_occs, t_occs)
         res_geo = defaultdict(list)
@@ -1067,15 +1072,20 @@ class BPE():
         uniq_keys = sorted(set(map(lambda t: t[0], self._tokens)))
         geo_keys = list(self._sphere_dict) # assume in order of addition
         assert len(uniq_keys) == len(geo_keys)
-        for n, key in zip(uniq_keys, geo_keys):
+        count = 0
+        for n, key in tqdm(zip(uniq_keys, geo_keys), desc="iterating through keys", total=len(uniq_keys)):
             if n < 2:
                 continue            
             if key in geo_dict:
                 # if in geo_dict, .step() for single tokenizer (without popping new key)                
-                t = self.step_helper(geo_dict, t, key, n)
-        t_true = self.tokenizers[next((i for i in range(len(self.tokenizers)) if self.tokenizers[i].fname == t.fname))]
-        assert t.bond_to_token == t_true.bond_to_token
-        assert (t.angles_and_dists != t_true.angles_and_dists).sum().sum() == 6
+                print("step start")
+                t = self.step_helper(geo_dict, t, key, n, opt=count%self.glue_opt_every == 0)
+                count += 1
+                print("step end")
+
+        # t_true = self.tokenizers[next((i for i in range(len(self.tokenizers)) if self.tokenizers[i].fname == t.fname))]
+        # assert t.bond_to_token == t_true.bond_to_token
+        # assert (t.angles_and_dists != t_true.angles_and_dists).sum().sum() == 6
             
         
 
@@ -1221,7 +1231,7 @@ class BPE():
             p1 = p2
         return geo_dict
     
-    def step_helper(self, geo_dict, t, key, n):
+    def step_helper(self, geo_dict, t, key, n, opt=False):
         """
         geo_dict: similar to self._geo_dict but for t only
         t: tokenizer
@@ -1234,8 +1244,8 @@ class BPE():
         rmsd_key = key
         medoid_coords = [Tokenizer.key_coords(geo) for geo in self._sphere_dict[key]]
         assignments = [
-            np.argmin([compute_rmsd(t.compute_coords(start, length, orig=super_res), med) for med in medoid_coords])
-                for start in vals
+            np.argmin([compute_rmsd(t.compute_coords(t.token_pos[index-1], length, orig=super_res), med) for med in medoid_coords])
+                for index in vals
         ]
         sort_val_idxes = sorted(range(len(vals)), key=lambda i: vals[i])        
         last_i1 = None
@@ -1311,7 +1321,7 @@ class BPE():
             last_i1 = i1
 
         # -- Step 6 (cont.) for opt_glue
-        if not self.rmsd_only and self.glue_opt and self.glue_opt_method == "all":
+        if not self.rmsd_only and self.glue_opt and self.glue_opt_method == "all" and opt:
             global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
             BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior                 
             t_new = BPE._opt_glue_worker(pickle_copy(t))
