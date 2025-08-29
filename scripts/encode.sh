@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 #SBATCH -p test # partition (queue)
-#SBATCH -c 20 # number of cores
+#SBATCH -c 10 # number of cores
 #SBATCH --mem 500g # memory pool for all cores
 #SBATCH -t 0-12:00 # time
 #SBATCH -o /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_encode.%j.out # STDOUT

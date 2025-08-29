@@ -1072,16 +1072,24 @@ class BPE():
         uniq_keys = sorted(set(map(lambda t: t[0], self._tokens)))
         geo_keys = list(self._sphere_dict) # assume in order of addition
         assert len(uniq_keys) == len(geo_keys)
+        keys = [(n, key) for (n, key) in zip(uniq_keys[2:], geo_keys[2:])]
+        orig_chain = ProteinChain.from_pdb(t.fname)
+        metrics = defaultdict(list)
         count = 0
-        for n, key in tqdm(zip(uniq_keys, geo_keys), desc="iterating through keys", total=len(uniq_keys)):
-            if n < 2:
-                continue            
+        cur_chain = ProteinChain.from_backbone_atom_coordinates(t.compute_coords().reshape(-1, 3, 3))
+        for _iter, (n, key) in tqdm(enumerate(keys), desc="iterating through keys", total=len(keys)):
             if key in geo_dict:
                 # if in geo_dict, .step() for single tokenizer (without popping new key)                
-                print("step start")
                 t = self.step_helper(geo_dict, t, key, n, opt=count%self.glue_opt_every == 0)
                 count += 1
-                print("step end")
+                cur_chain = ProteinChain.from_backbone_atom_coordinates(t.compute_coords().reshape(-1, 3, 3))
+            bb_rmsd = cur_chain.rmsd(orig_chain, only_compute_backbone_rmsd=True)
+            lddt = cur_chain.lddt_ca(orig_chain)
+            metrics["rmsd"].append(bb_rmsd)
+            metrics["lddt"].append(lddt.mean())
+            metrics["L"].append(len(t.bond_to_token))
+        return metrics
+        
 
         # t_true = self.tokenizers[next((i for i in range(len(self.tokenizers)) if self.tokenizers[i].fname == t.fname))]
         # assert t.bond_to_token == t_true.bond_to_token
@@ -1689,17 +1697,10 @@ class BPE():
                 initializer=BPE._init_assignment_worker,
                 initargs=(active_coords, medoid_inds, super_res, self.tokenizers)
             ) as pool:
-                futures = {
-                    pool.submit(
-                        BPE._compute_assignment,
-                        (ti, self.tokenizers[ti].token_pos[index-1], length)
-                    ): idx
-                    for idx, (ti, index) in enumerate(all_pos)
-                }
-                for future in tqdm(as_completed(futures), total=len(futures),
-                            desc="computing assignments"):
-                    idx = futures.pop(future)
-                    assignments[idx] = future.result()
+                for idx, res in zip(range(N), tqdm(pool.map(BPE._compute_assignment, [
+                    (ti, self.tokenizers[ti].token_pos[index-1], length) for idx, (ti, index) in enumerate(all_pos)
+                ], chunksize=100), total=len(all_pos), desc="computing assignments")):
+                    assignments[idx] = res
 
         # _sphere_dict
         self._sphere_dict[k] = []

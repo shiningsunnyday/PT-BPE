@@ -48,7 +48,7 @@ case "$1" in
     ;;
   5)
     task="repeat-motif-prediction"
-    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8772147/bpe_iter=9990.pkl"    
+    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8772147/bpe_iter=9990.pkl"
     ckpt_dir="./ckpts/1747271619.576858" # done    
     ;;
   6)
