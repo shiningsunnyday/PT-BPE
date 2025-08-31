@@ -66,7 +66,7 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --data-dir $data_dir \
   --save-every $save_every \
   --plot-every $plot_every \
-  --log-dir /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/logs \
+  --log-dir /n/netscratch/mzitnik_lab/Lab/msun415/logs \
   --pad $pad \
   --toy $toy \
   --p-min-size $p_size \

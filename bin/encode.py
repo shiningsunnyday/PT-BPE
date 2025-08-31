@@ -276,9 +276,6 @@ def main():
         ref_coords = np.load(ref_path, allow_pickle=True)
         num_ref = len(ref_coords)
         xlims, ylims, zlims = map(lambda t: list(map(tuple, t)), tuple(np.load(lims_path)))        
-        if args.save_dir != bpe.save_dir:
-            logger.info(f"resetting save_dir from {bpe.save_dir} to {args.save_dir}")
-            bpe.save_dir = args.save_dir
     else:
         init_bpe_path = os.path.join(args.save_dir, f'bpe_init.pkl')
         post_init_bpe_path = os.path.join(args.save_dir, f'bpe_post_init.pkl')
@@ -363,7 +360,9 @@ def main():
             bpe_debug = BPE(dataset.structures, bins=args.bins, save_dir=args.save_dir)
             bpe_debug.initialize()
             bpe_debug.old_bin()
-    
+    if args.save_dir != bpe.save_dir:
+        logger.info(f"resetting save_dir from {bpe.save_dir} to {args.save_dir}")
+        bpe.save_dir = args.save_dir    
     vis_paths = [[] for _ in range(num_vis)]    
     for t in range(_iter+1, 10000):
         ## visualization        

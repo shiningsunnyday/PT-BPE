@@ -56,7 +56,8 @@ def tokenize_structure(args):
         pickle.load(open(SAVE_DIR / f"{idx}.pkl", "rb"))
         return
     except:
-        print('start tokenize_structure')    
+        pass
+        # print('start tokenize_structure')    
     tok = Tokenizer(struc)
     res = BPE.tokenize(tok)
     pickle.dump((res, tok), open(SAVE_DIR / f"{idx}.pkl", "wb+"))    
@@ -146,11 +147,9 @@ def main():
     print(f"save_dir: {save_dir}")
     src_file = Path(args.src_pkl)
     bpe = pickle.load(open(src_file, "rb"))
-    # store metadata
-    arg_path = src_file.parent / "args.txt"
+    # store metadata    
     args_path = save_dir / "args.txt"
-    out_path = save_dir / src_file.name
-    shutil.copyfile(arg_path, save_dir / "orig_args.txt")
+    out_path = save_dir / src_file.name    
     if os.path.exists(args_path):
         print(f"loading args from {args_path}")
         loaded_args = load_args_from_txt(args_path)    
@@ -163,6 +162,8 @@ def main():
         with open(args_path, "w") as f:
             for arg_name, arg_value in sorted(args.__dict__.items()):
                 f.write(f"{arg_name}: {arg_value}\n")    
+    arg_path = src_file.parent / "args.txt"
+    shutil.copyfile(arg_path, save_dir / "orig_args.txt")
     # induce
     dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
                                         zero_center=False, 
@@ -189,13 +190,13 @@ def main():
             initargs=(bpe, save_dir)                                # only BPE is broadcast
         ) as pool:
             for _ in tqdm(pool.map(
-                    tokenize_structure, pargs, chunksize=1),
-                    total=N, desc="tokenizing"):
+                    tokenize_structure, pargs, chunksize=10),
+                    total=N, desc="tokenizing mp"):
                 pass
     else:
         global BPE, SAVE_DIR
         BPE, SAVE_DIR = bpe, save_dir
-        for parg in pargs: 
+        for parg in tqdm(pargs, desc="tokenizing"):
             tokenize_structure(parg)
 
     for i in tqdm(range(N), desc="loading done tokenizers"):

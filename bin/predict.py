@@ -121,6 +121,7 @@ def parse_args():
     # data
     parser.add_argument("--pkl-file", type=str, required=True, 
                         help="Load the BPE results.")    
+    parser.add_argument("--dedup", action='store_true', help="whether to use the deduplicated or processed data")
     parser.add_argument("--pkl-data-file", type=str, 
                         help="Path to cache the train/valid dataset.")                            
     parser.add_argument("--save-dir", type=str, default="plots/models", 
@@ -134,7 +135,10 @@ def parse_args():
     # hparams
     parser.add_argument("--p_min_size", default=float("inf"), help="when to start using rmsd binning")
     parser.add_argument("--level", default="protein", help="prediction at protein or residue level", choices=["protein", "residue"])
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.dedup and args.pkl_data_file and "dedup" not in args.pkl_data_file:
+        parser.error("specify pkl-data-file to path of dedup data")
+    return args
 
 
 
@@ -363,6 +367,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
         best_val_auroc = 0.0
     else:
         best_val_macro_f1 = -1.0
+    # --- Early stopping config ---
+    patience = 5
+    epochs_no_improve = 0
 
     for epoch in range(num_epochs):
         probe.train()
@@ -524,11 +531,11 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                     scores = torch.sigmoid(batch_logits)
                     preds = (scores > 0.5).long()
                     labels = labels.squeeze(0)
+                    valid_scores.extend(scores.cpu().tolist())
                 else:
                     preds = batch_logits.argmax(dim=1)
 
-                valid_preds.extend(preds.cpu().tolist())
-                valid_scores.extend(scores.cpu().tolist())
+                valid_preds.extend(preds.cpu().tolist())                
                 valid_labels.extend(labels.cpu().tolist())
 
         avg_valid_loss = valid_loss / num_valid_samples
@@ -546,6 +553,7 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                 f"Train Acc: {train_accuracy*100:.2f}%, Valid Loss: {avg_valid_loss:.4f}, "
                 f"Valid Acc: {valid_accuracy*100:.2f}%, Valid Macro F1: {val_macro_f1:.4f}")
 
+
         # ----------------------
         # Checkpoint saving
         # ----------------------
@@ -561,6 +569,7 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                 'val_auroc': best_val_auroc,
             }, checkpoint_path)
             print(f"New best auroc achieved: {best_val_auroc:.4f}. Saved checkpoint to {checkpoint_path}.")            
+            epochs_no_improve = 0
         elif num_classes > 1 and val_macro_f1 > best_val_macro_f1:
             best_val_macro_f1 = val_macro_f1
             os.makedirs(args.save_dir, exist_ok=True)
@@ -573,6 +582,23 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                 'val_macro_f1': best_val_macro_f1,
             }, checkpoint_path)
             print(f"New best macro F1 achieved: {best_val_macro_f1:.4f}. Saved checkpoint to {checkpoint_path}.")
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                if num_classes == 1:
+                    print(
+                        f"Early stopping at epoch {epoch+1}: "
+                        f"no val auroc improvement for {patience} epochs "
+                        f"(best val auroc: {best_val_auroc:.4f})."
+                    )
+                else:
+                    print(
+                        f"Early stopping at epoch {epoch+1}: "
+                        f"no val macro F1 improvement for {patience} epochs "
+                        f"(best val macro f1: {best_val_macro_f1:.4f})."
+                    )                    
+                break            
 
 def test_probe(args, test_datasets, num_classes):
     """
@@ -737,36 +763,40 @@ def load_datasets(args):
         test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)
         test_datasets = [('family', test_family_dataset), ('fold', test_fold_dataset), ('superfamily', test_superfamily_dataset)]
     elif args.task in ["BindInt", "BindBio", "repeat-motif-prediction", "CatInt", "CatBio", "conserved-site-prediction"]:
+        if args.dedup:
+            suffix = "deduplicated"
+        else:
+            suffix = "processed"
         if args.task == "BindInt":
-            train_path = 'data/struct_token_bench/interpro/binding_label_train_deduplicated.jsonl'
-            valid_path = 'data/struct_token_bench/interpro/binding_label_validation_deduplicated.jsonl'
-            test_fold_path = 'data/struct_token_bench/interpro/binding_label_fold_test_deduplicated.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/interpro/binding_label_superfamily_test_deduplicated.jsonl'
+            train_path = f'data/struct_token_bench/interpro/binding_label_train_{suffix}.jsonl'
+            valid_path = f'data/struct_token_bench/interpro/binding_label_validation_{suffix}.jsonl'
+            test_fold_path = f'data/struct_token_bench/interpro/binding_label_fold_test_{suffix}.jsonl'
+            test_superfamily_path = f'data/struct_token_bench/interpro/binding_label_superfamily_test_{suffix}.jsonl'
         elif args.task == "BindBio":
-            train_path = 'data/struct_token_bench/biolip2/binding_label_train_deduplicated.jsonl'
-            valid_path = 'data/struct_token_bench/biolip2/binding_label_validation_deduplicated.jsonl'
-            test_fold_path = 'data/struct_token_bench/biolip2/binding_label_fold_test_deduplicated.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/biolip2/binding_label_superfamily_test_deduplicated.jsonl'
+            train_path = f'data/struct_token_bench/biolip2/binding_label_train_{suffix}.jsonl'
+            valid_path = f'data/struct_token_bench/biolip2/binding_label_validation_{suffix}.jsonl'
+            test_fold_path = f'data/struct_token_bench/biolip2/binding_label_fold_test_{suffix}.jsonl'
+            test_superfamily_path = f'data/struct_token_bench/biolip2/binding_label_superfamily_test_{suffix}.jsonl'
         elif args.task == "repeat-motif-prediction":
-            train_path = 'data/struct_token_bench/interpro/repeat_label_train_deduplicated.jsonl'
-            valid_path = 'data/struct_token_bench/interpro/repeat_label_validation_deduplicated.jsonl'
-            test_fold_path = 'data/struct_token_bench/interpro/repeat_label_fold_test_deduplicated.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/interpro/repeat_label_superfamily_test_deduplicated.jsonl'
+            train_path = f'data/struct_token_bench/interpro/repeat_label_train_{suffix}.jsonl'
+            valid_path = f'data/struct_token_bench/interpro/repeat_label_validation_{suffix}.jsonl'
+            test_fold_path = f'data/struct_token_bench/interpro/repeat_label_fold_test_{suffix}.jsonl'
+            test_superfamily_path = f'data/struct_token_bench/interpro/repeat_label_superfamily_test_{suffix}.jsonl'
         elif args.task == "CatInt":
-            train_path = 'data/struct_token_bench/interpro/activesite_label_train_deduplicated.jsonl'
-            valid_path = 'data/struct_token_bench/interpro/activesite_label_validation_deduplicated.jsonl'
-            test_fold_path = 'data/struct_token_bench/interpro/activesite_label_fold_test_deduplicated.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/interpro/activesite_label_superfamily_test_deduplicated.jsonl'
+            train_path = f'data/struct_token_bench/interpro/activesite_label_train_{suffix}.jsonl'
+            valid_path = f'data/struct_token_bench/interpro/activesite_label_validation_{suffix}.jsonl'
+            test_fold_path = f'data/struct_token_bench/interpro/activesite_label_fold_test_{suffix}.jsonl'
+            test_superfamily_path = f'data/struct_token_bench/interpro/activesite_label_superfamily_test_{suffix}.jsonl'
         elif args.task == "CatBio":
-            train_path = 'data/struct_token_bench/biolip2/catalytic_label_train_deduplicated.jsonl'
-            valid_path = 'data/struct_token_bench/biolip2/catalytic_label_validation_deduplicated.jsonl'
-            test_fold_path = 'data/struct_token_bench/biolip2/catalytic_label_fold_test_deduplicated.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/biolip2/catalytic_label_superfamily_test_deduplicated.jsonl'
+            train_path = f'data/struct_token_bench/biolip2/catalytic_label_train_{suffix}.jsonl'
+            valid_path = f'data/struct_token_bench/biolip2/catalytic_label_validation_{suffix}.jsonl'
+            test_fold_path = f'data/struct_token_bench/biolip2/catalytic_label_fold_test_{suffix}.jsonl'
+            test_superfamily_path = f'data/struct_token_bench/biolip2/catalytic_label_superfamily_test_{suffix}.jsonl'
         elif args.task == "conserved-site-prediction":
-            train_path = 'data/struct_token_bench/interpro/conservedsite_label_train_deduplicated.jsonl'
-            valid_path = 'data/struct_token_bench/interpro/conservedsite_label_validation_deduplicated.jsonl'
-            test_fold_path = 'data/struct_token_bench/interpro/conservedsite_label_fold_test_deduplicated.jsonl'
-            test_superfamily_path = 'data/struct_token_bench/interpro/conservedsite_label_superfamily_test_deduplicated.jsonl'
+            train_path = f'data/struct_token_bench/interpro/conservedsite_label_train_{suffix}.jsonl'
+            valid_path = f'data/struct_token_bench/interpro/conservedsite_label_validation_{suffix}.jsonl'
+            test_fold_path = f'data/struct_token_bench/interpro/conservedsite_label_fold_test_{suffix}.jsonl'
+            test_superfamily_path = f'data/struct_token_bench/interpro/conservedsite_label_superfamily_test_{suffix}.jsonl'
         with open(train_path, 'r') as f:
             train_dataset = [json.loads(line) for line in f]
         with open(valid_path, 'r') as f:
@@ -802,16 +832,15 @@ def main(args):
 
     # train using train_dataset, validate with valid_dataset, ignore test_* datasets for now
     train_dataset, valid_dataset, test_datasets = load_datasets(args)
-    if args.test:
-        if args.task == 'remote-homology-detection':
-            test_probe(args, test_datasets, num_classes=45)
-        else:
-            test_probe(args, test_datasets, num_classes=train_dataset.num_classes)
-    else:
+    if not args.test:
         if args.task == 'remote-homology-detection':
             train_probe(args, train_dataset, valid_dataset, num_classes=45)
         else:
             train_probe(args, train_dataset, valid_dataset, num_classes=train_dataset.num_classes)
+    if args.task == 'remote-homology-detection':
+        test_probe(args, test_datasets, num_classes=45)
+    else:
+        test_probe(args, test_datasets, num_classes=train_dataset.num_classes)            
     
 
 if __name__ == "__main__":    

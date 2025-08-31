@@ -1073,11 +1073,11 @@ class BPE():
         geo_keys = list(self._sphere_dict) # assume in order of addition
         assert len(uniq_keys) == len(geo_keys)
         keys = [(n, key) for (n, key) in zip(uniq_keys[2:], geo_keys[2:])]
-        orig_chain = ProteinChain.from_pdb(t.fname)
+        orig_chain = ProteinChain.from_pdb(t.fname) # remove & ~atom_array.hetero from protein_chain.py
         metrics = defaultdict(list)
         count = 0
         cur_chain = ProteinChain.from_backbone_atom_coordinates(t.compute_coords().reshape(-1, 3, 3))
-        for _iter, (n, key) in tqdm(enumerate(keys), desc="iterating through keys", total=len(keys)):
+        for _iter, (n, key) in enumerate(keys):
             if key in geo_dict:
                 # if in geo_dict, .step() for single tokenizer (without popping new key)                
                 t = self.step_helper(geo_dict, t, key, n, opt=count%self.glue_opt_every == 0)

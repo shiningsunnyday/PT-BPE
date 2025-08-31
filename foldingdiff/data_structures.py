@@ -230,13 +230,13 @@ class TokenHierarchy(dict):
         breakpoint()
         # Custom behavior when deleting an item.
         self.parent.last_action = f"__delitem__: {key}"
-        print(f"[TokenHierarchy] Deleting key {key}")
+        # print(f"[TokenHierarchy] Deleting key {key}")
         return super().__delitem__(key)
     
     def pop(self, key):        
         # Custom behavior when popping an item.        
         value = super().pop(key)
-        print(f"[TokenHierarchy] Popped key {key} with value {value}")
+        # print(f"[TokenHierarchy] Popped key {key} with value {value}")
         return value
     
     def popitem(self):
@@ -244,7 +244,7 @@ class TokenHierarchy(dict):
         # Custom behavior for popitem.
         key, value = super().popitem()
         self.parent.last_action = f"popitem: removed {key} with value {value}"
-        print(f"[TokenHierarchy] Popped item ({key}: {value})")
+        # print(f"[TokenHierarchy] Popped item ({key}: {value})")
         return key, value
     
     def update(self, *args, **kwargs):
@@ -252,7 +252,7 @@ class TokenHierarchy(dict):
         # Custom behavior for updating the dictionary.
         super().update(*args, **kwargs)
         self.parent.last_action = "update: dictionary updated"
-        print(f"[TokenHierarchy] Dictionary updated with args {args} and kwargs {kwargs}")
+        # print(f"[TokenHierarchy] Dictionary updated with args {args} and kwargs {kwargs}")
 
     def clear(self):
         raise NotImplementedError    
