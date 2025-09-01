@@ -28,34 +28,40 @@ level="residue"
 case "$1" in
   1)
     task="conserved-site-prediction"
-    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746813758.8588822/bpe_iter=3920.pkl"
-    ckpt_dir="./ckpts/1747270965.922862" # done
+    pkl_file="ckpts/1756619405.1683655/bpe_iter=1095.pkl"
+    # pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746813758.8588822/bpe_iter=3920.pkl"
+    # ckpt_dir="./ckpts/1747270965.922862" # done
     ;;
   2)
     task="CatBio"
-    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746813758.8587544/bpe_iter=5590.pkl"
-    ckpt_dir="./ckpts/1747272230.710532" # done
+    pkl_file="ckpts/1756597888.0667562/bpe_iter=1095.pkl"
+    # pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746813758.8587544/bpe_iter=5590.pkl"
+    # ckpt_dir="./ckpts/1747272230.710532" # done
     ;;
   3)
     task="BindBio"
-    pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8771565/bpe_iter=2500.pkl"
-    ckpt_dir="./ckpts/1747272233.400883"
+    # pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8771565/bpe_iter=2500.pkl"
+    # ckpt_dir="./ckpts/1747272233.400883"
     ;;
   4)
+    task="bindshake"
+    ;;
+  5)
     task="CatInt"
     pkl_file="/n/netscratch/mzitnik_lab/Lab/msun415/1756398624.1327763/bpe_iter=1095.pkl"
-    ckpt_dir="ckpts/1756554143.811724"
     # pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8771634/bpe_iter=7200.pkl"
     # ckpt_dir="./ckpts/1747272259.176812/" # done
     ;;
-  5)
+  6)
     task="repeat-motif-prediction"
     pkl_file="/n/netscratch/mzitnik_lab/Lab/msun415/1756396791.8179636/bpe_iter=1095.pkl"
-    ckpt_dir="ckpts/1756553920.8096058"
     # pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1746804072.8772147/bpe_iter=9990.pkl"
     # ckpt_dir="./ckpts/1747271619.576858" # done
     ;;
-  6)
+  7)
+    task="epitope-prediction"
+    ;;
+  8)
     task="remote-homology-detection"
     pkl_file="/n/netscratch/mzitnik_lab/Lab/msun415/1756400470.8102694/bpe_iter=1095.pkl"
     # pkl_file="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/ckpts/1744875790.3072364/bpe_iter=6000.pkl"

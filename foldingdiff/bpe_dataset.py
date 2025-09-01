@@ -964,13 +964,12 @@ class MyDataset(Dataset):
         for sample in dataset:
             if self.debug and len(my_data) == 10:
                 break
-            prot, chain = extract_pdb_code_and_chain(sample['id'])
+            prot, chain = sample['pdb_id'], sample['chain_id']
             key = f"{prot}_{chain}"
+            breakpoint()
             if key in mapping:
                 i = mapping[key]
-                if sample['fold_label'] not in label_map:
-                    continue
-                sample['fold_label'] = label_map[sample['fold_label']]
+                sample['fold_label'] = sample['fold_label']
                 my_data.append((prot, chain, tokenizers[i], sample))
         self.data = my_data
         self.precompute()
@@ -981,20 +980,21 @@ class MyDataset(Dataset):
         # self.esm_outputs = [torch.rand((sample['protein_length'], 960)).to(torch.float32).to('cpu') for _,_,_,sample in self.data]
         # return
         # end debug        
-        self.esm_outputs = []
         with ThreadPoolExecutor() as executor:
             results = list(tqdm(
                 executor.map(compute_embedding, self.data),
                 total=len(self.data),
                 desc="precomputing esm embeddings"
-            ))
-        self.esm_outputs.extend(results)
-    
+            ))        
+        self.esm_outputs = results
+        for i in range(len(results)):
+            if len(results[i]) != self.data[i][2].n:
+                breakpoint()    
     def __len__(self):
         return len(self.data)
     
     def __getitem__(self, idx):
-        _, chain, t, sample = self.data[idx]
+        _, chain, t, sample = self.data[idx]        
         item = sample
         # item['protein'] = protein
         # item['coords'] = t.compute_coords()
@@ -1014,13 +1014,18 @@ class ResidueDataset(MyDataset):
             stem = Path(t.fname).stem
             mapping[stem] = i
         my_data = []
+        assert len(dataset[0].keys()) == 3
+        label_key = next(k for k in dataset[0].keys() if 'label' in k)
         for sample in dataset:
             if self.debug and len(my_data) == 10:
-                break
+                break            
             prot, chain = sample['pdb_id'], sample['chain_id']
-            key = f"{prot}_{chain}"
+            key = f"{prot}_{chain}"            
             if key in mapping:
                 i = mapping[key]
+                if tokenizers[i].n != len(sample[label_key]):
+                    continue
+                sample['residue_label'] = sample[label_key]
                 my_data.append((prot, chain, tokenizers[i], sample))
         self.data = my_data
         self.precompute()

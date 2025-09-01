@@ -27,10 +27,15 @@ LOCAL_DATA_DIR = Path(
 
 CATH_DIR = LOCAL_DATA_DIR / "cath"
 ALPHAFOLD_DIR = LOCAL_DATA_DIR / "alphafold"
-HOMO_DIR = LOCAL_DATA_DIR / "remote_homology"
+HOMO_DIR = LOCAL_DATA_DIR / "struct_token_bench/homo"
 BINDINT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/binding"
 BINDBIO_DIR = LOCAL_DATA_DIR / "struct_token_bench/biolip2/binding"
+BINDSHAKE_DIR = LOCAL_DATA_DIR / "struct_token_bench/proteinshake"
 REPEAT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/repeat"
+EPT_DIR = LOCAL_DATA_DIR / "struct_token_bench/proteinglue"
+ATLAS_DIR = LOCAL_DATA_DIR / "struct_token_bench/atlas"
+FOLDSWITCHING_DIR = LOCAL_DATA_DIR / "struct_token_bench/foldswitching"
+APOHOLO_DIR = LOCAL_DATA_DIR / "struct_token_bench/apoholo"
 CATINT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/activesite"
 CATBIO_DIR = LOCAL_DATA_DIR / "struct_token_bench/biolip2/catalytic"
 CONSERVED_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/conserved"
@@ -366,8 +371,12 @@ class CathCanonicalAnglesDataset(Dataset):
                 fnames = glob.glob(os.path.join(BINDINT_DIR, "*.pdb"))
             elif pdbs == "bindbio":
                 fnames = glob.glob(os.path.join(BINDBIO_DIR, "*.pdb"))
+            elif pdbs == "bindshake":
+                fnames = glob.glob(os.path.join(BINDSHAKE_DIR, "*.pdb"))
             elif pdbs == "repeat":
                 fnames = glob.glob(os.path.join(REPEAT_DIR, "*.pdb"))
+            elif pdbs == "ept":
+                fnames = glob.glob(os.path.join(EPT_DIR, "*.pdb"))
             elif pdbs == "catint":
                 fnames = glob.glob(os.path.join(CATINT_DIR, "*.pdb"))
             elif pdbs == "catbio":
@@ -376,6 +385,12 @@ class CathCanonicalAnglesDataset(Dataset):
                 fnames = glob.glob(os.path.join(CONSERVED_DIR, "*.pdb"))
             elif pdbs == "pretrain":
                 fnames = glob.glob(os.path.join(PRETRAIN_DIR, "*.pdb"))
+            elif pdbs == "atlas":
+                fnames = glob.glob(os.path.join(ATLAS_DIR, "*.pdb"))
+            elif pdbs == "foldswitching":
+                fnames = glob.glob(os.path.join(FOLDSWITCHING_DIR, "*.pdb"))
+            elif pdbs == "apoholo":
+                fnames = glob.glob(os.path.join(APOHOLO_DIR, "*.pdb"))                
             elif pdbs == "casp":
                 fnames = glob.glob(os.path.join(CASP_DIR, "*.pdb"))
             elif pdbs == "cameo":

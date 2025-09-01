@@ -297,9 +297,8 @@ class UpDownTreeEncoder(nn.Module):
 
 
         
-def collate_item(batch):
+def collate_item(batch):    
     label_key = 'fold_label' if 'fold_label' in batch[0] else 'residue_label'
-
     n, m = 0, 0
     for sample in batch:
         edges = sample['edges']
@@ -744,78 +743,77 @@ def load_datasets(args):
     bpe = pickle.load(open(args.pkl_file, 'rb'))
     if args.pkl_data_file:
         if os.path.exists(args.pkl_data_file):
-            train_dataset, valid_dataset, test_datasets = pickle.load(open(args.pkl_data_file, 'rb'))            
-            print(f"Train: {len(train_dataset)}, Valid: {len(valid_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
-            return train_dataset, valid_dataset, test_datasets
-    if args.task == "remote-homology-detection":
-        train = LMDBDataset('data/remote_homology_raw/remote_homology_train.lmdb')
-        counts = Counter([x['fold_label'] for x in train])
-        class_labels = [c for c in counts if counts[c] > 50]
-        label_map = dict(zip(class_labels, range(len(class_labels))))
-        valid = LMDBDataset('data/remote_homology_raw/remote_homology_valid.lmdb')
-        test_family_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_family_holdout.lmdb')
-        test_fold_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_fold_holdout.lmdb')
-        test_superfamily_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_superfamily_holdout.lmdb')
-        train_dataset = MyDataset(bpe.tokenizers, train, label_map, args.debug)
-        valid_dataset = MyDataset(bpe.tokenizers, valid, label_map, args.debug)
-        test_family_dataset = MyDataset(bpe.tokenizers, test_family_holdout, label_map)
-        test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
-        test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)
-        test_datasets = [('family', test_family_dataset), ('fold', test_fold_dataset), ('superfamily', test_superfamily_dataset)]
-    elif args.task in ["BindInt", "BindBio", "repeat-motif-prediction", "CatInt", "CatBio", "conserved-site-prediction"]:
-        if args.dedup:
-            suffix = "deduplicated"
-        else:
-            suffix = "processed"
+            train_dataset, validation_dataset, test_datasets = pickle.load(open(args.pkl_data_file, 'rb'))            
+            print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
+            return train_dataset, validation_dataset, test_datasets
+        # train = LMDBDataset('data/remote_homology_raw/remote_homology_train.lmdb')
+        # counts = Counter([x['fold_label'] for x in train])
+        # class_labels = [c for c in counts if counts[c] > 50]
+        # label_map = dict(zip(class_labels, range(len(class_labels))))
+        # valid = LMDBDataset('data/remote_homology_raw/remote_homology_valid.lmdb')
+        # test_family_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_family_holdout.lmdb')
+        # test_fold_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_fold_holdout.lmdb')
+        # test_superfamily_holdout = LMDBDataset('data/remote_homology_raw/remote_homology_test_superfamily_holdout.lmdb')
+        # train_dataset = MyDataset(bpe.tokenizers, train, label_map, args.debug)
+        # validation_dataset = MyDataset(bpe.tokenizers, valid, label_map, args.debug)
+        # test_family_dataset = MyDataset(bpe.tokenizers, test_family_holdout, label_map)
+        # test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
+        # test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)
+        # test_datasets = [('family', test_family_dataset), ('fold', test_fold_dataset), ('superfamily', test_superfamily_dataset)]
+    if args.task in ["BindInt", "BindBio", "BindShake", "repeat-motif-prediction", "CatInt", "CatBio", "conserved-site-prediction", "epitope-prediction", "remote-homology-detection"]:
         if args.task == "BindInt":
-            train_path = f'data/struct_token_bench/interpro/binding_label_train_{suffix}.jsonl'
-            valid_path = f'data/struct_token_bench/interpro/binding_label_validation_{suffix}.jsonl'
-            test_fold_path = f'data/struct_token_bench/interpro/binding_label_fold_test_{suffix}.jsonl'
-            test_superfamily_path = f'data/struct_token_bench/interpro/binding_label_superfamily_test_{suffix}.jsonl'
+            prefix = 'data/struct_token_bench/InterProFunctionDataset_binding_label'
+            test_splits = ['fold_test', 'superfamily_test']
         elif args.task == "BindBio":
-            train_path = f'data/struct_token_bench/biolip2/binding_label_train_{suffix}.jsonl'
-            valid_path = f'data/struct_token_bench/biolip2/binding_label_validation_{suffix}.jsonl'
-            test_fold_path = f'data/struct_token_bench/biolip2/binding_label_fold_test_{suffix}.jsonl'
-            test_superfamily_path = f'data/struct_token_bench/biolip2/binding_label_superfamily_test_{suffix}.jsonl'
-        elif args.task == "repeat-motif-prediction":
-            train_path = f'data/struct_token_bench/interpro/repeat_label_train_{suffix}.jsonl'
-            valid_path = f'data/struct_token_bench/interpro/repeat_label_validation_{suffix}.jsonl'
-            test_fold_path = f'data/struct_token_bench/interpro/repeat_label_fold_test_{suffix}.jsonl'
-            test_superfamily_path = f'data/struct_token_bench/interpro/repeat_label_superfamily_test_{suffix}.jsonl'
+            prefix = 'data/struct_token_bench/BioLIP2FunctionDataset_catalytic_label'
+            test_splits = ['fold_test', 'superfamily_test']
+        elif args.task == "BindShake":
+            prefix = 'data/struct_token_bench/ProteinShakeBindingSiteDataset_binding_site'
+            test_splits = ['test']
+        elif args.task == "repeat-motif-prediction":            
+            prefix = 'data/struct_token_bench/InterProFunctionDataset_repeat_label'
+            test_splits = ['fold_test', 'superfamily_test']
         elif args.task == "CatInt":
-            train_path = f'data/struct_token_bench/interpro/activesite_label_train_{suffix}.jsonl'
-            valid_path = f'data/struct_token_bench/interpro/activesite_label_validation_{suffix}.jsonl'
-            test_fold_path = f'data/struct_token_bench/interpro/activesite_label_fold_test_{suffix}.jsonl'
-            test_superfamily_path = f'data/struct_token_bench/interpro/activesite_label_superfamily_test_{suffix}.jsonl'
+            prefix = 'data/struct_token_bench/InterProFunctionDataset_activesite_label'
+            test_splits = ['fold_test', 'superfamily_test']
         elif args.task == "CatBio":
-            train_path = f'data/struct_token_bench/biolip2/catalytic_label_train_{suffix}.jsonl'
-            valid_path = f'data/struct_token_bench/biolip2/catalytic_label_validation_{suffix}.jsonl'
-            test_fold_path = f'data/struct_token_bench/biolip2/catalytic_label_fold_test_{suffix}.jsonl'
-            test_superfamily_path = f'data/struct_token_bench/biolip2/catalytic_label_superfamily_test_{suffix}.jsonl'
+            prefix = 'data/struct_token_bench/BioLIP2FunctionDataset_catalytic_label'
+            test_splits = ['fold_test', 'superfamily_test']
         elif args.task == "conserved-site-prediction":
-            train_path = f'data/struct_token_bench/interpro/conservedsite_label_train_{suffix}.jsonl'
-            valid_path = f'data/struct_token_bench/interpro/conservedsite_label_validation_{suffix}.jsonl'
-            test_fold_path = f'data/struct_token_bench/interpro/conservedsite_label_fold_test_{suffix}.jsonl'
-            test_superfamily_path = f'data/struct_token_bench/interpro/conservedsite_label_superfamily_test_{suffix}.jsonl'
-        with open(train_path, 'r') as f:
-            train_dataset = [json.loads(line) for line in f]
-        with open(valid_path, 'r') as f:
-            valid_dataset = [json.loads(line) for line in f]
-        with open(test_fold_path, 'r') as f:
-            test_fold = [json.loads(line) for line in f]
-        with open(test_superfamily_path, 'r') as f:
-            test_superfamily = [json.loads(line) for line in f]
-        train_dataset = ResidueDataset(bpe.tokenizers, train_dataset, args.debug)
-        valid_dataset = ResidueDataset(bpe.tokenizers, valid_dataset, args.debug)
-        test_fold = ResidueDataset(bpe.tokenizers, test_fold, args.debug)
-        test_superfamily = ResidueDataset(bpe.tokenizers, test_superfamily, args.debug)
-        test_datasets = [('fold', test_fold), ('superfamily', test_superfamily)]
+            prefix = 'data/struct_token_bench/InterProFunctionDataset_conservedsite_label'
+            test_splits = ['fold_test', 'superfamily_test']
+        elif args.task == "epitope-prediction":
+            prefix = 'data/struct_token_bench/ProteinGLUEEpitopeRegionDataset_epitope_label'
+            test_splits = ['fold_test', 'superfamily_test']
+        elif args.task == "atlas-rmsf-prediction":
+            prefix = 'data/struct_token_bench/AtlasDataset_rmsf_score'
+            test_splits = ['fold_test', 'superfamily_test']
+        elif args.task == "atlas-neq-prediction":
+            prefix = 'data/struct_token_bench/AtlasDataset_neq_score'
+            test_splits = ['fold_test', 'superfamily_test']
+        elif args.task == "atlas-bfactor-prediction":
+            prefix = 'data/struct_token_bench/AtlasDataset_bfactor_score'
+            test_splits = ['fold_test', 'superfamily_test']                        
+        elif args.task == "remote-homology-detection":
+            prefix = 'data/struct_token_bench/TapeRemoteHomologyDataset_fold_label'
+            test_splits = ['test_fold_holdout', 'test_family_holdout', 'test_superfamily_holdout']            
+        else:
+            raise NotImplementedError
+        # get processed structtokenbench files
+        datasets = {}
+        for split in ["train", "validation"] + test_splits:
+            with open(f'{prefix}_{split}.jsonl', 'r') as f:
+                datasets[f"{split}_dataset"] = [json.loads(line) for line in f]        
+            datasets[f"{split}_dataset"] = (MyDataset if args.task == "remote-homology-detection" else ResidueDataset)(bpe.tokenizers, datasets[f"{split}_dataset"], args.debug)
+        test_datasets = [(split, datasets[f"{split}_dataset"]) for split in test_splits]
     else:
         raise NotImplementedError(f"Task {args.task} not implemented.")
+    train_dataset, validation_dataset = datasets["train_dataset"], datasets["validation_dataset"]
     if args.pkl_data_file:
-        pickle.dump((train_dataset, valid_dataset, test_datasets), open(args.pkl_data_file, 'wb+'))
-    print(f"Train: {len(train_dataset)}, Valid: {len(valid_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
-    return train_dataset, valid_dataset, test_datasets
+        pickle.dump((train_dataset, validation_dataset, test_datasets), open(args.pkl_data_file, 'wb+'))
+    sys.exit(0)
+    print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
+    return train_dataset, validation_dataset, test_datasets
 
 
 

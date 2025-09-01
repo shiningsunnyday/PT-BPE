@@ -1,5 +1,6 @@
 from copy import deepcopy
 import numpy as np
+from joblib import Parallel, delayed
 from typing import Optional 
 from tqdm import tqdm
 
@@ -167,10 +168,18 @@ def k_medoids(
         rng = np.random.default_rng(None)
 
     D = np.empty((N, N), dtype=np.float32)
-    for i in tqdm(range(N), desc="Pre-computing distance matrix -- outer loop"):
-        for j in range(i, N):
-            d = compute_rmsd(strucs[i], strucs[j])
-            D[i, j] = D[j, i] = d        
+    # --- parallelised computation -----------------------------------------
+    pairs = [(i, j) for i in range(N) for j in range(i, N)]  # upper-triangular indices
+
+    def _calc(pair):
+        i, j = pair
+        return i, j, compute_rmsd(strucs[i], strucs[j])
+
+    for i, j, d in Parallel(n_jobs=-1, backend="threading")(
+            delayed(_calc)(p) for p in tqdm(pairs,
+                                            desc="Pre-computing distance matrix (parallel)")):
+        D[i, j] = D[j, i] = d
+    # ----------------------------------------------------------------------
 
     # --- initialisation (unchanged except we draw from `active_idx`) -----------
     medoid_indices = rng.choice(np.arange(N), size=k, replace=False)
