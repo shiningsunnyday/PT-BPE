@@ -300,17 +300,17 @@ def main():
             logger.info(f"Removed {len(dataset.structures)-len(cleaned_structures)}/{len(dataset.structures)} structures with nan dihedrals.")
             N = len(cleaned_structures)
             dataset.structures = cleaned_structures       
-            bpe = BPE(dataset.structures, 
-                    bins=args.bins, 
+            bpe = BPE(dataset.structures,
+                    bins=args.bins,
                     bin_strategy=args.bin_strategy, 
-                    save_dir=args.save_dir, 
-                    rmsd_partition_min_size=args.p_min_size, 
+                    save_dir=args.save_dir,
+                    rmsd_partition_min_size=args.p_min_size,
                     rmsd_super_res=args.rmsd_super_res,
                     rmsd_only=args.rmsd_only,
                     num_partitions=args.num_p,
                     max_num_strucs=args.max_num_strucs,
-                    compute_sec_structs=args.sec, 
-                    plot_iou_with_sec_structs=args.sec_eval,                  
+                    compute_sec_structs=args.sec,
+                    plot_iou_with_sec_structs=args.sec_eval,
                     res_init=args.res_init,
                     std_bonds=not args.free_bonds,
                     glue_opt=args.glue_opt,
@@ -318,10 +318,8 @@ def main():
                     glue_opt_method=args.glue_opt_method,
                     glue_opt_every=args.glue_opt_every,
                     seed=args.seed)
-                    
             pickle.dump(bpe, open(init_bpe_path, 'wb+'))
-
-        N = len(bpe.tokenizers)    
+        N = len(bpe.tokenizers)
         num_vis = min(N, args.num_vis) if args.num_vis else N
         if Path(ref_path).exists():
             ref_coords = list(np.load(ref_path, allow_pickle=True))
@@ -329,8 +327,7 @@ def main():
         else:
             num_ref = min(N, args.num_ref) if args.num_ref else N
             ref_coords = [bpe.tokenizers[i].compute_coords() for i in range(num_ref)]
-            np.save(ref_path, np.asarray(ref_coords, dtype=object), allow_pickle=True)
-        
+            np.save(ref_path, np.asarray(ref_coords, dtype=object), allow_pickle=True)        
         xlims = [None for _ in range(num_vis)]
         ylims = [None for _ in range(num_vis)]
         zlims = [None for _ in range(num_vis)]
@@ -362,8 +359,8 @@ def main():
             bpe_debug.old_bin()
     if args.save_dir != bpe.save_dir:
         logger.info(f"resetting save_dir from {bpe.save_dir} to {args.save_dir}")
-        bpe.save_dir = args.save_dir    
-    vis_paths = [[] for _ in range(num_vis)]    
+        bpe.save_dir = args.save_dir
+    vis_paths = [[] for _ in range(num_vis)]
     for t in range(_iter+1, 10000):
         ## visualization        
         if args.vis and t in list(range(0,10)) + list(range(10,100,10)) + list(range(100, 1000, 100)) + list(range(1000,10000,1000)):
