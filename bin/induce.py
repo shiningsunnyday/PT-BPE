@@ -5,12 +5,15 @@ import shutil
 import os
 import sys
 import logging
+import json
+import torch
 from tqdm import tqdm
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
 from foldingdiff.tokenizer import Tokenizer
+from foldingdiff.plotting import get_codebook_utility
 from concurrent.futures import ProcessPoolExecutor
 from foldingdiff.utils import load_args_from_txt, validate_args_match
 
@@ -59,8 +62,8 @@ def tokenize_structure(args):
         pass
         # print('start tokenize_structure')    
     tok = Tokenizer(struc)
-    res = BPE.tokenize(tok)
-    pickle.dump((res, tok), open(SAVE_DIR / f"{idx}.pkl", "wb+"))    
+    stats = BPE.tokenize(tok)
+    pickle.dump((stats, tok), open(SAVE_DIR / f"{idx}.pkl", "wb+"))    
 
 
 def plot_stats(all_stats, output_path, total_ticks=20):
@@ -132,6 +135,9 @@ def plot_stats(all_stats, output_path, total_ticks=20):
     plt.savefig(output_path)
 
 
+
+
+
 def main():
     args = parse_args()
     logging.info(args)
@@ -163,7 +169,10 @@ def main():
             for arg_name, arg_value in sorted(args.__dict__.items()):
                 f.write(f"{arg_name}: {arg_value}\n")    
     arg_path = src_file.parent / "args.txt"
-    shutil.copyfile(arg_path, save_dir / "orig_args.txt")
+    try:
+        shutil.copyfile(arg_path, save_dir / "orig_args.txt")
+    except FileNotFoundError:
+        print(arg_path, "not found")
     # induce
     dataset = FullCathCanonicalCoordsDataset(args.data_dir, 
                                         zero_center=False, 
@@ -205,6 +214,9 @@ def main():
         all_stats.append(stats)
         tokenizers.append(t)    
         
+    input_ids = [bpe.quantize(t.tokenize()) for t in tokenizers]
+    utility = get_codebook_utility(torch.as_tensor(sum(input_ids, [])), bpe.vocab_size)
+    json.dump(utility, open(save_dir / "utility.json", "w+"))
     plot_stats(all_stats, save_dir / "stats.png")
     bpe.tokenizers = tokenizers
     pickle.dump(bpe, open(out_path, "wb+"))

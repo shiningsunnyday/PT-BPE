@@ -110,13 +110,14 @@ def parse_args():
     parser.add_argument("--test", action='store_true', help='test (instead of train)')
     parser.add_argument("--task", choices=["remote-homology-detection", # per-protein
                                             "structural-flexibility-prediction", # per-residue regression
+                                            "epitope-prediction",
                                             "BindInt",
                                             "BindBio",
                                             "CatInt",
                                             "CatBio",
                                             "conserved-site-prediction",
                                             "repeat-motif-prediction",
-                                            "epitope-region-prediction", # per-residue classification
+                                            "epitope-prediction", # per-residue classification
     ], default="remote-homology-detection")
     # data
     parser.add_argument("--pkl-file", type=str, required=True, 
@@ -325,7 +326,6 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
     embed_dim = 960       # pretrained embedding dimension (for residues)
     hidden_dim = 128      # hidden dimension for probe
     # number of classes for fold classification
-
     device = torch.device(args.cuda)
     if args.level == "protein":
         probe = ProbingLayer(embed_dim * 2, hidden_dim, num_classes).to(device)
@@ -335,7 +335,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
     # Instantiate the Tree Encoder (for up-down tree-LSTM with super-root)
     tree_encoder = UpDownTreeEncoder(embed_dim, concat_updown=True).to(device)
 
-    if num_classes == 1:
+    if num_classes == 0:
+        breakpoint()
+    elif num_classes == 1:
         criterion = nn.BCEWithLogitsLoss()
     else:
         criterion = nn.CrossEntropyLoss()
@@ -362,7 +364,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
     valid_loader = DataLoader(valid_dataset, **dataset_kwargs)
     num_epochs = args.epochs
 
-    if num_classes == 1:
+    if num_classes == 0:
+        breakpoint()
+    elif num_classes == 1:
         best_val_auroc = 0.0
     else:
         best_val_macro_f1 = -1.0
@@ -422,7 +426,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                     all_labels.append(batch['fold_label'][i])
                 else:
                     logits = probe(leaves)               # (num_residues, num_classes)
-                    if num_classes == 1:
+                    if num_classes == 0:
+                        breakpoint()
+                    elif num_classes == 1:
                         logits = logits.squeeze(1)  # (num_residues,)
                         item_loss = criterion(logits, batch['residue_label'][i].float().to(device))
                     else:
@@ -445,7 +451,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
             optimizer.step()
 
             train_loss += loss.item() * B
-            if num_classes == 1:
+            if num_classes == 0:
+                breakpoint()
+            elif num_classes == 1:
                 preds = torch.sigmoid(batch_logits)
                 preds = (preds > 0.5).long()
             else:
@@ -509,7 +517,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                         batch_logits.append(logit)
                     else:
                         logits = probe(leaves)               # (num_residues, num_classes)
-                        if num_classes == 1:
+                        if num_classes == 0:
+                            breakpoint()
+                        elif num_classes == 1:
                             logits = logits.squeeze(1)  # (num_residues,)
                             item_loss = criterion(logits, batch['residue_label'][i].float().to(device))
                         else:
@@ -526,7 +536,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                     batch_logits = torch.concat(batch_logits, dim=0) # (sum(n_residues), num_classes)
                     num_valid_samples += batch_logits.size(0)
                 
-                if num_classes == 1:
+                if num_classes == 0:
+                    breakpoint()
+                elif num_classes == 1:
                     scores = torch.sigmoid(batch_logits)
                     preds = (scores > 0.5).long()
                     labels = labels.squeeze(0)
@@ -541,7 +553,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
         valid_accuracy = sum([1 for p, t in zip(valid_preds, valid_labels) if p == t]) / num_valid_samples
         
         # Compute macro F1 score on validation set.
-        if num_classes == 1:
+        if num_classes == 0:
+            breakpoint()
+        elif num_classes == 1:
             val_auroc = roc_auc_score(valid_labels, valid_scores)
             print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, "
                 f"Train Acc: {train_accuracy*100:.2f}%, Valid Loss: {avg_valid_loss:.4f}, "
@@ -556,7 +570,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
         # ----------------------
         # Checkpoint saving
         # ----------------------
-        if num_classes == 1 and val_auroc > best_val_auroc:
+        if num_classes == 0:
+            breakpoint()
+        elif num_classes == 1 and val_auroc > best_val_auroc:
             best_val_auroc = val_auroc
             os.makedirs(args.save_dir, exist_ok=True)
             checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
@@ -585,7 +601,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
-                if num_classes == 1:
+                if num_classes == 0:
+                    breakpoint()
+                elif num_classes == 1:
                     print(
                         f"Early stopping at epoch {epoch+1}: "
                         f"no val auroc improvement for {patience} epochs "
@@ -656,7 +674,9 @@ def test_probe(args, test_datasets, num_classes):
         all_labels = []
         all_scores = []
         all_losses = []
-        if num_classes == 1:
+        if num_classes == 0:
+            breakpoint()
+        elif num_classes == 1:
             criterion = nn.BCEWithLogitsLoss()
         else:
             criterion = nn.CrossEntropyLoss()
@@ -700,7 +720,9 @@ def test_probe(args, test_datasets, num_classes):
                     all_losses.append(loss.item())
                 else:
                     logits = probe(leaves)       # (num_residues, C)
-                    if num_classes == 1:
+                    if num_classes == 0:
+                        breakpoint()
+                    elif num_classes == 1:
                         logits = logits.squeeze(1)
                         scores = torch.sigmoid(logits) # (num_residues,)
                         pred = (scores > 0.5).long()
@@ -716,7 +738,9 @@ def test_probe(args, test_datasets, num_classes):
 
         # compute metrics
         acc = accuracy_score(all_labels, all_preds)
-        if num_classes == 1:
+        if num_classes == 0:
+            breakpoint()
+        elif num_classes == 1:
             auroc = roc_auc_score(all_labels, all_scores)
             mean_loss = sum(all_losses) / len(all_losses)
             results.append((name, mean_loss, acc, auroc))
@@ -760,60 +784,68 @@ def load_datasets(args):
         # test_fold_dataset = MyDataset(bpe.tokenizers, test_fold_holdout, label_map)
         # test_superfamily_dataset = MyDataset(bpe.tokenizers, test_superfamily_holdout, label_map)
         # test_datasets = [('family', test_family_dataset), ('fold', test_fold_dataset), ('superfamily', test_superfamily_dataset)]
-    if args.task in ["BindInt", "BindBio", "BindShake", "repeat-motif-prediction", "CatInt", "CatBio", "conserved-site-prediction", "epitope-prediction", "remote-homology-detection"]:
-        if args.task == "BindInt":
-            prefix = 'data/struct_token_bench/InterProFunctionDataset_binding_label'
-            test_splits = ['fold_test', 'superfamily_test']
-        elif args.task == "BindBio":
-            prefix = 'data/struct_token_bench/BioLIP2FunctionDataset_catalytic_label'
-            test_splits = ['fold_test', 'superfamily_test']
-        elif args.task == "BindShake":
-            prefix = 'data/struct_token_bench/ProteinShakeBindingSiteDataset_binding_site'
-            test_splits = ['test']
-        elif args.task == "repeat-motif-prediction":            
-            prefix = 'data/struct_token_bench/InterProFunctionDataset_repeat_label'
-            test_splits = ['fold_test', 'superfamily_test']
-        elif args.task == "CatInt":
-            prefix = 'data/struct_token_bench/InterProFunctionDataset_activesite_label'
-            test_splits = ['fold_test', 'superfamily_test']
-        elif args.task == "CatBio":
-            prefix = 'data/struct_token_bench/BioLIP2FunctionDataset_catalytic_label'
-            test_splits = ['fold_test', 'superfamily_test']
-        elif args.task == "conserved-site-prediction":
-            prefix = 'data/struct_token_bench/InterProFunctionDataset_conservedsite_label'
-            test_splits = ['fold_test', 'superfamily_test']
-        elif args.task == "epitope-prediction":
-            prefix = 'data/struct_token_bench/ProteinGLUEEpitopeRegionDataset_epitope_label'
-            test_splits = ['fold_test', 'superfamily_test']
-        elif args.task == "atlas-rmsf-prediction":
-            prefix = 'data/struct_token_bench/AtlasDataset_rmsf_score'
-            test_splits = ['fold_test', 'superfamily_test']
-        elif args.task == "atlas-neq-prediction":
-            prefix = 'data/struct_token_bench/AtlasDataset_neq_score'
-            test_splits = ['fold_test', 'superfamily_test']
-        elif args.task == "atlas-bfactor-prediction":
-            prefix = 'data/struct_token_bench/AtlasDataset_bfactor_score'
-            test_splits = ['fold_test', 'superfamily_test']                        
-        elif args.task == "remote-homology-detection":
-            prefix = 'data/struct_token_bench/TapeRemoteHomologyDataset_fold_label'
-            test_splits = ['test_fold_holdout', 'test_family_holdout', 'test_superfamily_holdout']            
-        else:
-            raise NotImplementedError
-        # get processed structtokenbench files
+    if args.task == "BindInt":
+        prefix = 'data/struct_token_bench/InterProFunctionDataset_binding_label'
+        test_splits = ['fold_test', 'superfamily_test']
+    elif args.task == "BindBio":
+        prefix = 'data/struct_token_bench/BioLIP2FunctionDataset_catalytic_label'
+        test_splits = ['fold_test', 'superfamily_test']
+    elif args.task == "BindShake":
+        prefix = 'data/struct_token_bench/ProteinShakeBindingSiteDataset_binding_site'
+        test_splits = ['test']
+    elif args.task == "repeat-motif-prediction":            
+        prefix = 'data/struct_token_bench/InterProFunctionDataset_repeat_label'
+        test_splits = ['fold_test', 'superfamily_test']
+    elif args.task == "CatInt":
+        prefix = 'data/struct_token_bench/InterProFunctionDataset_activesite_label'
+        test_splits = ['fold_test', 'superfamily_test']
+    elif args.task == "CatBio":
+        prefix = 'data/struct_token_bench/BioLIP2FunctionDataset_catalytic_label'
+        test_splits = ['fold_test', 'superfamily_test']
+    elif args.task == "conserved-site-prediction":
+        prefix = 'data/struct_token_bench/InterProFunctionDataset_conservedsite_label'
+        test_splits = ['fold_test', 'superfamily_test']
+    elif args.task == "epitope-prediction":
+        prefix = 'data/struct_token_bench/ProteinGLUEEpitopeRegionDataset_epitope_label'
+        test_splits = ['fold_test', 'superfamily_test']
+    elif args.task == "structural-flexibility-prediction":
+        prefix = [f'data/struct_token_bench/AtlasDataset_{metric}_score' for metric in ['rmsf', 'neq', 'bfactor']]
+        test_splits = [['fold_test', 'superfamily_test'] for _ in prefix]
+    elif args.task == "remote-homology-detection":
+        prefix = 'data/struct_token_bench/TapeRemoteHomologyDataset_fold_label'
+        test_splits = ['test_fold_holdout', 'test_family_holdout', 'test_superfamily_holdout']            
+    else:
+        raise NotImplementedError(f"Task {args.task} not implemented.")
+    # get processed structtokenbench files
+    if isinstance(prefix, list):
+        train_datasets, validation_datasets, test_datsets = [], [], []
+        for pre in prefix:
+            datasets = {}
+            for split in ["train", "validation"] + test_splits:
+                with open(f'{pre}_{split}.jsonl', 'r') as f:
+                    datasets[f"{split}_dataset"] = [json.loads(line) for line in f]        
+                datasets[f"{split}_dataset"] = (MyDataset if args.task == "remote-homology-detection" else ResidueDataset)(bpe.tokenizers, datasets[f"{split}_dataset"], args.debug)
+            test_datasets = [(split, datasets[f"{split}_dataset"]) for split in test_splits]   
+            train_dataset, validation_dataset = datasets["train_dataset"], datasets["validation_dataset"]            
+            train_datasets.append(train_dataset)
+            validation_datasets.append(validation_dataset)
+            test_datasets.append(test_datasets)
+            print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
+        if args.pkl_data_file:
+            pickle.dump((train_datasets, validation_datasets, test_datasets), open(args.pkl_data_file, 'wb+'))
+        return train_dataset, validation_dataset, test_datasets            
+    else:
         datasets = {}
         for split in ["train", "validation"] + test_splits:
             with open(f'{prefix}_{split}.jsonl', 'r') as f:
                 datasets[f"{split}_dataset"] = [json.loads(line) for line in f]        
             datasets[f"{split}_dataset"] = (MyDataset if args.task == "remote-homology-detection" else ResidueDataset)(bpe.tokenizers, datasets[f"{split}_dataset"], args.debug)
-        test_datasets = [(split, datasets[f"{split}_dataset"]) for split in test_splits]
-    else:
-        raise NotImplementedError(f"Task {args.task} not implemented.")
-    train_dataset, validation_dataset = datasets["train_dataset"], datasets["validation_dataset"]
-    if args.pkl_data_file:
-        pickle.dump((train_dataset, validation_dataset, test_datasets), open(args.pkl_data_file, 'wb+'))
-    sys.exit(0)
-    print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
-    return train_dataset, validation_dataset, test_datasets
+        test_datasets = [(split, datasets[f"{split}_dataset"]) for split in test_splits]   
+        train_dataset, validation_dataset = datasets["train_dataset"], datasets["validation_dataset"]
+        if args.pkl_data_file:
+            pickle.dump((train_dataset, validation_dataset, test_datasets), open(args.pkl_data_file, 'wb+'))        
+        print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
+        return train_dataset, validation_dataset, test_datasets
 
 
 
@@ -830,15 +862,21 @@ def main(args):
 
     # train using train_dataset, validate with valid_dataset, ignore test_* datasets for now
     train_dataset, valid_dataset, test_datasets = load_datasets(args)
-    if not args.test:
-        if args.task == 'remote-homology-detection':
+    if args.task == "structural-flexibility-prediction":
+        for (train, valid, test) in zip(train_dataset, valid_dataset, test_datasets):
+            if not args.test:
+                train_probe(args, train, valid, num_classes=1)
+            test_probe(args, train, valid, num_classes=1)
+            breakpoint()
+            # distinguish the artifacts
+    elif args.task == "remote-homology-detection":
+        if not args.test:
             train_probe(args, train_dataset, valid_dataset, num_classes=45)
-        else:
-            train_probe(args, train_dataset, valid_dataset, num_classes=train_dataset.num_classes)
-    if args.task == 'remote-homology-detection':
         test_probe(args, test_datasets, num_classes=45)
     else:
-        test_probe(args, test_datasets, num_classes=train_dataset.num_classes)            
+        if not args.test:
+            train_probe(args, train_dataset, valid_dataset, num_classes=train_dataset.num_classes)
+        test_probe(args, test_datasets, num_classes=train_dataset.num_classes)
     
 
 if __name__ == "__main__":    

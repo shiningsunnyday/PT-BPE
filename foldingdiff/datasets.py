@@ -38,7 +38,7 @@ FOLDSWITCHING_DIR = LOCAL_DATA_DIR / "struct_token_bench/foldswitching"
 APOHOLO_DIR = LOCAL_DATA_DIR / "struct_token_bench/apoholo"
 CATINT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/activesite"
 CATBIO_DIR = LOCAL_DATA_DIR / "struct_token_bench/biolip2/catalytic"
-CONSERVED_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/conserved"
+CONSERVED_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/conservedsite"
 PRETRAIN_DIR = LOCAL_DATA_DIR / "vqvae_pretrain/train"
 CAMEO_DIR = LOCAL_DATA_DIR / "vqvae_pretrain/CAMEO"
 CASP_DIR = LOCAL_DATA_DIR / "vqvae_pretrain/CASP14"
@@ -366,7 +366,7 @@ class CathCanonicalAnglesDataset(Dataset):
                 fnames = glob.glob(os.path.join(ALPHAFOLD_DIR, "*.pdb.gz"))
                 assert fnames, f"No files found in {ALPHAFOLD_DIR}"
             elif pdbs == "homo":
-                fnames = glob.glob(os.path.join(HOMO_DIR, "*/*.pdb"))
+                fnames = glob.glob(os.path.join(HOMO_DIR, "*.pdb"))
             elif pdbs == "bindint":
                 fnames = glob.glob(os.path.join(BINDINT_DIR, "*.pdb"))
             elif pdbs == "bindbio":

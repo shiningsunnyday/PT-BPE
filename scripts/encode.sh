@@ -43,13 +43,15 @@ p_size=${11}
 num_p=${12}
 max_num_strucs=${13}
 glue_opt=${14}
-glue_opt_method=${15}
-free_bonds=${16}
-rmsd_super_res=${17}
-glue_opt_every=${18}
+glue_opt_prior=${15}
+glue_opt_method=${16}
+free_bonds=${17}
+rmsd_super_res=${18}
+glue_opt_every=${19}
+max_iter=${20}
 
-if [ -n "${19}" ]; then
-  extra="--save-dir ${19}"
+if [ -n "${21}" ]; then
+  extra="--save-dir ${21}"
 else
   extra="--auto"
 fi
@@ -77,6 +79,8 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --num-ref $num_ref \
   --max-num-strucs $max_num_strucs \
   --glue-opt $glue_opt \
+  --glue-opt-prior $glue_opt_prior \
   --glue-opt-method $glue_opt_method \
   --glue-opt-every $glue_opt_every \
+  --max-iter $max_iter \
   $extra

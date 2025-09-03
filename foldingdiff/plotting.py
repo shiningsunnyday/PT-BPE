@@ -72,6 +72,26 @@ class HandlerBackboneFragment(HandlerBase):
         return artists
 
 
+def get_codebook_utility(input_ids, vocab_size, eps=1e-8):
+    index_count = torch.bincount(input_ids, minlength=vocab_size)
+    # normalize frequency to probs
+    probs = index_count / torch.sum(index_count)
+    # perplexity
+    perplexity = torch.exp(-torch.sum(probs * torch.log(probs + eps), dim=-1))
+    entropy = -torch.sum(probs * torch.log(probs + eps), dim=-1)
+    # the percentage of used indices
+    num_total = len(index_count)
+    use_ratio = torch.count_nonzero(index_count) / num_total
+    utility = {
+        "perplexity": perplexity,
+        "perplexity_normalized": perplexity / vocab_size,
+        "entropy": entropy,
+        "entropy_normalized": entropy / vocab_size,
+        "use_ratio": use_ratio,
+    }
+    return {k: v.item() for k, v in utility.items()}
+
+
 def plot_joint_kde(
     x_values, y_values, show_axes: bool = True, fname: Optional[str] = None, **kwargs
 ):

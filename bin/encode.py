@@ -183,6 +183,7 @@ def parse_args():
         default=1000,
         help="max N for running medoids",
     )
+    parser.add_argument("--max-iter", type=int, default=10000, help="max number of BPE iters")
     parser.add_argument("--glue-opt", type=str2bool, default=False, help="whether to opt the glue angles for rmsd keys")
     parser.add_argument("--glue-opt-prior", type=float, default=0.0, help="whether to impose a prior loss in glue opt")
     parser.add_argument("--glue-opt-every", type=int, default=10, help="how often to glue opt")
@@ -361,7 +362,7 @@ def main():
         logger.info(f"resetting save_dir from {bpe.save_dir} to {args.save_dir}")
         bpe.save_dir = args.save_dir
     vis_paths = [[] for _ in range(num_vis)]
-    for t in range(_iter+1, 10000):
+    for t in range(_iter+1, args.max_iter):
         ## visualization        
         if args.vis and t in list(range(0,10)) + list(range(10,100,10)) + list(range(100, 1000, 100)) + list(range(1000,10000,1000)):
             # Save current visualization.
@@ -391,12 +392,14 @@ def main():
             stats_path = os.path.join(args.save_dir, f'stats={t}.json')
             K = len(bpe._tokens)
             L = np.mean([len(t.bond_to_token) for t in bpe.tokenizers])
+            input_ids = [bpe.quantize(t.tokenize()) for t in bpe.tokenizers]
+            utility = get_codebook_utility(torch.as_tensor(sum(input_ids, [])), bpe.vocab_size)
             json.dump(
                 {
                     "K": K,
                     "L": L,
-                    "bpr": bpe.capacity(tokenizer=True)/(N*L)
-                },
+                    "bpr": bpe.capacity(tokenizer=True)/(N*L),
+                } | utility,
                 open(stats_path, "w+")
             )
             time_path = os.path.join(args.save_dir, f"times_iter={t}.png")            

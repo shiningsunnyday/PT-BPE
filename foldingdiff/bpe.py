@@ -107,8 +107,8 @@ class BPE():
         max_workers = _effective_cpus()
         N = len(self.tokenizers)
         if max_workers == 0:
-            global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
-            BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior
+            global BIN_CENTERS, BIN_WEIGHTS, THRESHOLDS, GLUE_OPT_PRIOR
+            BIN_CENTERS, BIN_WEIGHTS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._bin_weights, self._thresholds, self.glue_opt_prior
             self.tokenizers = [BPE._opt_glue_worker(t, 3*t.n-4) for t in self.tokenizers]
         else:
             os.makedirs(os.path.dirname(self._assignment_cache_path(f"init_glue_opt", 0)), exist_ok=True)
@@ -126,7 +126,7 @@ class BPE():
                 with ProcessPoolExecutor(
                     max_workers=max_workers,
                     initializer=BPE._init_opt_glue_worker,
-                    initargs=(self._bin_centers, self._thresholds, self.glue_opt_prior)
+                    initargs=(self._bin_centers, self._bin_weights, self._thresholds, self.glue_opt_prior)
                 ) as pool:       
                     for idx, t in zip(missing_jobs, tqdm(pool.map(BPE._opt_glue_worker, [self.tokenizers[idx] for idx in missing_jobs], chunksize=10), total=len(missing_jobs), desc="optimizing all glues")):
                         self.tokenizers[idx] = t
@@ -457,6 +457,7 @@ class BPE():
                                 wR=1.0, wt=0.1, 
                                 lambda_prior=0.1,
                                 bin_centers=None,
+                                bin_weights=None,
                                 thresholds=None):
         # device = "cuda" if torch.cuda.is_available() else "cpu"
         device = "cpu"
@@ -539,9 +540,14 @@ class BPE():
                 trans_loss = torch.sum((t_occ - t_new)**2)
             exit_frame_loss = wR*rot_loss + wt*trans_loss
             if lambda_prior > 0.0:
-                prior = (circ_kde_prior(ω, bin_centers[length]['omega'], self._bin_weights[length]['omega'], kappa=50.)
-                    + circ_kde_prior(θ, bin_centers[length]['C:1N:1CA'], self._bin_weights[length]['C:1N:1CA'], kappa=20.)
-                    + circ_kde_prior(φ, bin_centers[length]['phi'], self._bin_weights[length]['phi'], kappa=20.))
+                if ret_all:
+                    prior = sum((circ_kde_prior(ω, bin_centers[length]['omega'], bin_weights[length]['omega'], kappa=50.)
+                    + circ_kde_prior(θ, bin_centers[length]['C:1N:1CA'], bin_weights[length]['C:1N:1CA'], kappa=20.)
+                    + circ_kde_prior(φ, bin_centers[length]['phi'], bin_weights[length]['phi'], kappa=20.)) for (ω, θ, φ) in zip(ωs, θs, φs))
+                else:
+                    prior = (circ_kde_prior(ω, bin_centers[length]['omega'], bin_weights[length]['omega'], kappa=50.)
+                    + circ_kde_prior(θ, bin_centers[length]['C:1N:1CA'], bin_weights[length]['C:1N:1CA'], kappa=20.)
+                    + circ_kde_prior(φ, bin_centers[length]['phi'], bin_weights[length]['phi'], kappa=20.))
                 loss = exit_frame_loss + lambda_prior * prior                        
             else:
                 loss = exit_frame_loss            
@@ -670,9 +676,10 @@ class BPE():
         STD_BONDS = sb
     
     @staticmethod
-    def _init_opt_glue_worker(bc, th, gop):
-        global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
+    def _init_opt_glue_worker(bc, bw, th, gop):
+        global BIN_CENTERS, BIN_WEIGHTS, THRESHOLDS, GLUE_OPT_PRIOR
         BIN_CENTERS = bc
+        BIN_WEIGHTS = bw
         THRESHOLDS = th
         GLUE_OPT_PRIOR = gop
 
@@ -743,12 +750,15 @@ class BPE():
 
 
     @staticmethod
-    def opt_glue(t: Tokenizer, i1, length, R_occ, t_occ, glue_opt_prior=None, bin_centers=None, thresholds=None):
+    def opt_glue(t: Tokenizer, i1, length, R_occ, t_occ, glue_opt_prior=None, bin_centers=None, bin_weights=None, thresholds=None):
         assert bin_centers or "BIN_CENTERS" in globals()
+        assert bin_weights or "BIN_WEIGHTS" in globals()
         assert thresholds or "THRESHOLDS" in globals()
         assert glue_opt_prior or "GLUE_OPT_PRIOR" in globals()
         if bin_centers is None:
             bin_centers = BIN_CENTERS
+        if bin_weights is None:
+            bin_weights = BIN_WEIGHTS            
         if thresholds is None:
             thresholds = THRESHOLDS
         if glue_opt_prior is None:
@@ -770,6 +780,7 @@ class BPE():
             wR=1.0, wt=0.1, 
             lambda_prior=glue_opt_prior,
             bin_centers=bin_centers,
+            bin_weights=bin_weights,
             thresholds=thresholds
         )
 
@@ -1063,8 +1074,8 @@ class BPE():
                         relv_thresh
                     )])/2 if v==v else v for v in t.angles_and_dists[angle]]
         elif self.glue_opt_method == "all":
-            global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
-            BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior
+            global BIN_CENTERS, BIN_WEIGHTS, THRESHOLDS, GLUE_OPT_PRIOR
+            BIN_CENTERS, BIN_WEIGHTS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._bin_weights, self._thresholds, self.glue_opt_prior
             t = BPE._opt_glue_worker(pickle_copy(t))
         # .bin() for single tokenizer
         geo_dict = self.bin_helper(t)
@@ -1089,8 +1100,6 @@ class BPE():
             metrics["lddt"].append(lddt.mean())
             metrics["L"].append(len(t.bond_to_token))
         return metrics
-        
-
         # t_true = self.tokenizers[next((i for i in range(len(self.tokenizers)) if self.tokenizers[i].fname == t.fname))]
         # assert t.bond_to_token == t_true.bond_to_token
         # assert (t.angles_and_dists != t_true.angles_and_dists).sum().sum() == 6
@@ -1314,7 +1323,7 @@ class BPE():
                     # update now
                     R_occ, t_occ = t.exit_frame(i1, 3*((length-2)//3)+2)
                     t.set_token_geo(i1, length, self._sphere_dict[key][p])
-                    BPE.opt_glue(t, i1, 3*((length-2)//3)+2, R_occ, t_occ, self.glue_opt_prior, self._bin_centers, self._thresholds)
+                    BPE.opt_glue(t, i1, 3*((length-2)//3)+2, R_occ, t_occ, self.glue_opt_prior, self._bin_centers, self._bin_weights, self._thresholds)
                 else:
                     t.set_token_geo(i1, length, self._sphere_dict[key][p])
             # --- Step 5: Increment new pairs ---                     
@@ -1330,8 +1339,8 @@ class BPE():
 
         # -- Step 6 (cont.) for opt_glue
         if not self.rmsd_only and self.glue_opt and self.glue_opt_method == "all" and opt:
-            global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
-            BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior                 
+            global BIN_CENTERS, BIN_WEIGHTS, THRESHOLDS, GLUE_OPT_PRIOR
+            BIN_CENTERS, BIN_WEIGHTS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._bin_weights, self._thresholds, self.glue_opt_prior                 
             t_new = BPE._opt_glue_worker(pickle_copy(t))
             # find all the changed (dihedral, omega, C-N-CA) triples
             for i1 in t.bond_to_token:
@@ -1905,7 +1914,7 @@ class BPE():
                         # update now
                         R_occ, t_occ = t.exit_frame(i1, 3*((length-2)//3)+2)
                         t.set_token_geo(i1, length, self._sphere_dict[key][p])
-                        BPE.opt_glue(t, i1, 3*((length-2)//3)+2, R_occ, t_occ, self.glue_opt_prior, self._bin_centers, self._thresholds)
+                        BPE.opt_glue(t, i1, 3*((length-2)//3)+2, R_occ, t_occ, self.glue_opt_prior, self._bin_centers, self._bin_weights, self._thresholds)
                     else:
                         t.set_token_geo(i1, length, self._sphere_dict[key][p])
                 step_times["step6"] += time.perf_counter() - start_time    
@@ -1952,8 +1961,8 @@ class BPE():
         # -- Step 6 (cont.) for opt_glue
         if rmsd_key is not None and not self.rmsd_only and self.glue_opt and self.glue_opt_method == "all" and (self._step % self.glue_opt_every == 0):
             if max_workers == 0:
-                global BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR
-                BIN_CENTERS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._thresholds, self.glue_opt_prior
+                global BIN_CENTERS, BIN_WEIGHTS, THRESHOLDS, GLUE_OPT_PRIOR
+                BIN_CENTERS, BIN_WEIGHTS, THRESHOLDS, GLUE_OPT_PRIOR = self._bin_centers, self._bin_weights, self._thresholds, self.glue_opt_prior
                 for idx in uniq_idxes:
                     t = self.tokenizers[idx]                    
                     t_new = BPE._opt_glue_worker(pickle_copy(t))
@@ -1977,7 +1986,7 @@ class BPE():
                 with ProcessPoolExecutor(
                     max_workers=max_workers,
                     initializer=BPE._init_opt_glue_worker,
-                    initargs=(self._bin_centers, self._thresholds, self.glue_opt_prior)
+                    initargs=(self._bin_centers, self._bin_weights, self._thresholds, self.glue_opt_prior)
                 ) as pool:
                     for idx, t_new in zip(uniq_idxes, tqdm(pool.map(BPE._opt_glue_worker, [self.tokenizers[idx] for idx in uniq_idxes], chunksize=10), total=len(uniq_idxes), desc="optimizing all glues")):
                         t = self.tokenizers[idx]

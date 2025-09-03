@@ -989,7 +989,7 @@ class MyDataset(Dataset):
         self.esm_outputs = results
         for i in range(len(results)):
             if len(results[i]) != self.data[i][2].n:
-                breakpoint()    
+                breakpoint()
     def __len__(self):
         return len(self.data)
     
@@ -1014,8 +1014,10 @@ class ResidueDataset(MyDataset):
             stem = Path(t.fname).stem
             mapping[stem] = i
         my_data = []
-        assert len(dataset[0].keys()) == 3
-        label_key = next(k for k in dataset[0].keys() if 'label' in k)
+        assert len(dataset[0].keys()) == 3        
+        poss_keys = [k for k in dataset[0].keys() if 'label' in k or 'score' in k]
+        assert len(poss_keys) == 1
+        label_key = poss_keys[0]
         for sample in dataset:
             if self.debug and len(my_data) == 10:
                 break            
@@ -1024,8 +1026,13 @@ class ResidueDataset(MyDataset):
             if key in mapping:
                 i = mapping[key]
                 if tokenizers[i].n != len(sample[label_key]):
+                    breakpoint()
                     continue
-                sample['residue_label'] = sample[label_key]
-                my_data.append((prot, chain, tokenizers[i], sample))
+                sample['residue_label'] = sample[label_key]                
+                if len(ProteinChain.from_rcsb(prot, chain_id=chain)) == tokenizers[i].n:
+                    my_data.append((prot, chain, tokenizers[i], sample))
+                else:
+                    breakpoint()
+        print(f"{len(my_data)}/{len(dataset)} processed")
         self.data = my_data
         self.precompute()
