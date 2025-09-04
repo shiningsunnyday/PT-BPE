@@ -6,6 +6,7 @@ from foldingdiff.datasets import FullCathCanonicalCoordsDataset, extract_pdb_cod
 from foldingdiff.bpe import *
 from foldingdiff.bpe_dataset import *
 from foldingdiff.plotting import *
+from foldingdiff.utils import str2bool
 import scipy.io
 import numpy as np
 import subprocess
@@ -15,6 +16,7 @@ import json
 from datetime import datetime
 import sys
 import lmdb
+from glob import glob
 from esm.models.esmc import ESMC
 from esm.sdk.api import ESMProtein, LogitsConfig
 from esm.utils.structure.protein_chain import ProteinChain
@@ -24,6 +26,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score, accuracy_score, roc_auc_score
+from torchmetrics.regression import R2Score, PearsonCorrCoef, SpearmanCorrCoef
 import queue
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -136,12 +139,28 @@ def parse_args():
     # hparams
     parser.add_argument("--p_min_size", default=float("inf"), help="when to start using rmsd binning")
     parser.add_argument("--level", default="protein", help="prediction at protein or residue level", choices=["protein", "residue"])
+    parser.add_argument("--regression", type=str2bool, default=False)
     args = parser.parse_args()
     if args.dedup and args.pkl_data_file and "dedup" not in args.pkl_data_file:
         parser.error("specify pkl-data-file to path of dedup data")
     return args
 
 
+def calculate_regression_metric(logits, targets):
+    # logits: (M, )
+    # targets: (M, )
+    device = logits.device
+    r2score_func = R2Score().to(device)
+    r2 = r2score_func(logits, targets)
+    pearson_func = PearsonCorrCoef().to(device)
+    pearsonr = pearson_func(logits, targets)
+    spearman_func = SpearmanCorrCoef().to(device)
+    spearmanr = spearman_func(logits, targets)
+    return {
+        "r2": r2,
+        "pearsonr": pearsonr,
+        "spearmanr": spearmanr
+    }
 
 # Define the probing layer as a two-layer MLP.
 # Now, it expects as input a fixed-size vector (already pooled).
@@ -335,10 +354,11 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
     # Instantiate the Tree Encoder (for up-down tree-LSTM with super-root)
     tree_encoder = UpDownTreeEncoder(embed_dim, concat_updown=True).to(device)
 
-    if num_classes == 0:
-        breakpoint()
-    elif num_classes == 1:
-        criterion = nn.BCEWithLogitsLoss()
+    if num_classes == 1:
+        if args.regression:
+            criterion = nn.MSELoss()
+        else:
+            criterion = nn.BCEWithLogitsLoss()
     else:
         criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(list(probe.parameters()) + list(tree_encoder.parameters()), lr=0.001)
@@ -364,12 +384,7 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
     valid_loader = DataLoader(valid_dataset, **dataset_kwargs)
     num_epochs = args.epochs
 
-    if num_classes == 0:
-        breakpoint()
-    elif num_classes == 1:
-        best_val_auroc = 0.0
-    else:
-        best_val_macro_f1 = -1.0
+    best_val = -1.0
     # --- Early stopping config ---
     patience = 5
     epochs_no_improve = 0
@@ -426,9 +441,7 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                     all_labels.append(batch['fold_label'][i])
                 else:
                     logits = probe(leaves)               # (num_residues, num_classes)
-                    if num_classes == 0:
-                        breakpoint()
-                    elif num_classes == 1:
+                    if num_classes == 1:
                         logits = logits.squeeze(1)  # (num_residues,)
                         item_loss = criterion(logits, batch['residue_label'][i].float().to(device))
                     else:
@@ -451,17 +464,17 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
             optimizer.step()
 
             train_loss += loss.item() * B
-            if num_classes == 0:
-                breakpoint()
-            elif num_classes == 1:
-                preds = torch.sigmoid(batch_logits)
-                preds = (preds > 0.5).long()
-            else:
-                preds = batch_logits.argmax(dim=1)
-            train_correct += (preds == labels).sum().item()
+            if not args.regression:
+                if num_classes == 1:        
+                    preds = torch.sigmoid(batch_logits)
+                    preds = (preds > 0.5).long()
+                else:
+                    preds = batch_logits.argmax(dim=1)
+                train_correct += (preds == labels).sum().item()
 
         avg_train_loss = train_loss / num_train_samples
-        train_accuracy = train_correct / num_train_samples
+        if not args.regression:
+            train_accuracy = train_correct / num_train_samples
 
         # ----------------------
         # Validation Loop
@@ -516,12 +529,15 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                         logit = probe(protein_vec)         # (num_classes,)
                         batch_logits.append(logit)
                     else:
-                        logits = probe(leaves)               # (num_residues, num_classes)
-                        if num_classes == 0:
-                            breakpoint()
-                        elif num_classes == 1:
-                            logits = logits.squeeze(1)  # (num_residues,)
-                            item_loss = criterion(logits, batch['residue_label'][i].float().to(device))
+                        logits = probe(leaves)               # (num_residues, num_classes)          
+                        if num_classes == 1:
+                            if args.regression:
+                                ignore_index = torch.logical_or(labels.isnan(), (torch.abs(labels - (-100)) < 1e-6))
+                                logits = logits.squeeze()[~ignore_index.squeeze()]
+                                item_loss = criterion(logits, labels.squeeze())                                
+                            else:
+                                logits = logits.squeeze(1)  # (num_residues,)
+                                item_loss = criterion(logits, batch['residue_label'][i].float().to(device))
                         else:
                             item_loss = criterion(logits, batch['residue_label'][i].to(device))
                         valid_loss += item_loss.item()
@@ -536,13 +552,15 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                     batch_logits = torch.concat(batch_logits, dim=0) # (sum(n_residues), num_classes)
                     num_valid_samples += batch_logits.size(0)
                 
-                if num_classes == 0:
-                    breakpoint()
-                elif num_classes == 1:
-                    scores = torch.sigmoid(batch_logits)
-                    preds = (scores > 0.5).long()
-                    labels = labels.squeeze(0)
-                    valid_scores.extend(scores.cpu().tolist())
+                if num_classes == 1:
+                    if args.regression:
+                        preds = batch_logits
+                        labels = labels.squeeze(0)
+                    else:
+                        scores = torch.sigmoid(batch_logits)
+                        preds = (scores > 0.5).long()
+                        labels = labels.squeeze(0)
+                        valid_scores.extend(scores.cpu().tolist())
                 else:
                     preds = batch_logits.argmax(dim=1)
 
@@ -553,13 +571,18 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
         valid_accuracy = sum([1 for p, t in zip(valid_preds, valid_labels) if p == t]) / num_valid_samples
         
         # Compute macro F1 score on validation set.
-        if num_classes == 0:
-            breakpoint()
-        elif num_classes == 1:
-            val_auroc = roc_auc_score(valid_labels, valid_scores)
-            print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, "
-                f"Train Acc: {train_accuracy*100:.2f}%, Valid Loss: {avg_valid_loss:.4f}, "
-                f"Valid Acc: {valid_accuracy*100:.2f}%, Valid AUROC: {val_auroc:.4f}")            
+        if num_classes == 1:
+            if args.regression:
+                val_metrics = calculate_regression_metric(torch.as_tensor(valid_preds), torch.as_tensor(valid_labels))
+                val_pearson_r = val_metrics['pearsonr'].item()
+                print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, "
+                    f"Valid Loss: {avg_valid_loss:.4f}, "
+                    f"Valid Pearson R: {val_pearson_r:.4f}")                   
+            else:
+                val_auroc = roc_auc_score(valid_labels, valid_scores)
+                print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, "
+                    f"Train Acc: {train_accuracy*100:.2f}%, Valid Loss: {avg_valid_loss:.4f}, "
+                    f"Valid Acc: {valid_accuracy*100:.2f}%, Valid AUROC: {val_auroc:.4f}")            
         else:
             val_macro_f1 = f1_score(valid_labels, valid_preds, average='macro')
             print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, "
@@ -570,10 +593,35 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
         # ----------------------
         # Checkpoint saving
         # ----------------------
-        if num_classes == 0:
-            breakpoint()
-        elif num_classes == 1 and val_auroc > best_val_auroc:
-            best_val_auroc = val_auroc
+        if num_classes == 1:
+            if args.regression and val_pearson_r > best_val:
+                best_val = val_pearson_r
+                os.makedirs(args.save_dir, exist_ok=True)
+                checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
+                torch.save({
+                    'epoch': epoch + 1,
+                    'encoder_state_dict': tree_encoder.state_dict(),
+                    'probe_state_dict': probe.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_pearson_r': best_val,
+                }, checkpoint_path)
+                print(f"New best pearson r achieved: {best_val:.4f}. Saved checkpoint to {checkpoint_path}.")            
+                epochs_no_improve = 0
+            elif not args.regression and val_auroc > best_val:
+                best_val = val_auroc
+                os.makedirs(args.save_dir, exist_ok=True)
+                checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
+                torch.save({
+                    'epoch': epoch + 1,
+                    'encoder_state_dict': tree_encoder.state_dict(),
+                    'probe_state_dict': probe.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_auroc': best_val,
+                }, checkpoint_path)
+                print(f"New best auroc achieved: {best_val:.4f}. Saved checkpoint to {checkpoint_path}.")            
+                epochs_no_improve = 0
+        elif num_classes > 1 and val_macro_f1 > best_val:
+            best_val = val_macro_f1
             os.makedirs(args.save_dir, exist_ok=True)
             checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
             torch.save({
@@ -581,39 +629,31 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                 'encoder_state_dict': tree_encoder.state_dict(),
                 'probe_state_dict': probe.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_auroc': best_val_auroc,
+                'val_macro_f1': best_val,
             }, checkpoint_path)
-            print(f"New best auroc achieved: {best_val_auroc:.4f}. Saved checkpoint to {checkpoint_path}.")            
-            epochs_no_improve = 0
-        elif num_classes > 1 and val_macro_f1 > best_val_macro_f1:
-            best_val_macro_f1 = val_macro_f1
-            os.makedirs(args.save_dir, exist_ok=True)
-            checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
-            torch.save({
-                'epoch': epoch + 1,
-                'encoder_state_dict': tree_encoder.state_dict(),
-                'probe_state_dict': probe.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_macro_f1': best_val_macro_f1,
-            }, checkpoint_path)
-            print(f"New best macro F1 achieved: {best_val_macro_f1:.4f}. Saved checkpoint to {checkpoint_path}.")
+            print(f"New best macro F1 achieved: {best_val:.4f}. Saved checkpoint to {checkpoint_path}.")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
-                if num_classes == 0:
-                    breakpoint()
-                elif num_classes == 1:
-                    print(
-                        f"Early stopping at epoch {epoch+1}: "
-                        f"no val auroc improvement for {patience} epochs "
-                        f"(best val auroc: {best_val_auroc:.4f})."
-                    )
+                if num_classes == 1:
+                    if args.regression:
+                        print(
+                            f"Early stopping at epoch {epoch+1}: "
+                            f"no val pearson r improvement for {patience} epochs "
+                            f"(best val pearson r: {best_val:.4f})."
+                        )                        
+                    else:
+                        print(
+                            f"Early stopping at epoch {epoch+1}: "
+                            f"no val auroc improvement for {patience} epochs "
+                            f"(best val auroc: {best_val:.4f})."
+                        )
                 else:
                     print(
                         f"Early stopping at epoch {epoch+1}: "
                         f"no val macro F1 improvement for {patience} epochs "
-                        f"(best val macro f1: {best_val_macro_f1:.4f})."
+                        f"(best val macro f1: {best_val:.4f})."
                     )                    
                 break            
 
@@ -626,7 +666,7 @@ def test_probe(args, test_datasets, num_classes):
     device = torch.device(args.cuda)
 
     # 1) Find the best checkpoint file
-    ckpt_paths = glob.glob(os.path.join(args.save_dir, "best_checkpoint_epoch_*.pt"))
+    ckpt_paths = glob(os.path.join(args.save_dir, "best_checkpoint_epoch_*.pt"))
     if not ckpt_paths:
         raise FileNotFoundError(f"No checkpoint found matching best_checkpoint_epoch_*.pt in {args.save_dir}")
     # pick the most recently modified
@@ -674,10 +714,11 @@ def test_probe(args, test_datasets, num_classes):
         all_labels = []
         all_scores = []
         all_losses = []
-        if num_classes == 0:
-            breakpoint()
-        elif num_classes == 1:
-            criterion = nn.BCEWithLogitsLoss()
+        if num_classes == 1:
+            if args.regression:
+                criterion = nn.MSELoss()
+            else:
+                criterion = nn.BCEWithLogitsLoss()
         else:
             criterion = nn.CrossEntropyLoss()
 
@@ -720,15 +761,18 @@ def test_probe(args, test_datasets, num_classes):
                     all_losses.append(loss.item())
                 else:
                     logits = probe(leaves)       # (num_residues, C)
-                    if num_classes == 0:
-                        breakpoint()
-                    elif num_classes == 1:
-                        logits = logits.squeeze(1)
-                        scores = torch.sigmoid(logits) # (num_residues,)
-                        pred = (scores > 0.5).long()
-                        label = label.squeeze(0)
-                        loss = criterion(logits, label.float())
-                        all_scores.extend(scores.cpu().tolist())
+                    if num_classes == 1:
+                        if args.regression:
+                            label = label.squeeze(0)
+                            pred = logits.squeeze(1)
+                            loss = criterion(logits.squeeze(), label)
+                        else:
+                            logits = logits.squeeze(1)
+                            scores = torch.sigmoid(logits) # (num_residues,)
+                            pred = (scores > 0.5).long()
+                            label = label.squeeze(0)
+                            loss = criterion(logits, label.float())
+                            all_scores.extend(scores.cpu().tolist())
                     else:
                         pred = logits.argmax(dim=1) # (num_residues,)
                         loss = criterion(logits, label)
@@ -737,13 +781,17 @@ def test_probe(args, test_datasets, num_classes):
                     all_labels.extend(label.cpu().tolist())
 
         # compute metrics
-        acc = accuracy_score(all_labels, all_preds)
-        if num_classes == 0:
-            breakpoint()
-        elif num_classes == 1:
-            auroc = roc_auc_score(all_labels, all_scores)
-            mean_loss = sum(all_losses) / len(all_losses)
-            results.append((name, mean_loss, acc, auroc))
+        if not args.regression:
+            acc = accuracy_score(all_labels, all_preds)
+        if num_classes == 1:
+            if args.regression:
+                metrics = calculate_regression_metric(torch.as_tensor(all_preds), torch.as_tensor(all_labels))
+                mean_loss = sum(all_losses) / len(all_losses)
+                results.append((name, mean_loss, 0.0, metrics))
+            else:
+                metric = roc_auc_score(all_labels, all_scores)
+                mean_loss = sum(all_losses) / len(all_losses)
+                results.append((name, mean_loss, acc, metric))
         else:
             macro_f1 = f1_score(all_labels, all_preds, average='macro')
             mean_loss = sum(all_losses) / len(all_losses)
@@ -757,7 +805,11 @@ def test_probe(args, test_datasets, num_classes):
             f.write(f"  Test Loss: {loss:.4f}\n")
             f.write(f"  Accuracy:  {acc*100:.2f}%\n")
             if num_classes == 1:
-                f.write(f"  AUROC:   {metric:.4f}\n\n")
+                if args.regression:                    
+                    for k, v in metric.items():
+                        f.write(f"  {k}:   {v.item():.4f}\n\n")
+                else:
+                    f.write(f"  AUROC:   {metric:.4f}\n\n")
             else:
                 f.write(f"  Macro F1:   {metric:.4f}\n\n")                
 
@@ -768,7 +820,11 @@ def load_datasets(args):
     if args.pkl_data_file:
         if os.path.exists(args.pkl_data_file):
             train_dataset, validation_dataset, test_datasets = pickle.load(open(args.pkl_data_file, 'rb'))            
-            print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
+            if isinstance(train_dataset, list):
+                for train, val, tests in zip(train_dataset, validation_dataset, test_datasets):
+                    print(f"Train: {len(train)}, Valid: {len(val)}, Test: {[len(x[1]) for x in tests]}")
+            else:
+                print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
             return train_dataset, validation_dataset, test_datasets
         # train = LMDBDataset('data/remote_homology_raw/remote_homology_train.lmdb')
         # counts = Counter([x['fold_label'] for x in train])
@@ -810,7 +866,7 @@ def load_datasets(args):
         test_splits = ['fold_test', 'superfamily_test']
     elif args.task == "structural-flexibility-prediction":
         prefix = [f'data/struct_token_bench/AtlasDataset_{metric}_score' for metric in ['rmsf', 'neq', 'bfactor']]
-        test_splits = [['fold_test', 'superfamily_test'] for _ in prefix]
+        test_splits = [['fold_test', 'superfamily_test'] for metric in ['rmsf', 'neq', 'bfactor']]
     elif args.task == "remote-homology-detection":
         prefix = 'data/struct_token_bench/TapeRemoteHomologyDataset_fold_label'
         test_splits = ['test_fold_holdout', 'test_family_holdout', 'test_superfamily_holdout']            
@@ -818,22 +874,22 @@ def load_datasets(args):
         raise NotImplementedError(f"Task {args.task} not implemented.")
     # get processed structtokenbench files
     if isinstance(prefix, list):
-        train_datasets, validation_datasets, test_datsets = [], [], []
-        for pre in prefix:
+        train_datasets, validation_datasets, tests_datasets = [], [], []
+        for i, pre in enumerate(prefix):
             datasets = {}
-            for split in ["train", "validation"] + test_splits:
+            for split in ["train", "validation"] + test_splits[i]:
                 with open(f'{pre}_{split}.jsonl', 'r') as f:
                     datasets[f"{split}_dataset"] = [json.loads(line) for line in f]        
                 datasets[f"{split}_dataset"] = (MyDataset if args.task == "remote-homology-detection" else ResidueDataset)(bpe.tokenizers, datasets[f"{split}_dataset"], args.debug)
-            test_datasets = [(split, datasets[f"{split}_dataset"]) for split in test_splits]   
+            test_datasets = [(split, datasets[f"{split}_dataset"]) for split in test_splits[i]]
             train_dataset, validation_dataset = datasets["train_dataset"], datasets["validation_dataset"]            
             train_datasets.append(train_dataset)
             validation_datasets.append(validation_dataset)
-            test_datasets.append(test_datasets)
+            tests_datasets.append(test_datasets)
             print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
         if args.pkl_data_file:
-            pickle.dump((train_datasets, validation_datasets, test_datasets), open(args.pkl_data_file, 'wb+'))
-        return train_dataset, validation_dataset, test_datasets            
+            pickle.dump((train_datasets, validation_datasets, tests_datasets), open(args.pkl_data_file, 'wb+'))
+        return train_datasets, validation_datasets, tests_datasets            
     else:
         datasets = {}
         for split in ["train", "validation"] + test_splits:
@@ -863,11 +919,13 @@ def main(args):
     # train using train_dataset, validate with valid_dataset, ignore test_* datasets for now
     train_dataset, valid_dataset, test_datasets = load_datasets(args)
     if args.task == "structural-flexibility-prediction":
-        for (train, valid, test) in zip(train_dataset, valid_dataset, test_datasets):
+        for i, (train, valid, tests) in enumerate(zip(train_dataset, valid_dataset, test_datasets)):
             if not args.test:
                 train_probe(args, train, valid, num_classes=1)
-            test_probe(args, train, valid, num_classes=1)
-            breakpoint()
+            test_probe(args, tests, num_classes=1)
+            prefix = ['rmsf', 'neq', 'bfactor'][i]
+            for file in glob(os.path.join(args.save_dir, "*.pt"))+glob(os.path.join(args.save_dir, "*.txt")):
+                os.rename(file, Path(file).parent / (prefix+'_'+Path(file).name))
             # distinguish the artifacts
     elif args.task == "remote-homology-detection":
         if not args.test:

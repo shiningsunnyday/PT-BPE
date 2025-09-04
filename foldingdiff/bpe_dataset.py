@@ -885,22 +885,8 @@ class BaseDataset(Dataset):
 
 
 def compute_embedding(item):
-    _id, chain, _, _ = item
-    protein = ESMProtein.from_protein_chain(ProteinChain.from_rcsb(_id, chain_id=chain))    
-    # Ensure only one thread performs GPU operations at a time.
-    with gpu_lock:
-        protein_tensor = client.encode(protein)
-        output = client.logits(
-            protein_tensor,
-            LogitsConfig(sequence=True, return_embeddings=True)
-        )
-    embed = output.embeddings[0, 1:-1].to(torch.float32).to('cpu')
-    return embed
-
-
-def compute_embedding_from_pdb(item):
-    _id, chain, _, _, prot_fname = item
-    protein = ESMProtein.from_protein_chain(ProteinChain.from_pdb(prot_fname, chain_id=chain, is_predicted=True))    
+    _id, chain, fname, _ = item
+    protein = ESMProtein.from_protein_chain(ProteinChain.from_pdb(fname))    
     # Ensure only one thread performs GPU operations at a time.
     with gpu_lock:
         protein_tensor = client.encode(protein)
@@ -982,7 +968,12 @@ class MyDataset(Dataset):
         # end debug        
         with ThreadPoolExecutor() as executor:
             results = list(tqdm(
-                executor.map(compute_embedding, self.data),
+                executor.map(compute_embedding, 
+                    [
+                        (prot, chain, t.fname, sample)
+                        for (prot, chain, t, sample) in self.data
+                    ]
+                ),
                 total=len(self.data),
                 desc="precomputing esm embeddings"
             ))        
@@ -1014,25 +1005,28 @@ class ResidueDataset(MyDataset):
             stem = Path(t.fname).stem
             mapping[stem] = i
         my_data = []
-        assert len(dataset[0].keys()) == 3        
         poss_keys = [k for k in dataset[0].keys() if 'label' in k or 'score' in k]
         assert len(poss_keys) == 1
         label_key = poss_keys[0]
         for sample in dataset:
             if self.debug and len(my_data) == 10:
-                break            
-            prot, chain = sample['pdb_id'], sample['chain_id']
-            key = f"{prot}_{chain}"            
+                break
+            if 'pdb_id' in sample:
+                assert 'chain_id' in sample
+                prot, chain = sample['pdb_id'], sample['chain_id']                
+            else:
+                # load up pdb_chain
+                pdb_path = sample['pdb_path']
+                pdb_chain = ProteinChain.from_pdb(pdb_path)
+                prot, chain = pdb_chain.id, pdb_chain.chain_id
+            key = f"{prot}_{chain}" if len(chain) else prot
             if key in mapping:
                 i = mapping[key]
                 if tokenizers[i].n != len(sample[label_key]):
-                    breakpoint()
+                    # data dir mismatch                    
                     continue
                 sample['residue_label'] = sample[label_key]                
-                if len(ProteinChain.from_rcsb(prot, chain_id=chain)) == tokenizers[i].n:
-                    my_data.append((prot, chain, tokenizers[i], sample))
-                else:
-                    breakpoint()
+                my_data.append((prot, chain, tokenizers[i], sample))
         print(f"{len(my_data)}/{len(dataset)} processed")
         self.data = my_data
         self.precompute()

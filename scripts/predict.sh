@@ -25,6 +25,7 @@ if [ $# -ne 2 ]; then
 fi
 
 level="residue"
+reg="false"
 case "$1" in
   1)
     task="BindInt"
@@ -59,6 +60,7 @@ case "$1" in
     ;;  
   8)
     task="structural-flexibility-prediction"
+    reg="true"
     ;;  
   9)
     task="bindshake"    
@@ -84,6 +86,7 @@ PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   --task ${task} \
   --pkl-data-file /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/data/struct_token_bench/processed_pickles/${task}.pkl \
   --level ${level} \
+  --regression $reg \
   --auto
   # --test \
   # --save-dir ${ckpt_dir} \

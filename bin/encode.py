@@ -5,7 +5,7 @@ import os
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
 from foldingdiff.bpe import *
 from foldingdiff.plotting import *
-from foldingdiff.utils import load_args_from_txt, validate_args_match
+from foldingdiff.utils import *
 from esm.utils.structure.protein_chain import ProteinChain
 import scipy.io
 import numpy as np
@@ -103,41 +103,7 @@ def call_freqgeo(G):
         n = len(nodelabels)
         breakpoint()    
 
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0"):
-        return False
-    else:
-        raise argparse.ArgumentTypeError("Boolean value expected.")
 
-def str2dict(v):
-    m = re.match('\d+-\d+(?::\d+-\d+)*$', v)
-    if not m:
-        raise argparse.ArgumentTypeError("Wrong format, see help.")
-    pairs = re.findall(r'(\d+)-(\d+)', v)        
-    bins = {}
-    for (a, b) in pairs:
-        bins[int(a)] = int(b)
-    return bins
-
-def str2dictorint(v):
-    if v.isdigit():
-        return int(v)
-    else:
-        return str2dict(v)
-
-def int_or_inf(x: str):
-    # allow case‐insensitive “inf”
-    if x.lower() in ("inf", "infinity"):
-        return float("inf")
-    try:
-        return int(x)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"‘{x}’ is not an integer or ‘inf’")
-    
 def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff BPE Script")
     # folder

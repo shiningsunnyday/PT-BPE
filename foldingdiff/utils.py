@@ -7,11 +7,48 @@ import hashlib
 import logging
 from typing import *
 import ast
+import argparse
 from argparse import Namespace
 import pickle
 import requests
-
+import re
 import numpy as np
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+
+def str2dict(v):
+    m = re.match('\d+-\d+(?::\d+-\d+)*$', v)
+    if not m:
+        raise argparse.ArgumentTypeError("Wrong format, see help.")
+    pairs = re.findall(r'(\d+)-(\d+)', v)        
+    bins = {}
+    for (a, b) in pairs:
+        bins[int(a)] = int(b)
+    return bins
+
+def str2dictorint(v):
+    if v.isdigit():
+        return int(v)
+    else:
+        return str2dict(v)
+
+def int_or_inf(x: str):
+    # allow case‐insensitive “inf”
+    if x.lower() in ("inf", "infinity"):
+        return float("inf")
+    try:
+        return int(x)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"‘{x}’ is not an integer or ‘inf’")
+    
 
 def load_args_from_txt(args_path: str) -> Namespace:
     """
