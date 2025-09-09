@@ -383,7 +383,8 @@ class BPE():
                             v if angle in Tokenizer.BOND_TYPES else (v+2*np.pi)%(2*np.pi), 
                             relv_thresh
                         )])/2 if v==v else v for v in t.angles_and_dists[angle]]                    
-            self._tokens = {n: json.loads(key_str) for key_str, n in label_dict.items()}
+            if not res_geo:
+                self._tokens = {n: json.loads(key_str) for key_str, n in label_dict.items()}
         logger.info(f"initialized {len(self._tokens)} residue-level tokens")     
 
     
@@ -1099,7 +1100,7 @@ class BPE():
             metrics["rmsd"].append(bb_rmsd)
             metrics["lddt"].append(lddt.mean())
             metrics["L"].append(len(t.bond_to_token))
-        return metrics
+        return t, metrics
         # t_true = self.tokenizers[next((i for i in range(len(self.tokenizers)) if self.tokenizers[i].fname == t.fname))]
         # assert t.bond_to_token == t_true.bond_to_token
         # assert (t.angles_and_dists != t_true.angles_and_dists).sum().sum() == 6

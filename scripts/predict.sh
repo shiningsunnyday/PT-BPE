@@ -17,16 +17,24 @@ cd $project_dir
 
 module load cuda/12.4.1-fasrc01 cudnn/9.5.1.17_cuda12-fasrc01
 
+runner="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/esm_env/bin/python"
+
+if [ $1 -eq 1 ]; then
+  echo "debug"
+  # export SLURM_CPUS_PER_TASK=0
+  runner="${runner} -m pdb -c continue"
+fi
+
 # train
 
-if [ $# -ne 2 ]; then
-  echo "Usage: $0 {1|2|..|10} {pkl_file}"
+if [ $# -ne 3 ]; then
+  echo "Usage: $0 {0|1} {1|2|..|10} {pkl_file}"
   exit 1
 fi
 
 level="residue"
 reg="false"
-case "$1" in
+case "$2" in
   1)
     task="BindInt"
     ;;
@@ -63,7 +71,7 @@ case "$1" in
     reg="true"
     ;;  
   9)
-    task="bindshake"    
+    task="BindShake"    
     ;;  
   10)
     task="remote-homology-detection"
@@ -72,13 +80,13 @@ case "$1" in
     level="protein"
     ;;  
   *)
-    echo "Invalid option: $1"
+    echo "Invalid option: $2"
     echo "Usage: $0 {1|2|...|10} {pkl_file}"
     exit 1
     ;;
 esac
 
-pkl_file=$2
+pkl_file=$3
 PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/predict_env/bin/python -m bin.predict \
   --cuda cuda:0 \

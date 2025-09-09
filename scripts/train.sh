@@ -5,7 +5,7 @@
 #SBATCH --account kempner_mzitnik_lab
 #SBATCH -c 16 # number of cores
 #SBATCH --mem 100g # memory pool for all cores
-#SBATCH --gres=gpu:1 # gpu
+#SBATCH --gres=gpu:4 # gpu
 #SBATCH -t 3-0:00 # time (D-HH:MM)
 ##SBATCH -t 0-12:00
 #SBATCH -o /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_train.%j.out # STDOUT
@@ -54,30 +54,41 @@ case "$2" in
   7)
     task="remote-homology-detection"
     # ckpt_path="./ckpts/1752525499.4329767/bpe_iter=135.pkl"
-    level="protein"
+    # level="protein"
+    ;;
+  8)
+    task="pretrain"
     ;;
   *)
     echo "Invalid option: $2"
-    echo "Usage: $0 {1|2|3|4|5}"
+    echo "Usage: $0 {1|2|...|8} 0 {ckpt_path} {model_path} {num_samples} or {1|2|..|8} 1 {train_path} {valid_path} {output_path} {num_samples}"
     exit 1
     ;;
 esac
 
-ckpt_path="./ckpts/${3}/bpe_iter=${4}.pkl" # new
-
-if [ -n "$5" ]; then
-  extra="--inference --model_path $5 --num_samples $6"
-  # load docker image for lddt
-  podman load -i ost.tar
+if [ $task != "pretrain" ]; then
+  labels_path="./data/struct_token_bench/processed_csvs/${task}.csv"
 else
-  extra=""
+  labels_path=""
 fi
-labels_path="./data/struct_token_bench/processed_csvs/${task}.csv"
+
+if (( $3 == 1 )); then # input mode 1  
+  ckpt_info="--train_path $4 --valid_path $5 --output_path $6 --num_samples $7" 
+else # input mode 2  
+  ckpt_info="--checkpoint_path ./ckpts/${4}/bpe_iter=${5}.pkl"
+  if [ -n "$6" ]; then # specify model for sampling
+    extra="--inference --model_path $6 --num_samples $7"
+    # load docker image for lddt
+    podman load -i ost.tar
+  else
+    extra=""
+  fi
+fi
+
 PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
   /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/esm_env/bin/python -m bin.train \
-  --checkpoint_path $ckpt_path \
-  --labels_path $labels_path \
+  $ckpt_info \
+  --labels_path "$labels_path" \
   --batch_size 8 \
-  --eval_interval 100 \
   --task $task \
   $extra $debug

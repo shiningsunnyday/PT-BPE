@@ -203,7 +203,7 @@ def main():
         validate_args_match(
             current   = args,
             loaded    = loaded_args,
-            skip      = ["auto", "save_dir", "vis"],   # fields you don’t need to compare
+            skip      = ["auto", "save_dir", "vis", "max_iter"],   # fields you don’t need to compare
         )        
     else:
         with open(args_path, "w") as f:
@@ -319,6 +319,39 @@ def main():
         for ind in range(num_vis):
             visual_path = os.path.join(args.save_dir, f"backbone_{ind}_iter=init.png")
             bpe.tokenizers[ind].visualize(visual_path, vis_dihedral=False, xlim=xlims[ind], ylim=ylims[ind], zlim=zlims[ind])
+        ## initial stats
+        stats_path = os.path.join(args.save_dir, f'initial_stats=-1.json')
+        K = len(bpe._tokens)
+        L = np.mean([len(t.bond_to_token) for t in bpe.tokenizers])
+        orig_chains = [ProteinChain.from_pdb(bpe.tokenizers[i].fname) for i in tqdm(range(len(ref_coords)), desc="gathering orig ref chains")]
+        input_ids = [bpe.quantize(t.tokenize()) for t in tqdm(bpe.tokenizers, desc="quantizing token ids")]
+        utility = get_codebook_utility(torch.as_tensor(sum(input_ids, [])), bpe.vocab_size)
+        cur_coords = []
+        for i in tqdm(range(len(ref_coords)), desc="computing coords for ref comparison"):
+            coord = bpe.tokenizers[i].compute_coords()
+            assert ref_coords[i].shape == coord.shape
+            cur_coords.append(coord)
+        errors = []
+        for i in tqdm(range(len(ref_coords)), desc="computing ref rmsd, lddt"):
+            # error = compute_rmsd(cur_coords[i], ref_coords[i]) 
+            orig_chain = orig_chains[i]
+            chain_recon = ProteinChain.from_backbone_atom_coordinates(cur_coords[i].reshape(-1, 3, 3))
+            bb_rmsd = chain_recon.rmsd(orig_chain, only_compute_backbone_rmsd=True)
+            lddt = np.array(chain_recon.lddt_ca(orig_chain))
+            # errors.append((error, bb_rmsd, lddt.mean()))
+            errors.append((bb_rmsd, lddt.mean()))
+        err = np.mean(errors, axis=0)
+        json.dump(
+            {
+                "K": K,
+                "L": L,
+                "bpr": bpe.capacity(tokenizer=True)/(N*L),
+                "bb_rmsd": err[0],
+                "lddt": err[1]
+            } | utility,
+            open(stats_path, "w+")
+        )        
+        ## end        
         bpe.bin()    
         if args.debug: 
             bpe_debug = BPE(dataset.structures, bins=args.bins, save_dir=args.save_dir)

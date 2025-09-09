@@ -40,6 +40,7 @@ CATINT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/activesite"
 CATBIO_DIR = LOCAL_DATA_DIR / "struct_token_bench/biolip2/catalytic"
 CONSERVED_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/conservedsite"
 PRETRAIN_DIR = LOCAL_DATA_DIR / "vqvae_pretrain/train"
+PRETRAIN_VALID_DIR = LOCAL_DATA_DIR / "vqvae_pretrain/validation"
 CAMEO_DIR = LOCAL_DATA_DIR / "vqvae_pretrain/CAMEO"
 CASP_DIR = LOCAL_DATA_DIR / "vqvae_pretrain/CASP14"
 
@@ -385,6 +386,8 @@ class CathCanonicalAnglesDataset(Dataset):
                 fnames = glob.glob(os.path.join(CONSERVED_DIR, "*.pdb"))
             elif pdbs == "pretrain":
                 fnames = glob.glob(os.path.join(PRETRAIN_DIR, "*.pdb"))
+            elif pdbs == "prevalid":
+                fnames = glob.glob(os.path.join(PRETRAIN_VALID_DIR, "*.pdb"))
             elif pdbs == "atlas":
                 fnames = glob.glob(os.path.join(ATLAS_DIR, "*.pdb"))
             elif pdbs == "foldswitching":

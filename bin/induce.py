@@ -13,6 +13,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
 from foldingdiff.tokenizer import Tokenizer
+from esm.utils.structure.protein_chain import ProteinChain
 from foldingdiff.plotting import get_codebook_utility
 from concurrent.futures import ProcessPoolExecutor
 from foldingdiff.utils import load_args_from_txt, validate_args_match
@@ -42,6 +43,8 @@ def parse_args():
     parser.add_argument("--toy", default=0, type=int)
     parser.add_argument("--pad", default=512, type=int)
     parser.add_argument("--debug", action='store_true')
+    # induce args
+    parser.add_argument("--append", action='store_true', help="Whether to append to src-pkl")
     args = parser.parse_args()
     return args
 
@@ -56,13 +59,16 @@ def tokenize_structure(args):
     """Build and tokenize a single structure inside the worker."""
     idx, struc = args
     try:
-        pickle.load(open(SAVE_DIR / f"{idx}.pkl", "rb"))
+        stats, tok = pickle.load(open(SAVE_DIR / f"{idx}.pkl", "rb"))
+        assert tok.fname == struc['fname']
+        assert tok.n == len(ProteinChain.from_pdb(tok.fname))
         return
-    except:
+    except Exception as e:
+        print(e, "redo")
         pass
         # print('start tokenize_structure')    
     tok = Tokenizer(struc)
-    stats = BPE.tokenize(tok)
+    tok, stats = BPE.tokenize(tok)
     pickle.dump((stats, tok), open(SAVE_DIR / f"{idx}.pkl", "wb+"))    
 
 
@@ -135,9 +141,6 @@ def plot_stats(all_stats, output_path, total_ticks=20):
     plt.savefig(output_path)
 
 
-
-
-
 def main():
     args = parse_args()
     logging.info(args)
@@ -185,9 +188,11 @@ def main():
         if (struc['angles']['psi']==struc['angles']['psi']).sum() < len(struc['angles']['psi'])-1:
             print(f"skipping {i}, {struc['fname']} because of missing dihedrals")
         else:
-            pargs.append((idx, struc))
-            idx += 1
-
+            # detect if backbone parser matches ProteinChain.from_pdb            
+            if len(struc['angles']) == len(ProteinChain.from_pdb(struc['fname'])):
+                pargs.append((idx, struc))
+                idx += 1
+    print(f"{idx}/{len(dataset)} match ProteinChain.from_pdb")    
     N = len(pargs)
     tokenizers = []
     all_stats = []
@@ -205,7 +210,7 @@ def main():
     else:
         global BPE, SAVE_DIR
         BPE, SAVE_DIR = bpe, save_dir
-        for parg in tqdm(pargs, desc="tokenizing"):
+        for parg in tqdm(pargs, desc="tokenizing"):            
             tokenize_structure(parg)
 
     for i in tqdm(range(N), desc="loading done tokenizers"):
@@ -218,7 +223,13 @@ def main():
     utility = get_codebook_utility(torch.as_tensor(sum(input_ids, [])), bpe.vocab_size)
     json.dump(utility, open(save_dir / "utility.json", "w+"))
     plot_stats(all_stats, save_dir / "stats.png")
-    bpe.tokenizers = tokenizers
+    if args.append:
+        if not isinstance(bpe.n, list):
+            bpe.n = [bpe.n]
+        bpe.n.append(len(tokenizers))
+        bpe.tokenizers.append(tokenizers)
+    else:
+        bpe.tokenizers = tokenizers
     pickle.dump(bpe, open(out_path, "wb+"))
     print(os.path.abspath(out_path))
 

@@ -19,7 +19,6 @@ from typing import List
 import numpy as np
 
 from esm.utils.structure.protein_chain import ProteinChain
-from biotite.structure.io.pdbx import CIFFile, convert
 import biotite.structure as bs
 from Bio.Data import PDBData
 from esm.utils import residue_constants as RC
@@ -949,12 +948,21 @@ class MyDataset(Dataset):
         my_data = []
         for sample in dataset:
             if self.debug and len(my_data) == 10:
-                break
-            prot, chain = sample['pdb_id'], sample['chain_id']
-            key = f"{prot}_{chain}"
-            breakpoint()
-            if key in mapping:
+                break            
+            if 'pdb_id' in sample:
+                assert 'chain_id' in sample
+                prot, chain = sample['pdb_id'], sample['chain_id']                
+            else:
+                # load up pdb_chain
+                pdb_path = sample['pdb_path']
+                pdb_chain = ProteinChain.from_pdb(pdb_path)
+                prot, chain = Path(pdb_path).stem.split('_')
+            key = f"{prot}_{chain}"            
+            if key in mapping:        
                 i = mapping[key]
+                tok_res_ids = set(pdb_chain.residue_index)
+                if tokenizers[i].n != len(tok_res_ids):
+                    breakpoint()
                 sample['fold_label'] = sample['fold_label']
                 my_data.append((prot, chain, tokenizers[i], sample))
         self.data = my_data
@@ -980,6 +988,7 @@ class MyDataset(Dataset):
         self.esm_outputs = results
         for i in range(len(results)):
             if len(results[i]) != self.data[i][2].n:
+                # this should never happen
                 breakpoint()
     def __len__(self):
         return len(self.data)
@@ -1005,9 +1014,12 @@ class ResidueDataset(MyDataset):
             stem = Path(t.fname).stem
             mapping[stem] = i
         my_data = []
-        poss_keys = [k for k in dataset[0].keys() if 'label' in k or 'score' in k]
+        poss_keys = [k for k in dataset[0].keys() if (
+            'label' in k \
+            or 'site' in k \
+            or 'score' in k)]
         assert len(poss_keys) == 1
-        label_key = poss_keys[0]
+        label_key = poss_keys[0]        
         for sample in dataset:
             if self.debug and len(my_data) == 10:
                 break
@@ -1018,12 +1030,22 @@ class ResidueDataset(MyDataset):
                 # load up pdb_chain
                 pdb_path = sample['pdb_path']
                 pdb_chain = ProteinChain.from_pdb(pdb_path)
-                prot, chain = pdb_chain.id, pdb_chain.chain_id
+                prot, chain = Path(pdb_path).stem.split('_')
             key = f"{prot}_{chain}" if len(chain) else prot
             if key in mapping:
                 i = mapping[key]
+                tok_res_ids = set(pdb_chain.residue_index)
+                avail_res_ids = set(sample['residue_index'])
+                if tok_res_ids.issubset(avail_res_ids):
+                    rem = avail_res_ids-tok_res_ids
+                    mask = np.array([j in rem for j in sample['residue_index']])
+                    sample[label_key] = np.array(sample[label_key])[~mask].tolist()
+                    assert all(pdb_chain.residue_index==(np.array(sample['residue_index'])[~mask]).tolist())
+                else:
+                    breakpoint()
                 if tokenizers[i].n != len(sample[label_key]):
-                    # data dir mismatch                    
+                    # check residue_index
+                    breakpoint()
                     continue
                 sample['residue_label'] = sample[label_key]                
                 my_data.append((prot, chain, tokenizers[i], sample))

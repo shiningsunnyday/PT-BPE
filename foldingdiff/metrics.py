@@ -2,19 +2,27 @@ from pathlib import Path
 import multiprocessing as mp
 import pandas as pd
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import List, Dict, Tuple
 import logging
 import warnings
+from foldingdiff.datasets import extract_backbone_coords
 from foldingdiff.algo import *
 from typing import *
 from tqdm import tqdm
 from itertools import combinations
 import tempfile
 import shutil
+import glob
+import json
+import argparse
+import functools
 import subprocess
 from foldingdiff.angles_and_coords import create_new_chain_nerf
 from foldingdiff.tmalign import run_tmalign, max_tm_across_refs
 from foldingdiff.lddt import lddt
 from foldingdiff.angles_and_coords import canonical_distances_and_dihedrals, EXHAUSTIVE_ANGLES, EXHAUSTIVE_DISTS
+from foldingdiff.utils import str2bool
 from itertools import groupby, product
 from collections import defaultdict
 import biotite.structure as struc
@@ -274,9 +282,38 @@ def run_esmfold_batch(
 
     return ids, outputs   
 
-# ---------------------------------------------------------------------
-# scTM computation
-# ---------------------------------------------------------------------
+
+def _visible_device_tokens() -> List[str]:
+    """
+    Return the list of CUDA device tokens visible to this job.
+    Handles both numeric indices (e.g., "0,1,2") and MIG UUIDs
+    (e.g., "MIG-...,...").
+    """
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if cvd:
+        # preserve MIG UUIDs verbatim; trim whitespace
+        return [tok.strip() for tok in cvd.split(",") if tok.strip()]
+
+    # Fallback: sniff via nvidia-smi -L (handles MIG & non-MIG)
+    try:
+        out = subprocess.check_output(["nvidia-smi", "-L"], text=True)
+    except Exception:
+        return ["0"]  # last resort: assume a single device
+
+    mig = re.findall(r"(MIG-[A-Za-z0-9\-]+)", out)
+    if mig:
+        return mig  # each MIG UUID is a device token
+    # else: count physical GPUs and return "0","1",...
+    gpus = re.findall(r"GPU \d+:", out)
+    return [str(i) for i in range(len(gpus))] or ["0"]
+
+def _shard_round_robin(items: List[str], n: int) -> List[List[str]]:
+    shards = [[] for _ in range(n)]
+    for i, it in enumerate(items):
+        shards[i % n].append(it)
+    return shards
+
+
 def sctm_designability(
     backbone_pdbs: List[str],
     gpu_id: int = 0,
@@ -304,10 +341,65 @@ def sctm_designability(
         # 3) Score
         best_tm = 0.0
         for pred_pdb in pred_pdbs:
-            best_tm = max(best_tm, tm_score(pred_pdb, bb))
-            print(best_tm)
+            score = tm_score(pred_pdb, bb)
+            if score == score:
+                best_tm = max(best_tm, score)
+                print(best_tm)
 
         results[Path(bb).stem] = best_tm
+    return results
+
+# --- worker ---
+
+def _worker_shard(args: Tuple[List[str], str, float, int]) -> Dict[str, float]:
+    """
+    args: (pdb_paths_for_this_worker, device_token, tm_cutoff, n_designs)
+    device_token may be '0' or a MIG UUID like 'MIG-xxxx'.
+    """
+    shard, device_token, tm_cutoff, n_designs = args
+
+    # Pin this process to exactly one device (MIG UUID or index)
+    os.environ["CUDA_VISIBLE_DEVICES"] = device_token
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("NCCL_DEBUG", "ERROR")
+
+    # Inside this process, 'cuda:0' == the token we just exposed.
+    return sctm_designability(
+        shard,
+        gpu_id=0,
+        tm_cutoff=tm_cutoff,
+        n_designs=n_designs,
+    )
+
+# --- public API ---
+
+def parallel_sctm_designability(
+    backbone_pdbs: List[str],
+    n_devices: int | None = None,
+    tm_cutoff: float = 0.5,
+    n_designs: int = 8,
+) -> Dict[str, float]:
+    """
+    Shard PDBs across all visible CUDA devices (MIG-aware) and run SCTM in parallel.
+    """
+    tokens = _visible_device_tokens()
+    if n_devices is not None:
+        tokens = tokens[:n_devices]
+    if not tokens:
+        raise RuntimeError("No CUDA devices visible to this job")
+
+    shards = _shard_round_robin(backbone_pdbs, len(tokens))
+    tasks = [(shard, tok, tm_cutoff, n_designs)
+             for shard, tok in zip(shards, tokens) if shard]
+
+    results: Dict[str, float] = {}
+    # Use 'spawn' to avoid accidental CUDA context inheritance
+    with ProcessPoolExecutor(max_workers=len(tasks),
+                             mp_context=mp.get_context("spawn")) as ex:
+        futures = [ex.submit(_worker_shard, t) for t in tasks]
+        for fut in as_completed(futures):
+            print(fut.result())
+            results.update(fut.result())
     return results
 
 
@@ -319,30 +411,70 @@ def summarize_sctm(sc_tm_dict: Dict[str, float], cutoff: float = 0.5) -> Dict[st
         "designability_fraction" : float((scores >= cutoff).mean()),
     }
 
-
-def compute_metrics(generated_pdb_paths, train_pdb_paths, generated_coords, train_coords):
-    tm_vals = [
-        best_tm_vs_train(gen_pdb, train_pdb_paths)
-        for gen_pdb in generated_pdb_paths
-    ]
-    mean_best_tm = float(np.mean(tm_vals))    
-    logging.info(f"mean_best_tm: {mean_best_tm}")
-    # --- Novelty (min‑RMSD to train) ---
-    pairs = list(product(generated_pdb_paths, train_pdb_paths))
-    with mp.Pool(mp.cpu_count()) as pool:
-        scores = pool.starmap(tm_score, tqdm(pairs, desc="novelty"), chunksize=1)    
-    scores_by_g = defaultdict(list)
-    for (g, t), s in zip(pairs, scores):
-        scores_by_g[g].append(s)
-    novelty_vals = [min(scores_by_g[g]) for g in generated_pdb_paths]
-    mean_novelty_tm = float(np.mean(novelty_vals))
-    logging.info(f"mean_novelty_tm: {mean_novelty_tm}")
+def compute_metrics(generated_pdb_paths, generated_coords, train_pdb_paths=None, train_coords=None):
+    assert (train_pdb_paths is not None) == (train_coords is not None)
+    train_avail = (train_pdb_paths is not None)
+    metrics = {}
+    if train_avail:
+        tm_vals = [
+            best_tm_vs_train(gen_pdb, train_pdb_paths)
+            for gen_pdb in generated_pdb_paths
+        ]
+        mean_best_tm = float(np.mean(tm_vals))    
+        logging.info(f"mean_best_tm: {mean_best_tm}")
+        metrics["best_tm_mean"] = mean_best_tm    
+        # --- Novelty (min‑RMSD to train) ---
+        pairs = list(product(generated_pdb_paths, train_pdb_paths))
+        with mp.Pool(mp.cpu_count()) as pool:
+            scores = pool.starmap(tm_score, tqdm(pairs, desc="novelty"), chunksize=1)    
+        scores_by_g = defaultdict(list)
+        for (g, t), s in zip(pairs, scores):
+            scores_by_g[g].append(s)
+        novelty_vals = [min(scores_by_g[g]) for g in generated_pdb_paths]
+        mean_novelty_tm = float(np.mean(novelty_vals))
+        logging.info(f"mean_novelty_tm: {mean_novelty_tm}")
+        metrics["mean_novelty_tm"] = mean_novelty_tm    
+        # --- LDDT ---
+        # pairs = list(product(generated_pdb_paths, train_pdb_paths))
+        # with mp.Pool(mp.cpu_count()) as pool:
+        #     lddt_scores = pool.starmap(lddt, tqdm(pairs, desc="lddt"), chunksize=1)
+        # lddt_by_gen = defaultdict(list)
+        # for (gen, train), sc in zip(pairs, lddt_scores):
+        #     lddt_by_gen[gen].append(sc)
+        # lddt_vals = [max(lddt_by_gen[g]) for g in generated_pdb_paths]
+        # mean_best_lddt = float(np.mean(lddt_vals))         
+        # --- Histograms for generated vs. train  (2D 36×36 bins → 10° resolution) ---
+        bins = [np.linspace(-180, 180, 37), np.linspace(-180, 180, 37)]
+        gen_hist  = hist2d([res for res in (phi_psi_angles(p) for p in generated_pdb_paths) if res is not None], bins=bins)
+        train_hist = hist2d([res for res in (phi_psi_angles(p) for p in train_pdb_paths) if res is not None], bins=bins)
+        # symmetric KL divergence (bits)
+        kl = 0.5 * (
+            np.sum(gen_hist * np.log(gen_hist/train_hist)) +
+            np.sum(train_hist * np.log(train_hist/gen_hist))
+        )
+        ramach_kl = float(kl)  
+        logging.info(f"ramach_kl: {ramach_kl}")
+        metrics["ramach_kl_bits"] = ramach_kl
+        # gdt_metrics = compute_gdt_ts_novelty(
+        #     generated_pdbs   = generated_pdb_paths,   # list[str]
+        #     train_pdbs       = train_pdb_paths,       # list[str]
+        #     fast             = True                  # use TMalign -fast
+        # )  
+        ss_metrics = ss_kl_divergence(
+            generated_pdbs = generated_pdb_paths,   # list[str]
+            train_pdbs     = train_pdb_paths,       # list[str]
+            max_bins       = 2,                     # same binning as make_ss_cooccurrence_plot
+            backend        = "psea",
+        )    
+        logging.info(f"ss_metrics: {ss_metrics}")
+        metrics.update(ss_metrics)        
     # --- Diversity (mean pairwise RMSD) ---
     pairs = list(combinations(generated_pdb_paths, 2))
     with mp.Pool(mp.cpu_count()) as pool:
         div_vals = pool.starmap(tm_score, tqdm(pairs, desc="diversity"), chunksize=1)
     mean_diversity_tm = float(np.mean(div_vals))
     logging.info(f"mean_diversity_tm: {mean_diversity_tm}")
+    metrics["diversity_tm"] = mean_diversity_tm
     # --- Uniqueness (fraction with nearest‑neighbor RMSD > τ) ---
     unique = []
     for g in generated_pdb_paths:
@@ -352,42 +484,12 @@ def compute_metrics(generated_pdb_paths, train_pdb_paths, generated_coords, trai
             unique.append(g)
     fraction_unique_tm = len(unique) / len(generated_pdb_paths)
     logging.info(f"fraction_unique_tm: {fraction_unique_tm}")
-    # --- LDDT ---
-    # pairs = list(product(generated_pdb_paths, train_pdb_paths))
-    # with mp.Pool(mp.cpu_count()) as pool:
-    #     lddt_scores = pool.starmap(lddt, tqdm(pairs, desc="lddt"), chunksize=1)
-    # lddt_by_gen = defaultdict(list)
-    # for (gen, train), sc in zip(pairs, lddt_scores):
-    #     lddt_by_gen[gen].append(sc)
-    # lddt_vals = [max(lddt_by_gen[g]) for g in generated_pdb_paths]
-    # mean_best_lddt = float(np.mean(lddt_vals)) 
+    metrics["uniqueness_frac_tm"] = fraction_unique_tm
     # logging.info(f"mean_best_lddt: {mean_best_lddt}")
     # # generated_seqs : list[str]  (amino‑acid sequences for the sampled backbones)
     # plddt_vecs = run_esmfold_batch(generated_seqs)
     # mean_plddt = float(np.mean([v.mean().item() for v in plddt_vecs]))
-    # histograms for generated vs. train  (2D 36×36 bins → 10° resolution)
-    bins = [np.linspace(-180, 180, 37), np.linspace(-180, 180, 37)]
-    gen_hist  = hist2d([res for res in (phi_psi_angles(p) for p in generated_pdb_paths) if res is not None], bins=bins)
-    train_hist= hist2d([res for res in (phi_psi_angles(p) for p in train_pdb_paths) if res is not None], bins=bins)
-    # symmetric KL divergence (bits)
-    kl = 0.5 * (
-        np.sum(gen_hist * np.log(gen_hist/train_hist)) +
-        np.sum(train_hist * np.log(train_hist/gen_hist))
-    )
-    ramach_kl = float(kl)  
-    logging.info(f"ramach_kl: {ramach_kl}")
-    # gdt_metrics = compute_gdt_ts_novelty(
-    #     generated_pdbs   = generated_pdb_paths,   # list[str]
-    #     train_pdbs       = train_pdb_paths,       # list[str]
-    #     fast             = True                  # use TMalign -fast
-    # )  
-    ss_metrics = ss_kl_divergence(
-        generated_pdbs = generated_pdb_paths,   # list[str]
-        train_pdbs     = train_pdb_paths,       # list[str]
-        max_bins       = 8,                     # same binning as make_ss_cooccurrence_plot
-        backend        = "psea",
-    )    
-    logging.info(f"ss_metrics: {ss_metrics}")
+      
     # best_identity = designability_sequence_recovery(
     #     pdb_paths       = generated_pdb_paths,     # list of generated backbones
     #     sampler         = generate_residues,       # or generate_residues_proteinmpnn
@@ -396,37 +498,65 @@ def compute_metrics(generated_pdb_paths, train_pdb_paths, generated_coords, trai
     # )
     # mean_best_identity = float(np.mean(list(best_identity.values())))
     # print("Designability (sequence recovery):", mean_best_identity, "%")    
-    sc_tm_per_backbone = sctm_designability(
-        backbone_pdbs = generated_pdb_paths,  # list of PDBs you generated
-        gpu_id        = 0,                    # choose GPU
-        tm_cutoff     = 0.5,
-        n_designs     = 8,
-    )
-    sctm_metrics = summarize_sctm(sc_tm_per_backbone)
-    logging.info(f"sctm_metrics: {sctm_metrics}")
-    metrics = {
-        "novelty_tm"     : mean_novelty_tm,
-        "diversity_tm"   : mean_diversity_tm,
-        "uniqueness_frac_tm"  : fraction_unique_tm,
-        "best_tm_mean"     : mean_best_tm,
+    # metrics.update({
         # "best_lddt_mean"   : mean_best_lddt,
-        # "mean_plddt"       : mean_plddt,
-        "ramach_kl_bits"   : ramach_kl,
+        # "mean_plddt"       : mean_plddt,        
         # "gdt_ts_mean_best": gdt_metrics["gdt_ts_mean_best"]
-    }
-    metrics.update(ss_metrics)
-    metrics.update(sctm_metrics)
+    # })        
     # metrics["seq_recovery_best_mean"] = mean_best_identity
     return metrics
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Backbone Metrics")
+    parser.add_argument("--gen-pdb-dir")
+    parser.add_argument("--out-file", required=True)
+    parser.add_argument("--sctm", default=True, type=str2bool)
+    # target sctm directly
+    parser.add_argument("--pdb-list", help="Text file with one PDB path per line")
+    parser.add_argument("--n-gpus", type=int, default=None)
+    args = parser.parse_args()
+    if not (args.gen_pdb_dir) and not (args.pdb_list and args.n_gpus):
+        parser.error("must provide gen-pdb-dir or pdb-list and n-gpus")    
+    return args
+
+
+def main(args):
+    if args.gen_pdb_dir:
+        gen_pdb_files = glob.glob(f"{args.gen_pdb_dir}/*.pdb")
+        full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
+        pool = pool = mp.Pool(processes=mp.cpu_count())
+        generated_coords = pool.map(full_coords_pfunc, tqdm(gen_pdb_files, desc="extract coords gen"))
+        if args.sctm:
+            sc_tm_per_backbone = sctm_designability(
+                backbone_pdbs = gen_pdb_files,  # list of PDBs you generated
+                gpu_id        = 0,                    # choose GPU
+                tm_cutoff     = 0.5,
+                n_designs     = 8,
+            )
+            sctm_metrics = summarize_sctm(sc_tm_per_backbone)
+            logging.info(f"sctm_metrics: {sctm_metrics}")
+            metrics = sctm_metrics
+        else:        
+            metrics = compute_metrics(gen_pdb_files, generated_coords)
+        json.dump(metrics, open(args.out_file, "w+"))
+    else:
+        pdbs = [ln.strip() for ln in open(args.pdb_list) if ln.strip()]
+        metrics = parallel_sctm_designability(
+            pdbs, n_devices=args.n_gpus, tm_cutoff=0.5, n_designs=8
+        )
+    json.dump(metrics, open(args.out_file, "w+"))
+
+
 if __name__ == "__main__":
-    refset = [np.random.randn(5, 3), np.random.randn(10, 3)]
-    genset = [np.random.randn(5, 3), np.random.randn(10, 3)]    
-    genfile_dir = os.path.abspath("ckpts/1752523675.4143364/sampled_pdb")
-    trainfile_dir = os.path.abspath("data/struct_token_bench/interpro/conserved/")
-    genfiles = [f"{genfile_dir}/generated_0.pdb", f"{genfile_dir}/generated_1.pdb"]
-    trainfiles = [f"{trainfile_dir}/12ca_A.pdb", f"{trainfile_dir}/1a03_A.pdb"]
-    breakpoint()
-    metrics = compute_metrics(genfiles, trainfiles, refset, genset)
-    print(metrics)
+    args = parse_args()  
+    main(args)
+    # refset = [np.random.randn(5, 3), np.random.randn(10, 3)]
+    # genset = [np.random.randn(5, 3), np.random.randn(10, 3)]    
+    # genfile_dir = os.path.abspath("ckpts/1752523675.4143364/sampled_pdb")
+    # trainfile_dir = os.path.abspath("data/struct_token_bench/interpro/conserved/")
+    # genfiles = [f"{genfile_dir}/generated_0.pdb", f"{genfile_dir}/generated_1.pdb"]
+    # trainfiles = [f"{trainfile_dir}/12ca_A.pdb", f"{trainfile_dir}/1a03_A.pdb"]
+    # breakpoint()
+    # metrics = compute_metrics(genfiles, trainfiles, refset, genset)
+    # print(metrics)

@@ -7,6 +7,7 @@ from torch.utils.data import Subset
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, f1_score
 import pandas as pd
+import json
 from pathlib import Path
 import wandb
 from collections import Counter
@@ -38,10 +39,23 @@ def parse_args():
                                             "conserved-site-prediction",
                                             "repeat-motif-prediction",
                                             "epitope-region-prediction", # per-residue classification
+                                            "pretrain", # language model pretrain
     ], default="remote-homology-detection")    
     parser.add_argument(
-        "--checkpoint_path", type=str, required=True,
-        help="Path to pickle file containing tokenized sequences"
+        "--checkpoint_path", type=str,
+        help="Path to pickle file containing tokenized sequences. When train_path and valid_path specified, ignore this option."
+    )
+    parser.add_argument(
+        "--train_path", type=str,
+        help="Path to train data containing tokenized sequences"
+    )
+    parser.add_argument(
+        "--valid_path", type=str,
+        help="Path to valid data containing tokenized sequences"
+    )
+    parser.add_argument(
+        "--output_path", type=str, 
+        help="Output path of sampled sequences"
     )
     parser.add_argument(
         "--labels_path", type=str,
@@ -76,13 +90,14 @@ def parse_args():
     parser.add_argument("--d_ff",         type=int,   default=1024)
     parser.add_argument("--batch_size",   type=int,   default=32)
     parser.add_argument("--lr",           type=float, default=1e-4)
-    parser.add_argument("--epochs",       type=int,   default=10)
-    parser.add_argument("--eval_interval",type=int,   default=500)
+    parser.add_argument("--epochs",       type=int,   default=100)
     parser.add_argument("--probe_layer",  type=int,   default=4)
     parser.add_argument("--probe_epochs", type=int,   default=5)
     parser.add_argument("--probe_lr",     type=float, default=1e-3)
-
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not (args.checkpoint_path or (args.train_path and args.valid_path and args.output_path)):
+        parser.error("provide (train_path & valid_path & output_path) or checkpoint_path")
+    return args
 
 # -----------------------------
 # 1) DATASET
@@ -181,6 +196,31 @@ class ProteinDataset(Dataset):
                 probe_mask = [(val is not None) for val in pad_probe]
                 item["probe_labels"] = torch.tensor(probe_labels, dtype=torch.long)
                 item["probe_mask"] = torch.tensor(probe_mask, dtype=torch.bool)
+        return item
+
+
+class SeqDataset(Dataset):
+    def __init__(self, seqs, max_len):
+        self.seqs = seqs        
+        self.max_len = max_len
+
+
+    def __len__(self):
+        return len(self.seqs)
+
+
+    def __getitem__(self, idx):
+        seq = self.seqs[idx][: self.max_len]
+        pad_len = self.max_len - len(seq)
+        input_ids = seq + [0] * pad_len
+        attention_mask = [1] * len(seq) + [0] * pad_len
+        labels = input_ids[1:] + [0]
+        item = {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+            "idx": idx
+        }
         return item
 
 
@@ -485,6 +525,63 @@ def evaluate_probe(model,
 
     return metrics
 
+
+def sample_unconditional_seqs(
+    model,
+    device,
+    max_len: int,
+    length_prior: list[int],
+    start_prior: list[int],
+    num_samples: int = 1,
+    temperature: float = 1.0    
+):
+    """
+    Unconditional sampling of `num_samples` sequences of total length K
+    (where K is drawn from length_prior and satisfies K%4==1), *without* any
+    extra BOS token.  The first token is sampled from start_prior.
+    """
+    import logging
+
+    logging.info(f"Starting sample_unconditional with num_samples={num_samples}, device={device}")
+
+    # 1) filter legal lengths
+    legal_lengths = [K for K in length_prior if (K % 4 == 1 and K <= max_len)]
+    logging.info(f"Legal lengths: {legal_lengths}")
+    assert legal_lengths, "No K in length_prior satisfies K%4==1"
+
+    vocab_size = model.token_emb.num_embeddings
+    logging.info(f"Model embedding vocab_size: {vocab_size}")
+    model.eval()
+    samples = []    
+    attempts = 0
+    with torch.no_grad():
+        for sample_idx in range(num_samples):
+            K = random.choice(legal_lengths)
+            logging.info(
+                f"[Sample {sample_idx}] Picked length K={K}"
+            )
+            # b) sample the very first token from your empirical start_prior
+            first_tok = random.choice(start_prior)
+            seq = torch.tensor([[first_tok]], dtype=torch.long, device=device)
+            # c) generate the remaining K-1 tokens, catching NaN and index errors
+            for j in range(1, K):
+                attn_mask = torch.ones_like(seq)
+                logits, _ = model(seq, attn_mask)
+                logits = logits[0, -1]  # last‐position logits
+                probs = torch.nn.functional.softmax(logits / temperature, dim=-1)
+                # Check for NaNs or all-0s
+                if not torch.isfinite(probs).all() or probs.sum() == 0:
+                    breakpoint()
+                nxt = torch.multinomial(probs, 1)  # shape (1,)
+                seq = torch.cat([seq, nxt.unsqueeze(0)], dim=1)
+            # If we got here, sample completed successfully
+            samples.append(seq.squeeze(0).tolist())
+            logging.info(
+                f"[Sample {sample_idx}] Finished, sequence length: {len(samples[-1])} (SUCCESS)"
+            )
+    return samples
+
+
 def sample_unconditional(
     model,
     device,
@@ -631,7 +728,6 @@ def main(args):
         args.max_len    = 32
         args.batch_size = 4
         args.epochs     = 1
-        args.eval_interval = 1
 
     # 1) W&B init (disable if debug)
     wandb.init(
@@ -642,30 +738,47 @@ def main(args):
     )
 
     # 2) Load & split
-    save_dir = Path(args.checkpoint_path).parent
-    bpe = pickle.load(open(args.checkpoint_path, 'rb'))
-    full_ds = ProteinDataset(
-        bpe,
-        args.labels_path,
-        task=args.task
-    )
-    # derived metrics: vocab_size / max_len
-    vocab_size = full_ds.vocab_size
-    max_len = full_ds.max_len
-    num_labels = len(full_ds.label_set)
+    if args.checkpoint_path:        
+        save_dir = Path(args.checkpoint_path).parent
+        bpe = pickle.load(open(args.checkpoint_path, 'rb'))                    
+        full_ds = ProteinDataset(
+            bpe,
+            args.labels_path,
+            task=args.task
+        )
+        # derived metrics: vocab_size / max_len
+        vocab_size = full_ds.vocab_size
+        max_len = full_ds.max_len
+        num_labels = len(full_ds.label_set)        
+        # next-token splits: train / val / test_ntp
+        if isinstance(bpe.n, list):
+            assert len(bpe.n) in [2, 3]
+            if len(bpe.n) == 2:
+                train_ds, val_ds = Subset(full_ds, range(bpe.n[0])), Subset(full_ds, range(bpe.n[0], bpe.n[0]+bpe.n[1]))
+                test_ntp_ds = val_ds
+            else:
+                train_ds, val_ds, test_ntp_ds = Subset(full_ds, range(bpe.n[0])), Subset(full_ds, range(bpe.n[0], sum(bpe.n[:2]))), Subset(full_ds, range(sum(bpe.n[:2]), sum(bpe.n[:3])))
+        else:
+            train_ds, val_ds, test_ntp_ds = split_dataset(full_ds, args.seed)        
+    else:
+        save_dir = Path(args.train_path).parent
+        train = json.load(open(args.train_path))
+        valid = json.load(open(args.valid_path))
+        vocab_size = max(sum(train+valid, []))+1
+        max_len = len(sorted(train+valid, key=len)[int(0.95*len(train+valid))])
+        train_ds = SeqDataset(train, max_len)
+        val_ds = SeqDataset(valid, max_len)
+        test_ntp_ds = val_ds
 
-    # 3) Debug mode: take only first 10
-    # next-token splits: train / val / test_ntp
-    train_ds, val_ds, test_ntp_ds = split_dataset(full_ds, args.seed)
     # probing splits: probe_train / probe_val / probe_test
     if args.labels_path:
         probe_train_ds, probe_val_ds, probe_test_ds = split_probe_dataset(full_ds)        
 
     if args.debug:
-        idx10 = list(range(10))
-        train_ds       = Subset(train_ds, idx10)
-        val_ds         = Subset(val_ds,   idx10)
-        test_ntp_ds    = Subset(test_ntp_ds, idx10)
+        # idx10 = list(range(10))
+        # train_ds       = Subset(train_ds, idx10)
+        # val_ds         = Subset(val_ds,   idx10)
+        # test_ntp_ds    = Subset(test_ntp_ds, idx10)
         if args.labels_path:
             probe_train_ds = Subset(probe_train_ds, idx10)
             probe_val_ds   = Subset(probe_val_ds,   idx10)
@@ -691,13 +804,14 @@ def main(args):
 
     # Inference mode?  Load weights and skip training
     if args.inference:
+        if Path(args.model_path).is_dir():
+            breakpoint()
         assert args.model_path, "--model_path required in inference mode"
         model.load_state_dict(torch.load(args.model_path, map_location=device))
         logging.info(f"loaded model from {args.model_path}")
         length_prior = [len(seq) for seq in full_ds.seqs]
         start_prior = [seq[0] for seq in full_ds.seqs]  
-        model.eval()
-        crit = nn.CrossEntropyLoss(ignore_index=0)       
+        model.eval()        
 
         # a) Sample unconditional
         tokenizers = sample_unconditional(
@@ -718,10 +832,16 @@ def main(args):
         outdir = Path(args.model_path).parent
         gen_pdb_files = write_preds_pdb_folder(sampled_dfs, outdir / "sampled_pdb")
         generated_coords = pool.map(full_coords_pfunc, tqdm(gen_pdb_files, desc="extract coords gen"))
-        metrics = compute_metrics(gen_pdb_files, train_pdb_files, generated_coords, train_coords)
+        metrics = compute_metrics(gen_pdb_files, generated_coords, train_pdb_files, train_coords)
+        out = parallel_sctm_designability(
+            gen_pdb_files, n_devices=len(os.environ["CUDA_VISIBLE_DEVICES"]), tm_cutoff=0.5, n_designs=8
+        )
+        sctm_metrics = summarize_sctm(out)
+        metrics.update(sctm_metrics)
         wandb.log(metrics)
 
         # b) Next-token on **test** split
+        crit = nn.CrossEntropyLoss(ignore_index=0)       
         ntp_loss = evaluate_next_token(model, test_ntp_loader, device, crit)
         ntp_ppl  = torch.exp(torch.tensor(ntp_loss))
         wandb.log({"test/ntp_loss": ntp_loss, "test/ntp_ppl": ntp_ppl})         
@@ -738,13 +858,13 @@ def main(args):
                 per_residue=(args.task != "remote-homology-detection")
             )
             wandb.log({f"test/probe_{key}": metrics[key] for key in metrics})
-        return
+        return        
 
     # 6) Training loop
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     crit = nn.CrossEntropyLoss(ignore_index=0)
     step = 0
-
+    best_loss, best_path = float("inf"), None
     for epoch in range(args.epochs):
         model.train()
         for batch in train_loader:
@@ -759,37 +879,57 @@ def main(args):
 
             step += 1
             wandb.log({"train/loss": loss.item(), "step": step})
+  
+        # a) next-token on **val**
+        val_loss = evaluate_next_token(model, val_loader, device, crit)
+        val_ppl  = torch.exp(torch.tensor(val_loss))
+        wandb.log({
+            "val/ntp_loss": val_loss,
+            "val/ntp_ppl":  val_ppl,
+            "step": step
+        })
 
-            if step % args.eval_interval == 0:
-                # a) next-token on **val**
-                val_loss = evaluate_next_token(model, val_loader, device, crit)
-                val_ppl  = torch.exp(torch.tensor(val_loss))
-                wandb.log({
-                    "val/ntp_loss": val_loss,
-                    "val/ntp_ppl":  val_ppl,
-                    "step": step
-                })
+        # b) zero-shot probe on **probe_val**
+        if args.labels_path:
+            metrics = evaluate_probe(
+                model,
+                probe_train_loader,
+                probe_val_loader,
+                device,
+                args,
+                num_labels = num_labels,
+                per_residue=(args.task != "remote-homology-detection")
+            )
+            wandb.log({f"val/probe_{key}": metrics[key] for key in metrics} | {"step": step})
+        model.train()
 
-                # b) zero-shot probe on **probe_val**
-                if args.labels_path:
-                    metrics = evaluate_probe(
-                        model,
-                        probe_train_loader,
-                        probe_val_loader,
-                        device,
-                        args,
-                        num_labels = num_labels,
-                        per_residue=(args.task != "remote-homology-detection")
-                    )
-                    wandb.log({f"val/probe_{key}": metrics[key] for key in metrics} | {"step": step})
-                model.train()
+        if val_loss < best_loss:
+            best_loss = val_loss            
+            # end‐of‐epoch checkpoint
+            ckpt = f"{save_dir}/ckpt_epoch{epoch}.pt"
+            best_path = ckpt
+            torch.save(model.state_dict(), ckpt)
+            wandb.save(ckpt)
 
-        # end‐of‐epoch checkpoint
-        ckpt = f"{save_dir}/ckpt_epoch{epoch}.pt"
-        torch.save(model.state_dict(), ckpt)
-        wandb.save(ckpt)
-
+    if not args.checkpoint_path:        
+        model.load_state_dict(torch.load(best_path, map_location=device))
+        logging.info(f"loaded model from {best_path}")
+        length_prior = [len(seq) for seq in train+valid]
+        start_prior = [seq[0] for seq in train+valid]  
+        model.eval()        
+        samples = sample_unconditional_seqs(
+            model=model,
+            device=device,
+            length_prior=length_prior,
+            start_prior=start_prior,
+            num_samples=args.num_samples,
+            temperature=args.temperature,
+            max_len=max_len
+        )
+        json.dump(samples, open(args.output_path, "w+"))
+        
     wandb.finish()
+    
 
 if __name__ == "__main__":
     args = parse_args()    

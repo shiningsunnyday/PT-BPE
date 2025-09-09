@@ -116,6 +116,7 @@ def parse_args():
                                             "epitope-prediction",
                                             "BindInt",
                                             "BindBio",
+                                            "BindShake",
                                             "CatInt",
                                             "CatBio",
                                             "conserved-site-prediction",
@@ -135,7 +136,7 @@ def parse_args():
     parser.add_argument("--auto", action='store_true', help='auto set folders')
     # training
     parser.add_argument("--cuda", default="cpu")
-    parser.add_argument("--epochs", default=100, type=int, help="number of epochs")
+    parser.add_argument("--epochs", default=500, type=int, help="number of epochs")
     # hparams
     parser.add_argument("--p_min_size", default=float("inf"), help="when to start using rmsd binning")
     parser.add_argument("--level", default="protein", help="prediction at protein or residue level", choices=["protein", "residue"])
@@ -340,7 +341,7 @@ def collate_item(batch):
 
 
 
-def train_probe(args, train_dataset, valid_dataset, num_classes):    
+def train_probe(args, train_dataset, valid_dataset, num_classes, prefix=''):    
     # Hyperparameters (adjust as needed)
     embed_dim = 960       # pretrained embedding dimension (for residues)
     hidden_dim = 128      # hidden dimension for probe
@@ -442,8 +443,14 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                 else:
                     logits = probe(leaves)               # (num_residues, num_classes)
                     if num_classes == 1:
-                        logits = logits.squeeze(1)  # (num_residues,)
-                        item_loss = criterion(logits, batch['residue_label'][i].float().to(device))
+                        if args.regression:
+                            ignore_index = torch.logical_or(batch['residue_label'][i].isnan(), (torch.abs(batch['residue_label'][i] - (-100)) < 1e-6))
+                            logits = logits.squeeze()[~ignore_index.squeeze()]
+                            labels = batch['residue_label'][i].squeeze()[~ignore_index.squeeze()]
+                            item_loss = criterion(logits, labels.to(device))
+                        else:                        
+                            logits = logits.squeeze(1)  # (num_residues,)
+                            item_loss = criterion(logits, batch['residue_label'][i].float().to(device))
                     else:
                         item_loss = criterion(logits, batch['residue_label'][i].to(device))
                     batch_loss.append(item_loss)
@@ -465,7 +472,7 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
 
             train_loss += loss.item() * B
             if not args.regression:
-                if num_classes == 1:        
+                if num_classes == 1:
                     preds = torch.sigmoid(batch_logits)
                     preds = (preds > 0.5).long()
                 else:
@@ -534,7 +541,8 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                             if args.regression:
                                 ignore_index = torch.logical_or(labels.isnan(), (torch.abs(labels - (-100)) < 1e-6))
                                 logits = logits.squeeze()[~ignore_index.squeeze()]
-                                item_loss = criterion(logits, labels.squeeze())                                
+                                labels = labels.squeeze()[~ignore_index.squeeze()]
+                                item_loss = criterion(logits, labels)
                             else:
                                 logits = logits.squeeze(1)  # (num_residues,)
                                 item_loss = criterion(logits, batch['residue_label'][i].float().to(device))
@@ -574,10 +582,10 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
         if num_classes == 1:
             if args.regression:
                 val_metrics = calculate_regression_metric(torch.as_tensor(valid_preds), torch.as_tensor(valid_labels))
-                val_pearson_r = val_metrics['pearsonr'].item()
+                val_spearman_rho = val_metrics['spearmanr'].item()
                 print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, "
                     f"Valid Loss: {avg_valid_loss:.4f}, "
-                    f"Valid Pearson R: {val_pearson_r:.4f}")                   
+                    f"Valid Spearman Rho: {val_spearman_rho:.4f}")                   
             else:
                 val_auroc = roc_auc_score(valid_labels, valid_scores)
                 print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, "
@@ -594,23 +602,23 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
         # Checkpoint saving
         # ----------------------
         if num_classes == 1:
-            if args.regression and val_pearson_r > best_val:
-                best_val = val_pearson_r
+            if args.regression and val_spearman_rho > best_val:
+                best_val = val_spearman_rho
                 os.makedirs(args.save_dir, exist_ok=True)
-                checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
+                checkpoint_path = os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_{epoch+1}.pt")
                 torch.save({
                     'epoch': epoch + 1,
                     'encoder_state_dict': tree_encoder.state_dict(),
                     'probe_state_dict': probe.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'val_pearson_r': best_val,
+                    'val_spearman_rho': best_val,
                 }, checkpoint_path)
-                print(f"New best pearson r achieved: {best_val:.4f}. Saved checkpoint to {checkpoint_path}.")            
+                print(f"New best spearman rho achieved: {best_val:.4f}. Saved checkpoint to {checkpoint_path}.")            
                 epochs_no_improve = 0
             elif not args.regression and val_auroc > best_val:
                 best_val = val_auroc
                 os.makedirs(args.save_dir, exist_ok=True)
-                checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
+                checkpoint_path = os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_{epoch+1}.pt")
                 torch.save({
                     'epoch': epoch + 1,
                     'encoder_state_dict': tree_encoder.state_dict(),
@@ -620,44 +628,48 @@ def train_probe(args, train_dataset, valid_dataset, num_classes):
                 }, checkpoint_path)
                 print(f"New best auroc achieved: {best_val:.4f}. Saved checkpoint to {checkpoint_path}.")            
                 epochs_no_improve = 0
-        elif num_classes > 1 and val_macro_f1 > best_val:
-            best_val = val_macro_f1
-            os.makedirs(args.save_dir, exist_ok=True)
-            checkpoint_path = os.path.join(args.save_dir, f"best_checkpoint_epoch_{epoch+1}.pt")
-            torch.save({
-                'epoch': epoch + 1,
-                'encoder_state_dict': tree_encoder.state_dict(),
-                'probe_state_dict': probe.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_macro_f1': best_val,
-            }, checkpoint_path)
-            print(f"New best macro F1 achieved: {best_val:.4f}. Saved checkpoint to {checkpoint_path}.")
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= patience:
-                if num_classes == 1:
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
                     if args.regression:
                         print(
                             f"Early stopping at epoch {epoch+1}: "
-                            f"no val pearson r improvement for {patience} epochs "
-                            f"(best val pearson r: {best_val:.4f})."
-                        )                        
+                            f"no val spearman rho improvement for {patience} epochs "
+                            f"(best val spearman rho: {best_val:.4f})."
+                        )
                     else:
                         print(
                             f"Early stopping at epoch {epoch+1}: "
                             f"no val auroc improvement for {patience} epochs "
                             f"(best val auroc: {best_val:.4f})."
                         )
-                else:
-                    print(
-                        f"Early stopping at epoch {epoch+1}: "
-                        f"no val macro F1 improvement for {patience} epochs "
-                        f"(best val macro f1: {best_val:.4f})."
-                    )                    
-                break            
+                    break
+        else:
+            if val_macro_f1 > best_val:
+                best_val = val_macro_f1
+                os.makedirs(args.save_dir, exist_ok=True)
+                checkpoint_path = os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_{epoch+1}.pt")
+                torch.save({
+                    'epoch': epoch + 1,
+                    'encoder_state_dict': tree_encoder.state_dict(),
+                    'probe_state_dict': probe.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_macro_f1': best_val,
+                }, checkpoint_path)
+                print(f"New best macro F1 achieved: {best_val:.4f}. Saved checkpoint to {checkpoint_path}.")
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1                   
+            if epochs_no_improve >= patience:
+                print(
+                    f"Early stopping at epoch {epoch+1}: "
+                    f"no val macro F1 improvement for {patience} epochs "
+                    f"(best val macro f1: {best_val:.4f})."
+                )                                
+                break
+      
 
-def test_probe(args, test_datasets, num_classes):
+def test_probe(args, test_datasets, num_classes, prefix=''):
     """
     Load the best checkpoint from args.save_dir, then for each test dataset
     in test_datasets (a dict name->dataset or list of (name, dataset)),
@@ -666,7 +678,7 @@ def test_probe(args, test_datasets, num_classes):
     device = torch.device(args.cuda)
 
     # 1) Find the best checkpoint file
-    ckpt_paths = glob(os.path.join(args.save_dir, "best_checkpoint_epoch_*.pt"))
+    ckpt_paths = glob(os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_*.pt"))
     if not ckpt_paths:
         raise FileNotFoundError(f"No checkpoint found matching best_checkpoint_epoch_*.pt in {args.save_dir}")
     # pick the most recently modified
@@ -763,8 +775,10 @@ def test_probe(args, test_datasets, num_classes):
                     logits = probe(leaves)       # (num_residues, C)
                     if num_classes == 1:
                         if args.regression:
-                            label = label.squeeze(0)
-                            pred = logits.squeeze(1)
+                            ignore_index = torch.logical_or(label.isnan(), (torch.abs(label - (-100)) < 1e-6))
+                            label = label.squeeze(0)[~ignore_index.squeeze()]
+                            logits = logits.squeeze(1)[[~ignore_index.squeeze()]]
+                            pred = logits
                             loss = criterion(logits.squeeze(), label)
                         else:
                             logits = logits.squeeze(1)
@@ -798,7 +812,7 @@ def test_probe(args, test_datasets, num_classes):
             results.append((name, mean_loss, acc, macro_f1))
 
     # 5) Write results to file
-    out_path = os.path.join(args.save_dir, "test_results.txt")
+    out_path = os.path.join(args.save_dir, f"{prefix}test_results.txt")
     with open(out_path, "w") as f:
         for name, loss, acc, metric in results:
             f.write(f"Dataset: {name}\n")
@@ -920,13 +934,10 @@ def main(args):
     train_dataset, valid_dataset, test_datasets = load_datasets(args)
     if args.task == "structural-flexibility-prediction":
         for i, (train, valid, tests) in enumerate(zip(train_dataset, valid_dataset, test_datasets)):
-            if not args.test:
-                train_probe(args, train, valid, num_classes=1)
-            test_probe(args, tests, num_classes=1)
             prefix = ['rmsf', 'neq', 'bfactor'][i]
-            for file in glob(os.path.join(args.save_dir, "*.pt"))+glob(os.path.join(args.save_dir, "*.txt")):
-                os.rename(file, Path(file).parent / (prefix+'_'+Path(file).name))
-            # distinguish the artifacts
+            if not args.test:
+                train_probe(args, train, valid, num_classes=1, prefix=prefix)
+            test_probe(args, tests, num_classes=1, prefix=prefix)
     elif args.task == "remote-homology-detection":
         if not args.test:
             train_probe(args, train_dataset, valid_dataset, num_classes=45)

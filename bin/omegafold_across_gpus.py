@@ -11,6 +11,7 @@ import shutil
 import multiprocessing as mp
 from typing import *
 
+from tqdm import tqdm
 import torch
 import numpy as np
 from biotite.sequence import ProteinSequence, AlphabetError
@@ -137,6 +138,35 @@ def run_omegafold_with_env(
     with open(stdout_path, "wb") as sink:
         subprocess.check_call(full_cmd, env=env, stdout=sink, stderr=subprocess.STDOUT)
 
+def fold_seqs_with_omegafold(
+    seqs: list[str],
+    gpu_id: int = 0,
+    weights: str = "",
+    env_name: str = "omegafold_env",
+) -> list[str]:
+    """
+    Fold a list of sequences with OmegaFold as a batch. 
+    Returns: list of output PDB filenames (in order matching input seqs).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        fasta = Path(tmp) / "batch.fasta"
+        # Write all sequences to a single fasta
+        fasta.write_text(
+            "".join([f">Q{i}\n{s}\n" for i, s in enumerate(seqs)])
+        )
+        outdir = Path(tmp) / "pred"
+        outdir.mkdir()
+        # Run OmegaFold once for all sequences
+        run_omegafold_with_env(str(fasta), str(outdir), gpu=gpu_id, weights=weights, env_name=env_name)
+        pdbs = sorted(outdir.glob("*.pdb"))   # sorted by filename = by index
+        # Move all pdbs out of tmp so they survive context exit
+        finals = []
+        for i, pdb in enumerate(pdbs):
+            final = Path(tmp).with_suffix(f".{i}.pdb")
+            shutil.copy(str(pdb), final)
+            finals.append(str(final))
+        return finals
+
 
 def build_parser() -> argparse.ArgumentParser:
     """
@@ -218,6 +248,6 @@ def main():
         p.join()
 
 
+# Example CLI
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     main()
