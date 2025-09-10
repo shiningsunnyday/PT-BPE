@@ -57,30 +57,34 @@ else
 fi
 export CUDA_VISIBLE_DEVICES=""
 export OMP_NUM_THREADS=1
-PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
-  $runner bin/encode.py \
-  --bin-strategy $bin_strat \
-  --bins $bins \
-  --res-init $res_init \
-  --free-bonds $free_bonds \
-  --sec $sec \
-  --vis $vis \
-  --data-dir $data_dir \
-  --save-every $save_every \
-  --plot-every $plot_every \
-  --log-dir /n/netscratch/mzitnik_lab/Lab/msun415/logs \
-  --pad $pad \
-  --toy $toy \
-  --p-min-size $p_size \
-  --rmsd-only $rmsd_only \
-  --rmsd-super-res $rmsd_super_res \
-  --num-p $num_p \
-  --num-vis $num_vis \
-  --num-ref $num_ref \
-  --max-num-strucs $max_num_strucs \
-  --glue-opt $glue_opt \
-  --glue-opt-prior $glue_opt_prior \
-  --glue-opt-method $glue_opt_method \
-  --glue-opt-every $glue_opt_every \
-  --max-iter $max_iter \
-  $extra
+export PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff
+cmd=(  
+    $runner bin/encode.py \
+    --bin-strategy $bin_strat \
+    --bins $bins \
+    --res-init $res_init \
+    --free-bonds $free_bonds \
+    --sec $sec \
+    --vis $vis \
+    --data-dir $data_dir \
+    --save-every $save_every \
+    --plot-every $plot_every \
+    --log-dir /n/netscratch/mzitnik_lab/Lab/msun415/logs \
+    --pad $pad \
+    --toy $toy \
+    --p-min-size $p_size \
+    --rmsd-only $rmsd_only \
+    --rmsd-super-res $rmsd_super_res \
+    --num-p $num_p \
+    --num-vis $num_vis \
+    --num-ref $num_ref \
+    --max-num-strucs $max_num_strucs \
+    --glue-opt $glue_opt \
+    --glue-opt-prior $glue_opt_prior \
+    --glue-opt-method $glue_opt_method \
+    --glue-opt-every $glue_opt_every \
+    --max-iter $max_iter \
+    $extra
+)
+echo "${cmd[@]}"
+"${cmd[@]}"

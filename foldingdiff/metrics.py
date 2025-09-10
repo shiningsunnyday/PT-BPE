@@ -30,7 +30,7 @@ from biotite.structure.io.pdb import PDBFile
 from bin.pdb_to_residue_proteinmpnn import PROTEINMPNN_SCRIPT, read_fasta, generate_residues_proteinmpnn
 from bin.sample import write_preds_pdb_folder
 from bin.annot_secondary_structures import count_structures_in_pdb
-from bin.omegafold_across_gpus import run_omegafold_with_env
+from bin.omegafold_across_gpus import my_run_omegafold_with_env
 cwd = Path(__file__).parents[1]
 
 
@@ -216,7 +216,7 @@ def fold_seqs_with_omegafold(
         outdir = Path(tmp) / "pred"
         outdir.mkdir()
         # Run OmegaFold once for all sequences
-        run_omegafold_with_env(str(fasta), str(outdir), gpu=gpu_id, weights=weights, env_name=env_name)
+        my_run_omegafold_with_env(str(fasta), str(outdir), gpu=gpu_id, weights=weights, env_name=env_name)
         pdbs = sorted(outdir.glob("*.pdb"))   # sorted by filename = by index
         # Move all pdbs out of tmp so they survive context exit
         finals = []
@@ -398,7 +398,6 @@ def parallel_sctm_designability(
                              mp_context=mp.get_context("spawn")) as ex:
         futures = [ex.submit(_worker_shard, t) for t in tasks]
         for fut in as_completed(futures):
-            print(fut.result())
             results.update(fut.result())
     return results
 

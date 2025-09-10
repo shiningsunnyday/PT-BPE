@@ -4,7 +4,7 @@
 #SBATCH -p kempner
 #SBATCH --account kempner_mzitnik_lab
 #SBATCH -c 16 # number of cores
-#SBATCH --mem 100g # memory pool for all cores
+#SBATCH --mem 600g # memory pool for all cores
 #SBATCH --gres=gpu:4 # gpu
 #SBATCH -t 3-0:00 # time (D-HH:MM)
 ##SBATCH -t 0-12:00
@@ -75,9 +75,9 @@ fi
 if (( $3 == 1 )); then # input mode 1  
   ckpt_info="--train_path $4 --valid_path $5 --output_path $6 --num_samples $7" 
 else # input mode 2  
-  ckpt_info="--checkpoint_path ./ckpts/${4}/bpe_iter=${5}.pkl"
-  if [ -n "$6" ]; then # specify model for sampling
-    extra="--inference --model_path $6 --num_samples $7"
+  ckpt_info="--checkpoint_path ${4}"
+  if [ -n "$5" ]; then # specify model for sampling
+    extra="--inference --model_path $5 --num_samples $6"
     # load docker image for lddt
     podman load -i ost.tar
   else
@@ -85,10 +85,14 @@ else # input mode 2
   fi
 fi
 
-PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff \
+export PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff
+cmd=(
   /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/esm_env/bin/python -m bin.train \
   $ckpt_info \
   --labels_path "$labels_path" \
   --batch_size 8 \
   --task $task \
   $extra $debug
+)
+echo "${cmd[@]}"
+"${cmd[@]}"

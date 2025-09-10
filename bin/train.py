@@ -740,7 +740,7 @@ def main(args):
     # 2) Load & split
     if args.checkpoint_path:        
         save_dir = Path(args.checkpoint_path).parent
-        bpe = pickle.load(open(args.checkpoint_path, 'rb'))                    
+        bpe = pickle.load(open(args.checkpoint_path, 'rb'))
         full_ds = ProteinDataset(
             bpe,
             args.labels_path,
@@ -865,9 +865,12 @@ def main(args):
     crit = nn.CrossEntropyLoss(ignore_index=0)
     step = 0
     best_loss, best_path = float("inf"), None
+    # --- Early stopping config ---
+    patience = 5
+    epochs_no_improve = 0    
     for epoch in range(args.epochs):
         model.train()
-        for batch in train_loader:
+        for batch in tqdm(train_loader, desc="training epoch"):
             optimizer.zero_grad()
             ids  = batch["input_ids"].to(device)
             m    = batch["attention_mask"].to(device)
@@ -904,14 +907,77 @@ def main(args):
         model.train()
 
         if val_loss < best_loss:
+            epochs_no_improve = 0
             best_loss = val_loss            
             # end‐of‐epoch checkpoint
             ckpt = f"{save_dir}/ckpt_epoch{epoch}.pt"
             best_path = ckpt
             torch.save(model.state_dict(), ckpt)
             wandb.save(ckpt)
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(
+                    f"Early stopping at epoch {epoch+1}: "
+                    f"no val loss improvement for {patience} epochs "
+                    f"(best val loss: {best_loss:.4f})."
+                )        
+                break        
 
-    if not args.checkpoint_path:        
+    if args.checkpoint_path:   
+        # repeats inference mode, can wrap this into a function             
+        model.load_state_dict(torch.load(best_path, map_location=device))
+        logging.info(f"loaded model from {best_path}")
+        length_prior = [len(seq) for seq in full_ds.seqs]
+        start_prior = [seq[0] for seq in full_ds.seqs]  
+        model.eval()        
+
+        # a) Sample unconditional
+        tokenizers = sample_unconditional(
+            model=model,
+            device=device,
+            bpe=bpe,
+            length_prior=length_prior,
+            start_prior=start_prior,
+            num_samples=args.num_samples,
+            temperature=args.temperature,
+            max_len=max_len
+        )        
+        train_pdb_files = [full_ds.fnames[item["idx"]] for item in train_ds]
+        full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
+        pool = mp.Pool(processes=mp.cpu_count())
+        train_coords = pool.map(full_coords_pfunc, tqdm(train_pdb_files, desc="extract coords train"))
+        sampled_dfs = [t._angles_and_dists[["phi", "psi", "omega", "tau", "CA:C:1N", "C:1N:1CA"]] for t in tokenizers]
+        outdir = Path(best_path).parent
+        gen_pdb_files = write_preds_pdb_folder(sampled_dfs, outdir / "sampled_pdb")
+        generated_coords = pool.map(full_coords_pfunc, tqdm(gen_pdb_files, desc="extract coords gen"))
+        metrics = compute_metrics(gen_pdb_files, generated_coords, train_pdb_files, train_coords)
+        out = parallel_sctm_designability(
+            gen_pdb_files, n_devices=len(os.environ["CUDA_VISIBLE_DEVICES"]), tm_cutoff=0.5, n_designs=8
+        )
+        sctm_metrics = summarize_sctm(out)
+        metrics.update(sctm_metrics)
+        wandb.log(metrics)
+
+        # b) Next-token on **test** split
+        crit = nn.CrossEntropyLoss(ignore_index=0)       
+        ntp_loss = evaluate_next_token(model, test_ntp_loader, device, crit)
+        ntp_ppl  = torch.exp(torch.tensor(ntp_loss))
+        wandb.log({"test/ntp_loss": ntp_loss, "test/ntp_ppl": ntp_ppl})         
+                
+        # c) Zero-shot probe on **probe_test** (trained on probe_train)
+        if args.labels_path:
+            metrics = evaluate_probe(
+                model,
+                probe_train_loader,
+                probe_test_loader,
+                device,
+                args,
+                num_labels = num_labels,
+                per_residue=(args.task != "remote-homology-detection")
+            )
+            wandb.log({f"test/probe_{key}": metrics[key] for key in metrics})
+    else:
         model.load_state_dict(torch.load(best_path, map_location=device))
         logging.info(f"loaded model from {best_path}")
         length_prior = [len(seq) for seq in train+valid]

@@ -11,6 +11,8 @@ import numpy as np
 import json
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+import argparse
 import matplotlib.patheffects as PathEffects
 from matplotlib.colors import LogNorm
 from matplotlib.lines import Line2D
@@ -872,5 +874,172 @@ def plot_feature_importance(mean_attn_scores, labels, output_path):
     plt.close(fig)
 
 
+def pareto_efficient_indices(points, sense=("min", "min")):
+    """
+    Return indices of Pareto efficient points.
+    points: array-like shape (n, 2) for (x, y).
+    sense: tuple per axis: "min" or "max".
+    """
+    if len(points) == 0:
+        return []
+    pts = np.array(points, dtype=float).copy()
+    if sense[0] == "max":
+        pts[:, 0] = -pts[:, 0]
+    if sense[1] == "max":
+        pts[:, 1] = -pts[:, 1]
+    n = pts.shape[0]
+    is_eff = np.ones(n, dtype=bool)
+    for i in range(n):
+        if not is_eff[i]:
+            continue
+        dominates = np.all(pts <= pts[i] + 1e-12, axis=1) & np.any(pts < pts[i] - 1e-12, axis=1)
+        dominates[i] = False
+        if np.any(dominates):
+            is_eff[i] = False
+    return np.where(is_eff)[0].tolist()
+
+def main():
+    parser = argparse.ArgumentParser(description="Plot (RMSD, LDDT) vs BPR Pareto front.")
+    parser.add_argument("--out", required=True, help="Output path, e.g., pareto_bpr.png/pdf/svg")
+    parser.add_argument("--dpi", type=int, default=300, help="Figure DPI (for raster formats).")
+    args = parser.parse_args()
+    # (family, label, BPR, Train(RMSD,LDDT), CAMEO(RMSD,LDDT), CASP14(RMSD,LDDT))
+    data = [
+        ("VQ-VAE",  "VQ-128",  395.92, (1.58, 0.73), (3.70, 0.57), (4.86, 0.46)),
+        ("VQ-VAE",  "VQ-256",  397.40, (1.50, 0.73), (3.65, 0.57), (4.85, 0.46)),
+        ("VQ-VAE",  "VQ-512",  399.36, (1.53, 0.73), (3.72, 0.57), (4.71, 0.46)),
+        ("VQ-VAE",  "VQ-1024", 402.28, (1.40, 0.78), (3.69, 0.60), (5.00, 0.47)),
+
+        ("AminoASeed", "AA-128", 399.76, (0.82, 0.84), (2.92, 0.66), (4.03, 0.57)),
+        ("AminoASeed", "AA-256", 401.24, (0.78, 0.85), (2.90, 0.69), (3.56, 0.60)),
+        ("AminoASeed", "AA-512", 404.84, (0.77, 0.85), (2.94, 0.69), (3.80, 0.59)),
+
+        ("ESM3*",    "ESM3",  2274.12, (None, None), (0.91, 0.96), (1.29, 0.93)),
+
+        ("FoldSeek", "FoldSeek-20", 4.32, (None, None), (None, None), (None, None)),
+        ("ProToken", "ProToken-512", 132.90, (None, None), (None, None), (None, None)),
+
+        ("PT-BPE",   "PT-BPE-700", 36.25, (1.58, 0.73), (1.66, 0.72), (1.53, 0.72)),
+    ]
+
+    splits = ["Train", "CAMEO", "CASP14"]
+    split_colors = {"Train": "#1f77b4", "CAMEO": "#2ca02c", "CASP14": "#d62728"}
+    metric_markers = {"RMSD": "o", "LDDT": "^"}
+
+    # Build split series
+    per_split_rmsd = {s: {"x": [], "y": [], "labels": []} for s in splits}
+    per_split_lddt = {s: {"x": [], "y": [], "labels": []} for s in splits}
+    for fam, name, bpr, train, cameo, casp in data:
+        vals = {"Train": train, "CAMEO": cameo, "CASP14": casp}
+        for s in splits:
+            r, l = vals[s]
+            if r is not None:
+                per_split_rmsd[s]["x"].append(bpr)
+                per_split_rmsd[s]["y"].append(r)
+                per_split_rmsd[s]["labels"].append(name)
+            if l is not None:
+                per_split_lddt[s]["x"].append(bpr)
+                per_split_lddt[s]["y"].append(l)
+                per_split_lddt[s]["labels"].append(name)
+
+    def jitter(vals, frac=0.012):
+        v = np.asarray(vals, float)
+        return v * (1.0 + frac)
+
+    # Figure / axes
+    fig = plt.figure(figsize=(7, 7))
+    ax = plt.gca()
+    ax2 = ax.twinx()
+
+    # Axes styling
+    ax.set_xscale("log")
+    ax.grid(True, which="both", axis="both", lw=0.4, alpha=0.35)
+    ax.set_xlabel("BPR", fontsize=12)
+    ax.set_ylabel("RMSD", fontsize=12)
+    ax2.set_ylabel("LDDT", fontsize=12)
+
+    # Plot points + labels
+    for s in splits:
+        if per_split_rmsd[s]["x"]:
+            x = np.array(per_split_rmsd[s]["x"], float)
+            y = np.array(per_split_rmsd[s]["y"], float)
+            ax.scatter(x, y, s=70, marker=metric_markers["RMSD"],
+                       edgecolor="white", linewidth=0.6, alpha=0.95,
+                       color=split_colors[s], label=f"{s} RMSD")
+            for xi, yi, lbl in zip(x, y, per_split_rmsd[s]["labels"]):
+                ax.annotate(lbl, (xi, yi), xytext=(0, 6), textcoords="offset points",
+                            fontsize=8, ha="center", va="bottom",
+                            color=split_colors[s], alpha=0.95)
+
+        if per_split_lddt[s]["x"]:
+            x2 = jitter(per_split_lddt[s]["x"], frac=0.01)
+            y2 = np.array(per_split_lddt[s]["y"], float)
+            ax2.scatter(x2, y2, s=70, marker=metric_markers["LDDT"],
+                        edgecolor="white", linewidth=0.6, alpha=0.95,
+                        color=split_colors[s], label=f"{s} LDDT")
+            for xi, yi, lbl in zip(x2, y2, per_split_lddt[s]["labels"]):
+                ax2.annotate(lbl, (xi, yi), xytext=(0, -10), textcoords="offset points",
+                             fontsize=8, ha="center", va="top",
+                             color=split_colors[s], alpha=0.95)
+
+    # Pareto fronts as lines (no markers)
+    # Proxies so they appear in legends
+    rmsd_pareto_proxy = Line2D([0], [0], color="black", linestyle="--", linewidth=1.6,
+                               label="Pareto front (RMSD)")
+    lddt_pareto_proxy = Line2D([0], [0], color="black", linestyle=":", linewidth=1.6,
+                               label="Pareto front (LDDT)")
+
+    for s in splits:
+        # RMSD: minimize (BPR, RMSD)
+        X = np.array(per_split_rmsd[s]["x"], float)
+        Y = np.array(per_split_rmsd[s]["y"], float)
+        if X.size:
+            eff = pareto_efficient_indices(np.c_[X, Y], sense=("min", "min"))
+            order = np.argsort(X[eff])
+            ax.plot(X[eff][order], Y[eff][order],
+                    linestyle="--", linewidth=1.6, color=split_colors[s], alpha=0.95)
+
+        # LDDT: minimize BPR, maximize LDDT
+        X2 = np.array(per_split_lddt[s]["x"], float)
+        Y2 = np.array(per_split_lddt[s]["y"], float)
+        if X2.size:
+            eff2 = pareto_efficient_indices(np.c_[X2, Y2], sense=("min", "max"))
+            order2 = np.argsort(X2[eff2])
+            ax2.plot(jitter(X2[eff2][order2], 0.01), Y2[eff2][order2],
+                     linestyle=":", linewidth=1.6, color=split_colors[s], alpha=0.95)
+
+    # Legends (include Pareto-line proxies)
+    h1, l1 = ax.get_legend_handles_labels()
+    h1.append(rmsd_pareto_proxy); l1.append(rmsd_pareto_proxy.get_label())
+    first = ax.legend(h1, l1, loc="upper right", frameon=True, fontsize=9, title="RMSD markers & fronts")
+    ax.add_artist(first)
+
+    h2, l2 = ax2.get_legend_handles_labels()
+    h2.append(lddt_pareto_proxy); l2.append(lddt_pareto_proxy.get_label())
+    ax2.legend(h2, l2, loc="lower left", frameon=True, fontsize=9, title="LDDT markers & fronts")
+
+    # Tight x-limits based only on rows that actually have RMSD or LDDT values
+    valid_bpr = []
+    for fam, name, bpr, train, cameo, casp in data:
+        has_any = any(v is not None for v in (*train, *cameo, *casp))
+        if has_any:
+            valid_bpr.append(bpr)
+    valid_bpr = np.array(valid_bpr, float)
+    xmin, xmax = float(np.min(valid_bpr)), float(np.max(valid_bpr))
+    ax.set_xlim(xmin * 0.98, xmax * 1.05)
+    ax.margins(x=0)  # remove extra padding
+
+    # Y limits
+    ax.set_ylim(0.6, 5.6)
+    ax2.set_ylim(0.4, 1.05)
+
+    ax.set_title("Pareto Plot: (RMSD, LDDT) vs BPR across Train / CAMEO / CASP14",
+                 fontsize=13, pad=12)
+
+    plt.tight_layout()
+    plt.savefig(args.out, dpi=args.dpi, bbox_inches="tight")
+    print(f"Saved figure to: {args.out}")
+
 if __name__ == "__main__":
-    plot_losses(sys.argv[1], out_fname=sys.argv[2], simple=True)
+    # plot_losses(sys.argv[1], out_fname=sys.argv[2], simple=True)
+    main()

@@ -138,6 +138,76 @@ def run_omegafold_with_env(
     with open(stdout_path, "wb") as sink:
         subprocess.check_call(full_cmd, env=env, stdout=sink, stderr=subprocess.STDOUT)
 
+
+def my_run_omegafold_with_env(
+    input_fasta: str,
+    outdir: str,
+    gpu: int,
+    weights: str = "",
+    env_name: str = "omegafold_env",
+):
+    """
+    Runs OmegaFold inside the specified conda environment (`env_name`)
+    on the given FASTA file, writing predictions to `outdir`.
+
+    Parameters
+    ----------
+    input_fasta : str
+        Path to a FASTA file containing one or more sequences.
+    outdir : str
+        Directory where OmegaFold will write its PDB predictions.
+    gpu : int
+        Which CUDA‐visible GPU index to use.
+    weights : str, optional
+        Path to a custom weights file for OmegaFold.
+    env_name : str, optional
+        Name of the conda env where OmegaFold is installed.
+    """
+    log_msg = (
+        f"OmegaFold ({env_name}) : {input_fasta} → {outdir}  "
+        f"[GPU {gpu}]  weights={weights or 'default'}"
+    )
+    logging.info(log_msg)
+
+    # Ensure `conda run` is available
+    if shutil.which("conda") is None:
+        raise RuntimeError("`conda` executable not found in PATH")
+
+    # Build the OmegaFold CLI arguments
+    of_cmd = [
+        "omegafold",
+        input_fasta,
+        outdir,
+        "--device",
+        "cuda:0",
+    ]
+    if weights:
+        if not os.path.isfile(weights):
+            raise FileNotFoundError(f"Weights file {weights} not found")
+        of_cmd += ["--weights_file", weights]
+
+    # Wrap in `conda run` and set GPU via env var
+    full_cmd = ["conda", "run", "-n", env_name, "--no-capture-output"] + of_cmd
+    env = os.environ.copy()
+    if not env.get("CUDA_VISIBLE_DEVICES", "").strip():
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu)  # fallback only
+    env.setdefault("TOKENIZERS_PARALLELISM", "false")
+    env.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    env.setdefault("OMP_NUM_THREADS", "1")
+    env.setdefault("MKL_NUM_THREADS", "1")
+
+    # Log file in a persistent location (not inside a TemporaryDirectory)
+    if log_dir is None:
+        log_dir = str(Path(outdir).parent)  # sibling of outdir survives even on failure
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    bname = Path(input_fasta).stem
+    stdout_path = str(Path(log_dir) / f"omegafold_{bname}_{uuid.uuid4().hex[:8]}.stdout")
+
+    with open(stdout_path, "wb") as sink:
+        subprocess.check_call(full_cmd, env=env, stdout=sink, stderr=subprocess.STDOUT)
+    return stdout_path
+
+
 def fold_seqs_with_omegafold(
     seqs: list[str],
     gpu_id: int = 0,

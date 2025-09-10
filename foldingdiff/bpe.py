@@ -6,6 +6,7 @@ import sys
 import heapq
 import json
 import logging
+import bisect
 import zipfile, os.path as _p
 from collections import defaultdict
 from functools import partial
@@ -1086,9 +1087,14 @@ class BPE():
         assert len(uniq_keys) == len(geo_keys)
         keys = [(n, key) for (n, key) in zip(uniq_keys[2:], geo_keys[2:])]
         orig_chain = ProteinChain.from_pdb(t.fname) # remove & ~atom_array.hetero from protein_chain.py
-        metrics = defaultdict(list)
         count = 0
+        metrics = defaultdict(list)
         cur_chain = ProteinChain.from_backbone_atom_coordinates(t.compute_coords().reshape(-1, 3, 3))
+        bb_rmsd = cur_chain.rmsd(orig_chain, only_compute_backbone_rmsd=True)
+        lddt = cur_chain.lddt_ca(orig_chain)
+        metrics["rmsd"].append(bb_rmsd)
+        metrics["lddt"].append(lddt.mean())
+        metrics["L"].append(len(t.bond_to_token))        
         for _iter, (n, key) in enumerate(keys):
             if key in geo_dict:
                 # if in geo_dict, .step() for single tokenizer (without popping new key)                
@@ -1111,18 +1117,45 @@ class BPE():
     def hash_geo(geo):
         return json.dumps(geo, sort_keys=True)
 
+    # @staticmethod
+    # def get_ind(v, values):
+    #     ind = -1        
+    #     for l, (start, end) in enumerate(values):
+    #         if (v == start) or (v >= start and v<end):
+    #             ind = l
+    #             break
+    #     if ind == -1:
+    #         if v != end:
+    #             breakpoint()
+    #         ind = len(values)-1
+    #     return ind
+
     @staticmethod
     def get_ind(v, values):
-        ind = -1        
-        for l, (start, end) in enumerate(values):
-            if (v == start) or (v >= start and v<end):
-                ind = l
-                break
-        if ind == -1:
-            if v != end:
-                breakpoint()
-            ind = len(values)-1
-        return ind
+        """
+        Return the index of the (start, end) bin that contains `v`.
+
+        `values` is expected to be sorted and contiguous:
+            start_{i+1} == end_i
+
+        The implementation now uses binary search via the `bisect` module,
+        reducing the lookup from O(N) to O(log N).
+        """
+        # Create a list of the left edges once for the search.
+        left_edges = [start for start, _ in values]
+        # Locate the interval whose left edge is ≤ v.
+        ind = bisect.bisect_right(left_edges, v) - 1
+        if ind < 0:
+            raise ValueError(f"value {v} is below the first bin range")
+        # The candidate bin
+        start, end = values[ind]
+        # Special-case: final right edge belongs to the last bin
+        if ind == len(values) - 1 and v == end:
+            return ind
+        # Usual containment check
+        if start <= v < end:
+            return ind
+        raise ValueError(f"value {v} does not fall into any bin")
     
 
     def compute_geo_key(self, token_pair, tokenizer_or_index, ignore_left=False, ignore_right=False):

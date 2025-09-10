@@ -222,7 +222,10 @@ def main():
     input_ids = [bpe.quantize(t.tokenize()) for t in tokenizers]
     utility = get_codebook_utility(torch.as_tensor(sum(input_ids, [])), bpe.vocab_size)
     json.dump(utility, open(save_dir / "utility.json", "w+"))
-    plot_stats(all_stats, save_dir / "stats.png")
+    try:
+        plot_stats(all_stats, save_dir / "stats.png")
+    except:
+        pass
     if args.append:
         if not isinstance(bpe.n, list):
             bpe.n = [bpe.n]
