@@ -8,9 +8,10 @@ import logging
 import argparse
 import subprocess
 import shutil
+import uuid
 import multiprocessing as mp
 from typing import *
-
+from pathlib import Path
 from tqdm import tqdm
 import torch
 import numpy as np
@@ -145,6 +146,7 @@ def my_run_omegafold_with_env(
     gpu: int,
     weights: str = "",
     env_name: str = "omegafold_env",
+    log_dir: str | None = None,    
 ):
     """
     Runs OmegaFold inside the specified conda environment (`env_name`)

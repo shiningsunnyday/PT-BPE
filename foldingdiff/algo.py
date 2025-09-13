@@ -177,7 +177,7 @@ def k_medoids(
 
     for i, j, d in Parallel(n_jobs=-1, backend="threading")(
             delayed(_calc)(p) for p in tqdm(pairs,
-                                            desc="Pre-computing distance matrix (parallel)")):
+                                            desc="Pre-computing distance matrix (parallel)", miniters=10000)):
         D[i, j] = D[j, i] = d
     # ----------------------------------------------------------------------
 

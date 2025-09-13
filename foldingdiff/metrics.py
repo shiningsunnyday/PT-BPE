@@ -1,7 +1,15 @@
 from pathlib import Path
 import multiprocessing as mp
 import pandas as pd
-import os
+import os, sys
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+try:
+    mp.set_start_method("spawn", force=True)   # avoid fork-after-init deadlocks
+except RuntimeError:
+    pass
+print(f"[child] pid={os.getpid()} CVD={os.getenv('CUDA_VISIBLE_DEVICES')} args={sys.argv}", flush=True)
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Dict, Tuple
 import logging
@@ -523,9 +531,6 @@ def parse_args():
 def main(args):
     if args.gen_pdb_dir:
         gen_pdb_files = glob.glob(f"{args.gen_pdb_dir}/*.pdb")
-        full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
-        pool = pool = mp.Pool(processes=mp.cpu_count())
-        generated_coords = pool.map(full_coords_pfunc, tqdm(gen_pdb_files, desc="extract coords gen"))
         if args.sctm:
             sc_tm_per_backbone = sctm_designability(
                 backbone_pdbs = gen_pdb_files,  # list of PDBs you generated
@@ -536,7 +541,10 @@ def main(args):
             sctm_metrics = summarize_sctm(sc_tm_per_backbone)
             logging.info(f"sctm_metrics: {sctm_metrics}")
             metrics = sctm_metrics
-        else:        
+        else:   
+            full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
+            pool = pool = mp.Pool(processes=mp.cpu_count())
+            generated_coords = pool.map(full_coords_pfunc, tqdm(gen_pdb_files, desc="extract coords gen"))                 
             metrics = compute_metrics(gen_pdb_files, generated_coords)
         json.dump(metrics, open(args.out_file, "w+"))
     else:

@@ -230,7 +230,7 @@ def main():
         if not isinstance(bpe.n, list):
             bpe.n = [bpe.n]
         bpe.n.append(len(tokenizers))
-        bpe.tokenizers.append(tokenizers)
+        bpe.tokenizers.extend(tokenizers)
     else:
         bpe.tokenizers = tokenizers
     pickle.dump(bpe, open(out_path, "wb+"))

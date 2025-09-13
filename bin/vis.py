@@ -11,17 +11,25 @@ def parse_args():
     args = parser.parse_args()
     return args
 
+def recurse(node):
+    return [node.value] + (recurse(node.left) if node.left else []) + (recurse(node.right) if node.right else [])
+
+
 def _build_pymol_cmd(t, i):
     """Return the single-line PyMOL command for tokenizer t / index i."""
     start, _, length = max(t.bond_to_token.values(), key=lambda x: x[2])
-    start, length = start//3, length//3
-    chain  = Path(t.fname).stem.split('_')[1]
-    outpng = f"{Path(t.fname).stem}_{start}_{length}.png"
-    return (
-        "pymol -cq "
-        "-d 'run highlight_span.py' "
-        f"-d 'highlight_span {t.fname}, {start}, {start+length}, {outpng}, {chain}'"
-    )
+    node = t.bond_to_token.tree.nodes[start]
+    cmds = []
+    for (start, _, length) in recurse(node):
+        start, length = start//3, length//3
+        chain  = Path(t.fname).stem.split('_')[1]
+        outpng = f"{Path(t.fname).stem}_{start}_{length}.png"
+        cmds.append(
+            "pymol -cq "
+            "-d 'run highlight_span.py' "
+            f"-d 'highlight_span {t.fname}, {start}, {start+length}, {outpng}, {chain}'"
+        )
+    return cmds
 
 def _run_batch(batch):
     """
@@ -33,8 +41,7 @@ def _run_batch(batch):
     lines = [
         "source $(conda info --base)/etc/profile.d/conda.sh",
         "conda activate pstbench",
-    ] + [_build_pymol_cmd(t, i) for t, i in batch]
-
+    ] + sum([_build_pymol_cmd(t, i) for t, i in batch], [])
     # run them in a single shell so activation is done only once
     script = " && ".join(lines)
     subprocess.run(["bash", "-c", script], check=True)
@@ -49,8 +56,9 @@ def main():
         [(i,
           max(l for (_, _, l) in t.bond_to_token.values()),
           -len(t.bond_to_token) / t.n)
-         for i, t in enumerate(bpe.tokenizers)]
-    )[-100:]
+         for i, t in enumerate(bpe.tokenizers)],
+         key=lambda x: x[1:]
+    )[-10:]
 
     tasks = [(bpe.tokenizers[i], i) for i, *_ in selected]
 
@@ -60,8 +68,10 @@ def main():
     batches     = [tasks[k:k + chunk_size] for k in range(0, len(tasks), chunk_size)]
 
     # run the batches in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
-        pool.map(_run_batch, batches)
+    # with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        # pool.map(_run_batch, batches)
+    for batch in batches:
+        _run_batch(batch)
     
         
 if __name__ == "__main__":

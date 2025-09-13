@@ -291,8 +291,13 @@ class BPE():
                     active_coords.append(coords)
                     active_occurs.append((ti, start, length))
 
-                # run k-medoids                
-                medoid_inds = k_medoids(active_coords, self.num_partitions[size], rng=self.rng)                
+                # run k-medoids                                
+                fname = os.path.join(self.save_dir, f"medoids_{size}.npy")
+                if os.path.exists(fname):
+                    medoid_inds = np.load(fname).tolist()
+                else:
+                    medoid_inds = k_medoids(active_coords, self.num_partitions[size], rng=self.rng)
+                    np.lib.format.open_memmap(fname, mode='w+', dtype=np.int32, shape=(self.num_partitions[size],))[:] = medoid_inds
                 # -------- final assignment for *all* structures ---------------------------                                                
                 if max_workers == 0:
                     assignments = [None for _ in range(N)]
@@ -510,7 +515,7 @@ class BPE():
             # Fast checks for the two out-of-range cases
             if x < arr[0, 0]:
                 return arr[0][0]
-            if x > arr[-1, 1]:
+            if x >= arr[-1, 1]:
                 return arr[-1, 1]
 
             # Binary search on the right edges
