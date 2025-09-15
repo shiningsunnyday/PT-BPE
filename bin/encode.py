@@ -324,7 +324,8 @@ def main():
         K = len(bpe._tokens)
         L = np.mean([len(t.bond_to_token) for t in bpe.tokenizers])
         orig_chains = [ProteinChain.from_pdb(bpe.tokenizers[i].fname) for i in tqdm(range(len(ref_coords)), desc="gathering orig ref chains")]
-        input_ids = [bpe.quantize(t.tokenize()) for t in tqdm(bpe.tokenizers, desc="quantizing token ids")]
+        # input_ids = [bpe.quantize(t.tokenize()) for t in tqdm(bpe.tokenizers, desc="quantizing token ids")]
+        input_ids = bpe.quantize(bpe.tokenizers)
         utility = get_codebook_utility(torch.as_tensor(sum(input_ids, [])), bpe.vocab_size)
         cur_coords = []
         for i in tqdm(range(len(ref_coords)), desc="computing coords for ref comparison"):
@@ -391,7 +392,8 @@ def main():
             stats_path = os.path.join(args.save_dir, f'stats={t}.json')
             K = len(bpe._tokens)
             L = np.mean([len(t.bond_to_token) for t in bpe.tokenizers])
-            input_ids = [bpe.quantize(t.tokenize()) for t in bpe.tokenizers]
+            # input_ids = [bpe.quantize(t.tokenize()) for t in bpe.tokenizers]
+            input_ids = bpe.quantize(bpe.tokenizers)
             utility = get_codebook_utility(torch.as_tensor(sum(input_ids, [])), bpe.vocab_size)
             json.dump(
                 {

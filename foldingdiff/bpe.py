@@ -915,19 +915,45 @@ class BPE():
         return count
 
 
+    @staticmethod
+    def _init_quantize_worker(bpe):
+        global BPE
+        BPE = bpe
+    
+    @staticmethod
+    def _quantize_worker(t):
+        return BPE.quantize(t)
+
+
     def quantize(self, tokenized):
-        quantized = []
-        for i, token in enumerate(tokenized):
-            if token[0] == "MOTIF":
-                quant = list(self._tokens).index(token[1])
-            else:                
-                dt = token[1]
-                cum = self.cum_bin_count(dt)
-                relv = self._thresholds[1][dt]
-                ind = BPE.get_ind((token[2] + 2*np.pi) % (2*np.pi), relv)
-                quant = len(self._tokens)+cum+ind
-            quantized.append(quant)
-        return quantized
+        # if tokenized is a Tokenizer, tokenize() first
+        # if tokenized is a list of Tokenizers, tokenize() in mp while quantizing
+        # else tokenized must be a list of tuples
+        if isinstance(tokenized, Tokenizer):
+            return self.quantize(tokenized.tokenize())
+        elif isinstance(tokenized[0], Tokenizer):
+            # mp
+            max_workers = _effective_cpus()
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=BPE._init_quantize_worker,
+                initargs=(self,)
+            ) as pool:       
+                res = tqdm(pool.map(BPE._quantize_worker, tokenized, chunksize=10), total=len(tokenized), desc="quantizing all tokenizers")
+            return list(res)
+        else:
+            quantized = []
+            for i, token in enumerate(tokenized):
+                if token[0] == "MOTIF":
+                    quant = list(self._tokens).index(token[1])
+                else:                
+                    dt = token[1]
+                    cum = self.cum_bin_count(dt)
+                    relv = self._thresholds[1][dt]
+                    ind = BPE.get_ind((token[2] + 2*np.pi) % (2*np.pi), relv)
+                    quant = len(self._tokens)+cum+ind
+                quantized.append(quant)
+            return quantized
 
 
     def dequantize(self, quantized):
