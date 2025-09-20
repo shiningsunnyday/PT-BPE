@@ -427,20 +427,20 @@ def compute_metrics(generated_pdb_paths, generated_coords, train_pdb_paths=None,
             best_tm_vs_train(gen_pdb, train_pdb_paths)
             for gen_pdb in generated_pdb_paths
         ]
-        mean_best_tm = float(np.mean(tm_vals))    
-        logging.info(f"mean_best_tm: {mean_best_tm}")
-        metrics["best_tm_mean"] = mean_best_tm    
-        # --- Novelty (min‑RMSD to train) ---
-        pairs = list(product(generated_pdb_paths, train_pdb_paths))
-        with mp.Pool(mp.cpu_count()) as pool:
-            scores = pool.starmap(tm_score, tqdm(pairs, desc="novelty"), chunksize=1)    
-        scores_by_g = defaultdict(list)
-        for (g, t), s in zip(pairs, scores):
-            scores_by_g[g].append(s)
-        novelty_vals = [min(scores_by_g[g]) for g in generated_pdb_paths]
-        mean_novelty_tm = float(np.mean(novelty_vals))
+        mean_novelty_tm = float(np.mean(tm_vals))    
         logging.info(f"mean_novelty_tm: {mean_novelty_tm}")
         metrics["mean_novelty_tm"] = mean_novelty_tm    
+        # # --- Novelty (min‑RMSD to train) ---
+        # pairs = list(product(generated_pdb_paths, train_pdb_paths))
+        # with mp.Pool(mp.cpu_count()) as pool:
+        #     scores = pool.starmap(tm_score, tqdm(pairs, desc="novelty"), chunksize=1)    
+        # scores_by_g = defaultdict(list)
+        # for (g, t), s in zip(pairs, scores):
+        #     scores_by_g[g].append(s)
+        # novelty_vals = [min(scores_by_g[g]) for g in generated_pdb_paths]
+        # mean_novelty_tm = float(np.mean(novelty_vals))
+        # logging.info(f"mean_novelty_tm: {mean_novelty_tm}")
+        # metrics["mean_novelty_tm"] = mean_novelty_tm    
         # --- LDDT ---
         # pairs = list(product(generated_pdb_paths, train_pdb_paths))
         # with mp.Pool(mp.cpu_count()) as pool:
@@ -466,13 +466,13 @@ def compute_metrics(generated_pdb_paths, generated_coords, train_pdb_paths=None,
         #     generated_pdbs   = generated_pdb_paths,   # list[str]
         #     train_pdbs       = train_pdb_paths,       # list[str]
         #     fast             = True                  # use TMalign -fast
-        # )  
+        # )
         ss_metrics = ss_kl_divergence(
             generated_pdbs = generated_pdb_paths,   # list[str]
             train_pdbs     = train_pdb_paths,       # list[str]
             max_bins       = 2,                     # same binning as make_ss_cooccurrence_plot
             backend        = "psea",
-        )    
+        )
         logging.info(f"ss_metrics: {ss_metrics}")
         metrics.update(ss_metrics)        
     # --- Diversity (mean pairwise RMSD) ---

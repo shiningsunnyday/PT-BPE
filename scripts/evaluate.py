@@ -280,14 +280,14 @@ def main(args):
     for i in range(len(sorted_tokenizers)):
         t = sorted_tokenizers[i]
         p = Path(t.fname)
-        prot_id = p.stem
-        path = os.path.join(args.save_dir, f"{prot_id}.json")
-        if os.path.exists(path):
-            print(f"eval {prot_id}")
-            vals = json.load(open(path)).values()
-        else:
-            continue
-            # vals = t.bond_to_token.values()
+        # prot_id = p.stem
+        # path = os.path.join(save_dir, f"{prot_id}.json")
+        # if os.path.exists(path):
+        #     print(f"eval {t.fname}")
+        #     vals = json.load(open(path)).values()
+        # else:
+        #     continue
+        vals = t.bond_to_token.values()
         r = p.relative_to(os.getcwd())
         n = Path(p.name)
         out = Path(os.path.join('./scripts/', r, n.with_suffix('.domtblout')))
@@ -310,7 +310,7 @@ def main(args):
         else:
             continue
         
-        true_domains = [(f, to) for f, to in df[['ali_from', 'ali_to']].values]
+        true_domains = [(f, to) for f, to in df[['ali_from', 'ali_to']].values if (f > 1 or to < t.n-1)] # ignore whole-protein is one domain situations
         if not true_domains:
             continue
 
@@ -351,17 +351,26 @@ def main(args):
             obs = metrics[k]
             vals = random_stats[k]
             # +1 correction for zero counts
-            p_val = (sum(v >= obs for v in vals) + 1) / (N + 1)
+            p_val = (sum(obs >= v for v in vals) + 1) / (N + 1)            
             metrics[f"{k}_pval"] = p_val
         all_metrics.append(dict(sorted(metrics.items())))
+        if len(all_metrics) == 5:
+            break
 
     # After loop, all_metrics has p-values alongside your existing metrics.
 
+    rv = lambda v: round(100*v, 2)    
     df = pd.DataFrame(all_metrics)
-    for c in df.columns:
-        if c in ['name', 'n']:
-            continue
-        print(c, round(100*df[c].mean(), 2))
+    # for c in df.columns:
+    #     if c in ['name', 'n']:
+    #         continue
+    #     print(c, rv(df[c].mean()))
+    
+    for c in ['mean_recall', 'mean_precision', 'mean_f1', 'mean_iou', 'segment_recall', 'segment_precision', 'segment_f1', 'boundary_recall', 'boundary_precision', 'boundary_f1']:
+        avg = rv((df[c]*df['n']).sum()/df['n'].sum())
+        p_val = rv((df[c+"_pval"]*df['n']).sum()/df['n'].sum())
+        print(c, f"{avg} ({p_val})")
+        
 
 
 # def main(args):
@@ -413,6 +422,5 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pkl_file")
-    parser.add_argument("--save_dir")
     args = parser.parse_args()
     main(args)    

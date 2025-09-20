@@ -75,8 +75,10 @@ def parse_args():
     )    
 
    # sampling‐specific args:
-    parser.add_argument("--num_samples", type=int, default=2,
+    parser.add_argument("--num_samples", type=int, default=100,
                         help="How many uncdonditional sequences to sample")
+    parser.add_argument("--length_ladder", action='store_true',
+                        help="Whether to sample 10 each from lengths [50, 128)")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="Sampling softmax temperature")    
 
@@ -590,7 +592,8 @@ def sample_unconditional(
     length_prior: list[int],
     start_prior: list[int],
     num_samples: int = 1,
-    temperature: float = 1.0    
+    temperature: float = 1.0,
+    length_ladder = False
 ):
     """
     Unconditional sampling of `num_samples` sequences of total length K
@@ -645,7 +648,10 @@ def sample_unconditional(
                     raise RuntimeError(f"Could not produce valid sample {sample_idx} after {max_attempts_per_sample} tries.")
                 try:
                     # a) pick your length
-                    K = random.choice(legal_lengths)
+                    if length_ladder:
+                        K = 50+sample_idx//10 # [50, 128)
+                    else:
+                        K = random.choice(legal_lengths)
                     logging.info(
                         f"[Sample {sample_idx}:{inner_attempt}] Picked length K={K}"
                     )
@@ -822,7 +828,8 @@ def main(args):
             start_prior=start_prior,
             num_samples=args.num_samples,
             temperature=args.temperature,
-            max_len=max_len
+            max_len=max_len,
+            length_ladder=args.length_ladder
         )        
         train_pdb_files = [full_ds.fnames[item["idx"]] for item in train_ds]
         full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
@@ -941,8 +948,9 @@ def main(args):
             start_prior=start_prior,
             num_samples=args.num_samples,
             temperature=args.temperature,
-            max_len=max_len
-        )        
+            max_len=max_len,
+            length_ladder=args.length_ladder
+        )
         train_pdb_files = [full_ds.fnames[item["idx"]] for item in train_ds]
         full_coords_pfunc = functools.partial(extract_backbone_coords, atoms=["N", "CA", "C"])
         pool = mp.Pool(processes=mp.cpu_count())

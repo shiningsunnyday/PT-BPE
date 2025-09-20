@@ -77,7 +77,7 @@ if (( $3 == 1 )); then # input mode 1
 else # input mode 2  
   ckpt_info="--checkpoint_path ${4}"
   if [ -n "$5" ]; then # specify model for sampling
-    extra="--inference --model_path $5 --num_samples $6"
+    extra="--inference --model_path $5 --num_samples $6 --length_ladder"
     # load docker image for lddt
     podman load -i ost.tar
   else

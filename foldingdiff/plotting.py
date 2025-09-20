@@ -12,6 +12,7 @@ import json
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib import colors as mcolors
 import argparse
 import matplotlib.patheffects as PathEffects
 from matplotlib.colors import LogNorm
@@ -898,148 +899,371 @@ def pareto_efficient_indices(points, sense=("min", "min")):
             is_eff[i] = False
     return np.where(is_eff)[0].tolist()
 
+
+def pareto_efficient_indices_nd(points, sense):
+    """
+    Return indices of Pareto-efficient rows in `points` (n x m).
+    `sense`: list/tuple of length m with "min" or "max" per objective.
+    """
+    P = np.asarray(points, float).copy()
+    for j, s in enumerate(sense):
+        if s == "max":
+            P[:, j] = -P[:, j]  # convert 'max' to minimizing
+    n = P.shape[0]
+    eff = np.ones(n, dtype=bool)
+    for i in range(n):
+        if not eff[i]:
+            continue
+        dominated = (np.all(P <= P[i] + 1e-12, axis=1) &
+                     np.any(P <  P[i] - 1e-12, axis=1))
+        dominated[i] = False
+        if dominated.any():
+            eff[i] = False
+    return np.where(eff)[0].tolist()
+
+def set_log_xlim_with_pad(ax, xs, pad_frac=0.10):
+    xs = np.asarray(xs, float)
+    if xs.size == 0: return
+    xmin, xmax = xs.min(), xs.max()
+    ax.set_xlim(xmin/(1+pad_frac), xmax*(1+pad_frac))
+
+def human_count(n):
+    if n is None: return None
+    n = float(n)
+    if n >= 1e9: return f"{n/1e9:.0f}B"
+    if n >= 1e6: return f"{n/1e6:.0f}M"
+    if n >= 1e3: return f"{n/1e3:.0f}K"
+    return f"{int(n)}"
+
+def draw_pareto_cloud(ax, xs, ys, color, band_frac=0.06, alpha=0.18, z=1):
+    """Shaded 'cloud' around a frontier (sorted by x)."""
+    if len(xs) == 0: return
+    xs = np.asarray(xs, float); ys = np.asarray(ys, float)
+    order = np.argsort(xs)
+    xs, ys = xs[order], ys[order]
+    # de-duplicate x (keep median y)
+    uniq_x, inv = np.unique(xs, return_inverse=True)
+    agg_y = np.array([np.median(ys[inv==i]) for i in range(len(uniq_x))])
+    yrng = max(np.ptp(agg_y), 1e-6)
+    band = band_frac * yrng
+    upper = agg_y + band
+    lower = agg_y - band
+    ax.fill_between(uniq_x, lower, upper, color=mcolors.to_rgba(color, alpha),
+                    step=None, linewidth=0, zorder=z)
+
 def main():
-    parser = argparse.ArgumentParser(description="Plot (RMSD, LDDT) vs BPR Pareto front.")
-    parser.add_argument("--out", required=True, help="Output path, e.g., pareto_bpr.png/pdf/svg")
-    parser.add_argument("--dpi", type=int, default=300, help="Figure DPI (for raster formats).")
+    parser = argparse.ArgumentParser(
+        description="Two-panel Pareto plots with method curves, Pareto Fronts, and method-colored borders."
+    )
+    parser.add_argument("--out", required=True, help="Output figure path (png/pdf/svg)")
+    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--no-labels", action="store_true", help="Hide method labels")
     args = parser.parse_args()
-    # (family, label, BPR, Train(RMSD,LDDT), CAMEO(RMSD,LDDT), CASP14(RMSD,LDDT))
-    data = [
-        ("VQ-VAE",  "VQ-128",  395.92, (1.58, 0.73), (3.70, 0.57), (4.86, 0.46)),
-        ("VQ-VAE",  "VQ-256",  397.40, (1.50, 0.73), (3.65, 0.57), (4.85, 0.46)),
-        ("VQ-VAE",  "VQ-512",  399.36, (1.53, 0.73), (3.72, 0.57), (4.71, 0.46)),
-        ("VQ-VAE",  "VQ-1024", 402.28, (1.40, 0.78), (3.69, 0.60), (5.00, 0.47)),
 
-        ("AminoASeed", "AA-128", 399.76, (0.82, 0.84), (2.92, 0.66), (4.03, 0.57)),
-        ("AminoASeed", "AA-256", 401.24, (0.78, 0.85), (2.90, 0.69), (3.56, 0.60)),
-        ("AminoASeed", "AA-512", 404.84, (0.77, 0.85), (2.94, 0.69), (3.80, 0.59)),
+    # ---------------- Updated data ----------------
+    # (family, codebook, train_size, BPR, train_rmsd, train_lddt, cameo_rmsd, cameo_lddt, casp_rmsd, casp_lddt)
+    rows = [
+        ("VQ-VAE",   128,   None, 395.92, 1.58, 0.73, 3.70, 0.57, 4.86, 0.46),
+        ("VQ-VAE",   256,   None, 397.40, 1.50, 0.73, 3.65, 0.57, 4.85, 0.46),
+        ("VQ-VAE",   512,  40000, 399.36, 1.53, 0.73, 3.72, 0.57, 4.71, 0.46),
+        ("VQ-VAE",  1024,   None, 402.28, 1.40, 0.78, 3.69, 0.60, 5.00, 0.47),
 
-        ("ESM3*",    "ESM3",  2274.12, (None, None), (0.91, 0.96), (1.29, 0.93)),
+        ("AminoASeed", 128,  None, 399.76, 0.82, 0.84, 2.92, 0.66, 4.03, 0.57),
+        ("AminoASeed", 256,  None, 401.24, 0.78, 0.85, 2.90, 0.69, 3.56, 0.60),
+        ("AminoASeed", 512, 40000, 403.20, 0.77, 0.85, 2.94, 0.69, 3.80, 0.59),
+        ("AminoASeed",1024,  None, 406.11,   None,  None,   None,  None,  None,  None),  # placeholder
 
-        ("FoldSeek", "FoldSeek-20", 4.32, (None, None), (None, None), (None, None)),
-        ("ProToken", "ProToken-512", 132.90, (None, None), (None, None), (None, None)),
+        ("ESM3",     4096,   None, 2274.12,  None,  None,  0.91, 0.96, 1.29, 0.93),
+        ("FoldSeek",   20,   None, 4.32,     None,  None,   None,  None, None, None),
+        ("ProToken",  512, 552000, 132.90,   None,  None,  0.62, 0.92, 0.59, 0.90),
 
-        ("PT-BPE",   "PT-BPE-700", 36.25, (1.58, 0.73), (1.66, 0.72), (1.53, 0.72)),
+        ("PT-BPE",    600,  40000, 36.02, 1.66, 0.73, 1.77, 0.72, 1.53, 0.72),
+        ("PT-BPE",   2500,  40000, 41.11, 1.41, 0.75, 1.57, 0.74, 1.51, 0.73),
+        ("PT-BPE",   6000,  40000, 45.44, 1.37, 0.76, 1.52, 0.74, 1.54, 0.72),
+        ("PT-BPE",  21000,  40000, 47.62, 1.21, 0.77, 1.40, 0.75, 1.55, 0.72),     # placeholder
     ]
 
-    splits = ["Train", "CAMEO", "CASP14"]
-    split_colors = {"Train": "#1f77b4", "CAMEO": "#2ca02c", "CASP14": "#d62728"}
-    metric_markers = {"RMSD": "o", "LDDT": "^"}
+    # Fallback per-family sizes for label parentheses
+    fam_train_sizes = {
+        "PT-BPE": 40000, "VQ-VAE": 40000, "AminoASeed": 40000,
+        "ProToken": 552000, "ESM3": 236_000_000
+    }
 
-    # Build split series
-    per_split_rmsd = {s: {"x": [], "y": [], "labels": []} for s in splits}
-    per_split_lddt = {s: {"x": [], "y": [], "labels": []} for s in splits}
-    for fam, name, bpr, train, cameo, casp in data:
-        vals = {"Train": train, "CAMEO": cameo, "CASP14": casp}
-        for s in splits:
-            r, l = vals[s]
-            if r is not None:
-                per_split_rmsd[s]["x"].append(bpr)
-                per_split_rmsd[s]["y"].append(r)
-                per_split_rmsd[s]["labels"].append(name)
-            if l is not None:
-                per_split_lddt[s]["x"].append(bpr)
-                per_split_lddt[s]["y"].append(l)
-                per_split_lddt[s]["labels"].append(name)
+    # Group by family (method)
+    by_fam = {}
+    for fam, cb, trn, bpr, tr, tl, cr, cl, pr, pl in rows:
+        by_fam.setdefault(fam, []).append(dict(
+            codebook=cb, train_sz=trn, bpr=bpr,
+            train_rmsd=tr, train_lddt=tl,
+            cameo_rmsd=cr, cameo_lddt=cl, casp_rmsd=pr, casp_lddt=pl
+        ))
 
-    def jitter(vals, frac=0.012):
-        v = np.asarray(vals, float)
-        return v * (1.0 + frac)
+    # Method label (family + training set size)
+    def fam_label(fam):
+        sz = next((r["train_sz"] for r in by_fam[fam] if r["train_sz"] is not None), None)
+        if sz is None: sz = fam_train_sizes.get(fam)
+        return f"{fam} ({human_count(sz)})" if sz is not None else fam
 
-    # Figure / axes
-    fig = plt.figure(figsize=(7, 7))
-    ax = plt.gca()
-    ax2 = ax.twinx()
+    fam_list = list(by_fam.keys())
 
-    # Axes styling
-    ax.set_xscale("log")
-    ax.grid(True, which="both", axis="both", lw=0.4, alpha=0.35)
-    ax.set_xlabel("BPR", fontsize=12)
-    ax.set_ylabel("RMSD", fontsize=12)
-    ax2.set_ylabel("LDDT", fontsize=12)
+    # Method edge colors (borders) + label colors
+    tableau = list(mcolors.TABLEAU_COLORS.values())
+    fam_edge = {fam: tableau[i % len(tableau)] for i, fam in enumerate(fam_list)}
+    markeredgewidth = 0
+    # Split face colors (test)
+    split_face = {"CAMEO": "gold", "CASP14": "silver"}
 
-    # Plot points + labels
-    for s in splits:
-        if per_split_rmsd[s]["x"]:
-            x = np.array(per_split_rmsd[s]["x"], float)
-            y = np.array(per_split_rmsd[s]["y"], float)
-            ax.scatter(x, y, s=70, marker=metric_markers["RMSD"],
-                       edgecolor="white", linewidth=0.6, alpha=0.95,
-                       color=split_colors[s], label=f"{s} RMSD")
-            for xi, yi, lbl in zip(x, y, per_split_rmsd[s]["labels"]):
-                ax.annotate(lbl, (xi, yi), xytext=(0, 6), textcoords="offset points",
-                            fontsize=8, ha="center", va="bottom",
-                            color=split_colors[s], alpha=0.95)
+    # Emphasize PT-BPE
+    EMPHASIS_FAM = "PT-BPE"
+    EMP_LINE_WIDTH = 2.1
+    BASE_LINE_WIDTH = 1.3
+    EMP_MARKER_SCALE = 1.25
 
-        if per_split_lddt[s]["x"]:
-            x2 = jitter(per_split_lddt[s]["x"], frac=0.01)
-            y2 = np.array(per_split_lddt[s]["y"], float)
-            ax2.scatter(x2, y2, s=70, marker=metric_markers["LDDT"],
-                        edgecolor="white", linewidth=0.6, alpha=0.95,
-                        color=split_colors[s], label=f"{s} LDDT")
-            for xi, yi, lbl in zip(x2, y2, per_split_lddt[s]["labels"]):
-                ax2.annotate(lbl, (xi, yi), xytext=(0, -10), textcoords="offset points",
-                             fontsize=8, ha="center", va="top",
-                             color=split_colors[s], alpha=0.95)
+    # Build per-split series per family
+    series = {split: {fam: {"x": [], "r": [], "l": []} for fam in fam_list}
+              for split in ("CAMEO", "CASP14")}
+    train_pts = {fam: {"x_r": [], "y_r": [], "x_l": [], "y_l": []} for fam in fam_list}
 
-    # Pareto fronts as lines (no markers)
-    # Proxies so they appear in legends
-    rmsd_pareto_proxy = Line2D([0], [0], color="black", linestyle="--", linewidth=1.6,
-                               label="Pareto front (RMSD)")
-    lddt_pareto_proxy = Line2D([0], [0], color="black", linestyle=":", linewidth=1.6,
-                               label="Pareto front (LDDT)")
+    # Pareto inputs (only if both test splits exist)
+    bpr_r, cameo_rmsd, casp_rmsd = [], [], []
+    bpr_l, cameo_lddt, casp_lddt = [], [], []
 
-    for s in splits:
-        # RMSD: minimize (BPR, RMSD)
-        X = np.array(per_split_rmsd[s]["x"], float)
-        Y = np.array(per_split_rmsd[s]["y"], float)
-        if X.size:
-            eff = pareto_efficient_indices(np.c_[X, Y], sense=("min", "min"))
-            order = np.argsort(X[eff])
-            ax.plot(X[eff][order], Y[eff][order],
-                    linestyle="--", linewidth=1.6, color=split_colors[s], alpha=0.95)
+    for fam in fam_list:
+        for rec in by_fam[fam]:
+            b = rec["bpr"]
+            if b is None:  # placeholder
+                continue
+            # Train triangles
+            if rec["train_rmsd"] is not None:
+                train_pts[fam]["x_r"].append(b); train_pts[fam]["y_r"].append(rec["train_rmsd"])
+            if rec["train_lddt"] is not None:
+                train_pts[fam]["x_l"].append(b); train_pts[fam]["y_l"].append(rec["train_lddt"])
+            # Test points
+            if rec["cameo_rmsd"] is not None:
+                series["CAMEO"][fam]["x"].append(b)
+                series["CAMEO"][fam]["r"].append(rec["cameo_rmsd"])
+                series["CAMEO"][fam]["l"].append(rec["cameo_lddt"])
+            if rec["casp_rmsd"] is not None:
+                series["CASP14"][fam]["x"].append(b)
+                series["CASP14"][fam]["r"].append(rec["casp_rmsd"])
+                series["CASP14"][fam]["l"].append(rec["casp_lddt"])
+            # Pareto if both splits exist for this configuration
+            if (rec["cameo_rmsd"] is not None) and (rec["casp_rmsd"] is not None):
+                bpr_r.append(b); cameo_rmsd.append(rec["cameo_rmsd"]); casp_rmsd.append(rec["casp_rmsd"])
+            if (rec["cameo_lddt"] is not None) and (rec["casp_lddt"] is not None):
+                bpr_l.append(b); cameo_lddt.append(rec["cameo_lddt"]); casp_lddt.append(rec["casp_lddt"])
 
-        # LDDT: minimize BPR, maximize LDDT
-        X2 = np.array(per_split_lddt[s]["x"], float)
-        Y2 = np.array(per_split_lddt[s]["y"], float)
-        if X2.size:
-            eff2 = pareto_efficient_indices(np.c_[X2, Y2], sense=("min", "max"))
-            order2 = np.argsort(X2[eff2])
-            ax2.plot(jitter(X2[eff2][order2], 0.01), Y2[eff2][order2],
-                     linestyle=":", linewidth=1.6, color=split_colors[s], alpha=0.95)
+    bpr_r, cameo_rmsd, casp_rmsd = map(lambda a: np.asarray(a, float), (bpr_r, cameo_rmsd, casp_rmsd))
+    bpr_l, cameo_lddt, casp_lddt = map(lambda a: np.asarray(a, float), (bpr_l, cameo_lddt, casp_lddt))
 
-    # Legends (include Pareto-line proxies)
-    h1, l1 = ax.get_legend_handles_labels()
-    h1.append(rmsd_pareto_proxy); l1.append(rmsd_pareto_proxy.get_label())
-    first = ax.legend(h1, l1, loc="upper right", frameon=True, fontsize=9, title="RMSD markers & fronts")
-    ax.add_artist(first)
+    # Pareto (3D)
+    eff_r_idx = pareto_efficient_indices_nd(np.c_[bpr_r, cameo_rmsd, casp_rmsd],
+                                            sense=("min","min","min")) if bpr_r.size else []
+    eff_l_idx = pareto_efficient_indices_nd(np.c_[bpr_l, cameo_lddt, casp_lddt],
+                                            sense=("min","max","max")) if bpr_l.size else []
 
-    h2, l2 = ax2.get_legend_handles_labels()
-    h2.append(lddt_pareto_proxy); l2.append(lddt_pareto_proxy.get_label())
-    ax2.legend(h2, l2, loc="lower left", frameon=True, fontsize=9, title="LDDT markers & fronts")
+    # ---------- Figure ----------
+    plt.rcParams.update({
+        "figure.dpi": args.dpi, "font.size": 10.5,
+        "axes.titlesize": 12, "axes.labelsize": 11,
+        "legend.fontsize": 9, "xtick.labelsize": 10, "ytick.labelsize": 10
+    })
+    fig, (ax_r, ax_l) = plt.subplots(1, 2, figsize=(13.2, 5.4), constrained_layout=True)
+    for ax in (ax_r, ax_l):
+        ax.set_xscale("log")
+        ax.set_axisbelow(True)
+        ax.grid(True, which="major", axis="both", lw=0.6, ls=":", alpha=0.35)
+        ax.grid(True, which="minor", axis="x", lw=0.4, ls=":", alpha=0.2)
+        for s in ("top", "right"): ax.spines[s].set_visible(False)
+        ax.set_xlabel("BPR")
+    halo = [PathEffects.Stroke(linewidth=2.4, foreground="white"), PathEffects.Normal()]
 
-    # Tight x-limits based only on rows that actually have RMSD or LDDT values
-    valid_bpr = []
-    for fam, name, bpr, train, cameo, casp in data:
-        has_any = any(v is not None for v in (*train, *cameo, *casp))
-        if has_any:
-            valid_bpr.append(bpr)
-    valid_bpr = np.array(valid_bpr, float)
-    xmin, xmax = float(np.min(valid_bpr)), float(np.max(valid_bpr))
-    ax.set_xlim(xmin * 0.98, xmax * 1.05)
-    ax.margins(x=0)  # remove extra padding
+    # ------- Left: RMSD vs BPR -------
+    ax_r.set_ylabel("RMSD")
 
-    # Y limits
-    ax.set_ylim(0.6, 5.6)
-    ax2.set_ylim(0.4, 1.05)
+    # Pareto Fronts (test only)
+    if len(eff_r_idx):
+        order = np.argsort(bpr_r[eff_r_idx])
+        draw_pareto_cloud(ax_r, bpr_r[eff_r_idx][order], cameo_rmsd[eff_r_idx][order],
+                          split_face["CAMEO"], band_frac=0.06, alpha=0.18, z=1)
+        draw_pareto_cloud(ax_r, bpr_r[eff_r_idx][order], casp_rmsd[eff_r_idx][order],
+                          split_face["CASP14"], band_frac=0.06, alpha=0.18, z=1)
 
-    ax.set_title("Pareto Plot: (RMSD, LDDT) vs BPR across Train / CAMEO / CASP14",
-                 fontsize=13, pad=12)
+    # Train triangles (smaller; edge = method color, hollow fill)
+    for fam in fam_list:
+        if len(train_pts[fam]["x_r"]):
+            ax_r.scatter(train_pts[fam]["x_r"], train_pts[fam]["y_r"],
+                         s=55, marker="^", facecolor=fam_edge[fam], edgecolor=fam_edge[fam],
+                         linewidth=markeredgewidth, alpha=0.95, zorder=3)
 
-    plt.tight_layout()
+    # Method curves + test circles (edge = method color, face = split)
+    for split in ("CAMEO", "CASP14"):
+        for fam in fam_list:
+            x = np.array(series[split][fam]["x"], float)
+            y = np.array(series[split][fam]["r"], float)
+            if x.size == 0: continue
+            o = np.argsort(x); x, y = x[o], y[o]
+            lw = EMP_LINE_WIDTH if fam == EMPHASIS_FAM else BASE_LINE_WIDTH
+            z = 3 if fam == EMPHASIS_FAM else 2
+            # ax_r.plot(x, y, color=split_face[split], lw=lw, alpha=0.9, zorder=z)
+            size = 45*(EMP_MARKER_SCALE if fam == EMPHASIS_FAM else 1.0)  # smaller markers
+            ax_r.scatter(x, y, s=size, marker="o" if split == "CAMEO" else "s", facecolor=fam_edge[fam],
+                         edgecolor=fam_edge[fam], linewidth=markeredgewidth, alpha=0.96, zorder=z+0.1)
+
+    # Labels (one per method, colored by method)
+    if not args.no_labels:
+        for fam in fam_list:
+            xs = []; ys = []
+            for split in ("CAMEO","CASP14"):
+                xs += list(series[split][fam]["x"])
+                ys += list(series[split][fam]["r"])
+            if not xs: continue
+            i = int(np.argmax(xs))
+            ax_r.annotate(fam_label(fam), (xs[i], ys[i]), xytext=(6, 8),
+                          textcoords="offset points", ha="left", va="bottom",
+                          color=fam_edge[fam], fontsize=10,
+                          path_effects=halo, zorder=4)
+
+    # Legends: split (fill color semantics) + methods (edge color semantics)
+    split_handles_r = [
+        Line2D([0],[0], marker='o', color='none', markerfacecolor="white",
+               markeredgecolor='black', markersize=7, label='CAMEO (test)'),
+        Line2D([0],[0], marker='s', color='none', markerfacecolor="white",
+               markeredgecolor='black', markersize=7, label='CASP14 (test)'),
+        Line2D([0],[0], marker='^', color='none', markerfacecolor='white',
+               markeredgecolor='black', markersize=7, label='Train'),
+        Line2D([0],[0], color=mcolors.to_rgba(split_face["CAMEO"],0.35), lw=6, label='Pareto Front (CAMEO, ○)'),
+        Line2D([0],[0], color=mcolors.to_rgba(split_face["CASP14"],0.35), lw=6, label='Pareto Front (CASP14, □)'),
+    ]
+    lg1 = ax_r.legend(handles=split_handles_r, title="RMSD", loc="upper left",
+                      frameon=True, framealpha=0.9, fancybox=True, edgecolor="0.85")
+    ax_r.add_artist(lg1)
+
+    # # --- Methods legend (RMSD panel) ---
+    # method_handles = [
+    #     Line2D([0],[0], marker='o', color='none', markerfacecolor='none',
+    #         markeredgecolor=fam_edge[f], markeredgewidth=2, markersize=8,
+    #         label=fam_label(f))
+    #     for f in fam_list
+    # ]
+    # ax_r.legend(
+    #     handles=method_handles,
+    #     title="Methods (edge color)\nParentheses = train data size",
+    #     loc="upper left", frameon=True, framealpha=0.9,
+    #     fancybox=True, edgecolor="0.85", ncol=2
+    # )
+
+    # # --- Methods legend (LDDT panel) ---
+    # method_handles_l = [
+    #     Line2D([0],[0], marker='o', color='none', markerfacecolor='none',
+    #         markeredgecolor=fam_edge[f], markeredgewidth=2, markersize=8,
+    #         label=fam_label(f))
+    #     for f in fam_list
+    # ]
+    # ax_l.legend(
+    #     handles=method_handles_l,
+    #     title="Methods (edge color)\nParentheses = train data size",
+    #     loc="upper left", frameon=True, framealpha=0.9,
+    #     fancybox=True, edgecolor="0.85", ncol=2
+    # )
+
+    # Limits
+    all_x_r = [xx for s in ("CAMEO","CASP14") for f in fam_list for xx in series[s][f]["x"]]
+    set_log_xlim_with_pad(ax_r, np.array(all_x_r, float), pad_frac=0.12)
+    all_y_r = ([y for f in fam_list for y in train_pts[f]["y_r"]] +
+               [y for s in ("CAMEO","CASP14") for f in fam_list for y in series[s][f]["r"]])
+    if all_y_r:
+        ymin, ymax = min(all_y_r), max(all_y_r)
+        rng = max(ymax - ymin, 1e-6)
+        ax_r.set_ylim(max(0, ymin - 0.12*rng), ymax + 0.18*rng)
+    ax_r.set_title("RMSD vs BPR")
+
+    # ------- Right: LDDT vs BPR -------
+    ax_l.set_ylabel("LDDT")
+
+    # Pareto Fronts (test only)
+    if len(eff_l_idx):
+        order = np.argsort(bpr_l[eff_l_idx])
+        draw_pareto_cloud(ax_l, bpr_l[eff_l_idx][order], cameo_lddt[eff_l_idx][order],
+                          split_face["CAMEO"], band_frac=0.06, alpha=0.18, z=1)
+        draw_pareto_cloud(ax_l, bpr_l[eff_l_idx][order], casp_lddt[eff_l_idx][order],
+                          split_face["CASP14"], band_frac=0.06, alpha=0.18, z=1)
+
+    # Train triangles
+    for fam in fam_list:
+        if len(train_pts[fam]["x_l"]):
+            ax_l.scatter(train_pts[fam]["x_l"], train_pts[fam]["y_l"],
+                         s=55, marker="^", edgecolor=fam_edge[fam], facecolor=fam_edge[fam],
+                         linewidth=markeredgewidth, alpha=0.95, zorder=3)
+
+    # Method curves + test circles
+    for split in ("CAMEO", "CASP14"):
+        for fam in fam_list:
+            x = np.array(series[split][fam]["x"], float)
+            y = np.array(series[split][fam]["l"], float)
+            if x.size == 0: continue
+            o = np.argsort(x); x, y = x[o], y[o]
+            lw = EMP_LINE_WIDTH if fam == EMPHASIS_FAM else BASE_LINE_WIDTH
+            z = 3 if fam == EMPHASIS_FAM else 2
+            # ax_l.plot(x, y, color=split_face[split], lw=lw, alpha=0.9, zorder=z)
+            size = 45*(EMP_MARKER_SCALE if fam == EMPHASIS_FAM else 1.0)
+            ax_l.scatter(x, y, s=size, marker="o" if split == "CAMEO" else "s", facecolor=fam_edge[fam],
+                         edgecolor=fam_edge[fam], linewidth=markeredgewidth, alpha=0.96, zorder=z+0.1)
+
+    # Labels
+    if not args.no_labels:
+        for fam in fam_list:
+            xs = []; ys = []
+            for split in ("CAMEO","CASP14"):
+                xs += list(series[split][fam]["x"])
+                ys += list(series[split][fam]["l"])
+            if not xs: continue
+            i = int(np.argmax(xs))
+            ax_l.annotate(fam_label(fam), (xs[i], ys[i]), xytext=(6, 8),
+                          textcoords="offset points", ha="left", va="bottom",
+                          color=fam_edge[fam], fontsize=10,
+                          path_effects=halo, zorder=4)
+
+    # Legends
+    split_handles_l = [
+        Line2D([0],[0], marker='o', color='none', markerfacecolor="white",
+               markeredgecolor='black', markersize=7, label='CAMEO (test)'),
+        Line2D([0],[0], marker='s', color='none', markerfacecolor="white",
+               markeredgecolor='black', markersize=7, label='CASP14 (test)'),
+        Line2D([0],[0], marker='^', color='none', markerfacecolor='white',
+               markeredgecolor='black', markersize=7, label='Train'),
+        Line2D([0],[0], color=mcolors.to_rgba(split_face["CAMEO"],0.35), lw=6, label='Pareto Front (CAMEO, ○)'),
+        Line2D([0],[0], color=mcolors.to_rgba(split_face["CASP14"],0.35), lw=6, label='Pareto Front (CASP14, □)'),
+    ]
+    lg2 = ax_l.legend(handles=split_handles_l, title="LDDT", loc="best",
+                      frameon=True, framealpha=0.9, fancybox=True, edgecolor="0.85")
+    ax_l.add_artist(lg2)
+
+    # Limits
+    all_x_l = [xx for s in ("CAMEO","CASP14") for f in fam_list for xx in series[s][f]["x"]]
+    set_log_xlim_with_pad(ax_l, np.array(all_x_l, float), pad_frac=0.12)
+
+    all_y_l = ([y for f in fam_list for y in train_pts[f]["y_l"]] +
+               [y for s in ("CAMEO","CASP14") for f in fam_list for y in series[s][f]["l"]])
+    if all_y_l:
+        ymin, ymax = min(all_y_l), max(all_y_l)
+        rng = max(ymax - ymin, 1e-6)
+        ax_l.set_ylim(max(0, ymin - 0.12*rng), min(1.05, ymax + 0.18*rng))
+    ax_l.set_title("LDDT vs BPR")
+
+    # Share same BPR span
+    xmin = min(ax_r.get_xlim()[0], ax_l.get_xlim()[0])
+    xmax = max(ax_r.get_xlim()[1], ax_l.get_xlim()[1])
+    ax_r.set_xlim(xmin, xmax); ax_l.set_xlim(xmin, xmax)
+    fig.text(
+        0.5, 0.01,
+        "Note: method labels show training dataset size in parentheses (e.g., 40K = 40,000).",
+        ha="center", va="bottom", fontsize=9, color="0.35"
+    )
     plt.savefig(args.out, dpi=args.dpi, bbox_inches="tight")
-    print(f"Saved figure to: {args.out}")
+    print(f"Saved: {args.out}")
 
+    
 if __name__ == "__main__":
     # plot_losses(sys.argv[1], out_fname=sys.argv[2], simple=True)
     main()
