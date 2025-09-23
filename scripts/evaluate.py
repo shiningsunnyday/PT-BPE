@@ -310,7 +310,7 @@ def main(args):
         else:
             continue
         
-        true_domains = [(f, to) for f, to in df[['ali_from', 'ali_to']].values if (f > 1 or to < t.n-1)] # ignore whole-protein is one domain situations
+        true_domains = [(f, to) for f, to in df[['ali_from', 'ali_to']].values if (f > 1 or to < t.n-1) and (to-f+1 <= args.max_len)] # ignore whole-protein is one domain situations
         if not true_domains:
             continue
 
@@ -422,5 +422,6 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pkl_file")
+    parser.add_argument("--max_len", default=1000, type=int, help="max len true domains to consider")
     args = parser.parse_args()
     main(args)    

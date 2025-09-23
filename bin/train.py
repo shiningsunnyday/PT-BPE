@@ -649,7 +649,7 @@ def sample_unconditional(
                 try:
                     # a) pick your length
                     if length_ladder:
-                        K = 50+sample_idx//10 # [50, 128)
+                        K = 4*(50+sample_idx//10)-3 # [50, 128)
                     else:
                         K = random.choice(legal_lengths)
                     logging.info(

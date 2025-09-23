@@ -977,15 +977,15 @@ def main():
         ("FoldSeek",   20,   None, 4.32,     None,  None,   None,  None, None, None),
         ("ProToken",  512, 552000, 132.90,   None,  None,  0.62, 0.92, 0.59, 0.90),
 
-        ("PT-BPE",    600,  40000, 36.02, 1.66, 0.73, 1.77, 0.72, 1.53, 0.72),
-        ("PT-BPE",   2500,  40000, 41.11, 1.41, 0.75, 1.57, 0.74, 1.51, 0.73),
-        ("PT-BPE",   6000,  40000, 45.44, 1.37, 0.76, 1.52, 0.74, 1.54, 0.72),
-        ("PT-BPE",  21000,  40000, 47.62, 1.21, 0.77, 1.40, 0.75, 1.55, 0.72),     # placeholder
+        ("Geo-BPE",    600,  40000, 36.02, 1.66, 0.73, 1.77, 0.72, 1.53, 0.72),
+        ("Geo-BPE",   2500,  40000, 41.11, 1.41, 0.75, 1.57, 0.74, 1.51, 0.73),
+        ("Geo-BPE",   6000,  40000, 45.44, 1.37, 0.76, 1.52, 0.74, 1.54, 0.72),
+        ("Geo-BPE",  21000,  40000, 47.62, 1.21, 0.77, 1.40, 0.75, 1.55, 0.72),     # placeholder
     ]
 
     # Fallback per-family sizes for label parentheses
     fam_train_sizes = {
-        "PT-BPE": 40000, "VQ-VAE": 40000, "AminoASeed": 40000,
+        "Geo-BPE": 40000, "VQ-VAE": 40000, "AminoASeed": 40000,
         "ProToken": 552000, "ESM3": 236_000_000
     }
 
@@ -1013,8 +1013,8 @@ def main():
     # Split face colors (test)
     split_face = {"CAMEO": "gold", "CASP14": "silver"}
 
-    # Emphasize PT-BPE
-    EMPHASIS_FAM = "PT-BPE"
+    # Emphasize Geo-BPE
+    EMPHASIS_FAM = "Geo-BPE"
     EMP_LINE_WIDTH = 2.1
     BASE_LINE_WIDTH = 1.3
     EMP_MARKER_SCALE = 1.25
@@ -1256,9 +1256,9 @@ def main():
     xmax = max(ax_r.get_xlim()[1], ax_l.get_xlim()[1])
     ax_r.set_xlim(xmin, xmax); ax_l.set_xlim(xmin, xmax)
     fig.text(
-        0.5, 0.01,
+        0.48, 0.01,
         "Note: method labels show training dataset size in parentheses (e.g., 40K = 40,000).",
-        ha="center", va="bottom", fontsize=9, color="0.35"
+        ha="center", va="bottom", fontsize=10, color="0.5"
     )
     plt.savefig(args.out, dpi=args.dpi, bbox_inches="tight")
     print(f"Saved: {args.out}")

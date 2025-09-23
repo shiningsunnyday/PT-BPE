@@ -407,6 +407,7 @@ def parallel_sctm_designability(
         futures = [ex.submit(_worker_shard, t) for t in tasks]
         for fut in as_completed(futures):
             results.update(fut.result())
+            print(f"{len(results)}/{len(tasks)} done")
     return results
 
 

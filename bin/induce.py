@@ -16,7 +16,7 @@ from foldingdiff.tokenizer import Tokenizer
 from esm.utils.structure.protein_chain import ProteinChain
 from foldingdiff.plotting import get_codebook_utility
 from concurrent.futures import ProcessPoolExecutor
-from foldingdiff.utils import load_args_from_txt, validate_args_match
+from foldingdiff.utils import load_args_from_txt, validate_args_match, str2bool
 
 
 def _effective_cpus() -> int:
@@ -30,6 +30,7 @@ def _effective_cpus() -> int:
     except AttributeError:
         return os.cpu_count() or 1
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff Induction Script")
     # folder
@@ -42,6 +43,7 @@ def parse_args():
     # data params
     parser.add_argument("--toy", default=0, type=int)
     parser.add_argument("--pad", default=512, type=int)
+    parser.add_argument("--processed", type=str2bool, default=False)
     parser.add_argument("--debug", action='store_true')
     # induce args
     parser.add_argument("--append", action='store_true', help="Whether to append to src-pkl")
@@ -189,9 +191,10 @@ def main():
             print(f"skipping {i}, {struc['fname']} because of missing dihedrals")
         else:
             # detect if backbone parser matches ProteinChain.from_pdb            
-            if len(struc['angles']) == len(ProteinChain.from_pdb(struc['fname'])):
-                pargs.append((idx, struc))
-                idx += 1
+            if len(struc['angles']) == len(ProteinChain.from_pdb(struc['fname'])):           
+                if not args.processed or os.path.exists(Path(__file__).parents[1] / "scripts" / Path(struc['fname']).relative_to(os.getcwd())):
+                    pargs.append((idx, struc))
+                    idx += 1
     print(f"{idx}/{len(dataset)} match ProteinChain.from_pdb")    
     N = len(pargs)
     tokenizers = []
