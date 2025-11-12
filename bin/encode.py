@@ -204,15 +204,10 @@ def main():
     if args.save_dir:
         save_dir = Path(args.save_dir)
         name = save_dir.name
-        plot_dir = os.path.join(args.base_dir, f'./plots/learn/{name}')
-        os.makedirs(plot_dir, exist_ok=True)
         os.makedirs(save_dir, exist_ok=True)
-        setattr(args, 'plot_dir', plot_dir)
     elif args.auto:
         cur_time = time.time()
-        setattr(args, 'plot_dir', os.path.join(args.base_dir, f'./plots/learn/{cur_time}'))
         setattr(args, 'save_dir', os.path.join(args.base_dir, f'./ckpts/{cur_time}'))
-        os.makedirs(args.plot_dir, exist_ok=True)
         os.makedirs(args.save_dir, exist_ok=True)
     args_path = os.path.join(args.save_dir, "args.txt")
     if os.path.exists(args_path):
