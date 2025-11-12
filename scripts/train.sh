@@ -1,15 +1,12 @@
 #!/bin/bash
 #
-##SBATCH -p gpu_test # partition (queue)
-#SBATCH -p kempner
-#SBATCH --account kempner_mzitnik_lab
 #SBATCH -c 16 # number of cores
-#SBATCH --mem 600g # memory pool for all cores
-#SBATCH --gres=gpu:4 # gpu
+#SBATCH --mem 200g # memory pool for all cores
+#SBATCH --gres=gpu # gpu
 #SBATCH -t 3-0:00 # time (D-HH:MM)
 ##SBATCH -t 0-12:00
-#SBATCH -o /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_train.%j.out # STDOUT
-#SBATCH -e /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_train.%j.err # STDERR
+#SBATCH -o scripts/slurm/PTBPE_train.%j.out # STDOUT
+#SBATCH -e scripts/slurm/PTBPE_train.%j.err # STDERR
 
 
 # if [ $# -ne 1 ]; then
@@ -17,7 +14,11 @@
 #   exit 1
 # fi
 
-module load cuda/12.4.1-fasrc01 cudnn/9.5.1.17_cuda12-fasrc01
+CONDA_ENV=${CONDA_ENV:-GeoBPE}                 # name OR absolute path
+CONDA_BASE=$(conda info --base)
+PYTHON_BIN=${CONDA_PREFIX:-${CONDA_BASE}/envs/${CONDA_ENV}}/bin/python
+export PYTHONPATH="$PWD:$PYTHONPATH"
+runner="$PYTHON_BIN"
 
 if [ $1 -eq 1 ]; then
   debug="--debug"
@@ -76,23 +77,28 @@ if (( $3 == 1 )); then # input mode 1
   ckpt_info="--train_path $4 --valid_path $5 --output_path $6 --num_samples $7" 
 else # input mode 2  
   ckpt_info="--checkpoint_path ${4}"
-  if [ -n "$5" ]; then # specify model for sampling
-    extra="--inference --model_path $5 --num_samples $6 --length_ladder"
-    # load docker image for lddt
+  if [ -n "${5:-}" ]; then
+    extra="--inference --model_path $5 --num_samples $6"
+    if [ "${6:-}" = "780" ]; then
+      extra="$extra --length_ladder"
+    fi
     podman load -i ost.tar
   else
     extra=""
   fi
 fi
 
-export PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff
 cmd=(
-  /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/esm_env/bin/python -m bin.train \
+  $runner -m bin.train \
   $ckpt_info \
+  --wandb_team $USER \
   --labels_path "$labels_path" \
   --batch_size 8 \
   --task $task \
+  --epochs 100 \
+  --d_ff 2048 \
   $extra $debug
+  # --num_layers 32 \
 )
 echo "${cmd[@]}"
 "${cmd[@]}"

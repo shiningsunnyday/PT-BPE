@@ -1,23 +1,18 @@
 #!/bin/bash
 #
-#SBATCH -p kempner # partition (queue)
-##SBATCH -p test
-#SBATCH --account kempner_mzitnik_lab
 #SBATCH -c 16 # number of cores
 #SBATCH --mem 200g # memory pool for all cores
 #SBATCH --gres=gpu:1 # gpu
 #SBATCH -t 3-00:00 # time (D-HH:MM)
 ##SBATCH -t 0-12:00 # time (D-HH:MM)
-#SBATCH -o /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_learn.%j.out # STDOUT
-#SBATCH -e /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_learn.%j.err # STDERR
+#SBATCH -o scripts/slurm/PTBPE_learn.%j.out # STDOUT
+#SBATCH -e scripts/slurm/PTBPE_learn.%j.err # STDERR
 
-# load your bash config and (re)activate the conda env
-source ~/.bashrc
-conda deactivate || true
-conda activate esm_env
-
-# change if needed
-cd "/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff"
+CONDA_ENV=${CONDA_ENV:-GeoBPE}                 # name OR absolute path
+CONDA_BASE=$(conda info --base)
+PYTHON_BIN=${CONDA_PREFIX:-${CONDA_BASE}/envs/${CONDA_ENV}}/bin/python
+export PYTHONPATH="$PWD:$PYTHONPATH"
+runner="$PYTHON_BIN"
 
 if [ $1 -eq 1 ]; then
   debug="--debug"
@@ -44,11 +39,6 @@ vis="73 111 32 15 85"
 
 if [ -n "$9" ]; then
   SAVE_DIR=$9
-  # ID="${SAVE_DIR##*/}"
-  # SRC="/n/holylfs06/LABS/mzitnik_lab/Users/${USER}/foldingdiff/ckpts/$ID/"
-  # DST="/n/netscratch/mzitnik_lab/Lab/${USER}/$ID/"
-  # mkdir -p "$DST"
-  # rsync -av --ignore-existing "${SRC}"*.pkl "$DST"
   extra="--save-dir $9"
 else
   extra="--auto"

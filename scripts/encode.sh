@@ -1,24 +1,16 @@
 #!/bin/bash
 #
-#SBATCH -p test # partition (queue)
 #SBATCH -c 20 # number of cores
 #SBATCH --mem 500g # memory pool for all cores
 #SBATCH -t 0-12:00 # time
-#SBATCH -o /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_encode.%j.out # STDOUT
-#SBATCH -e /n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff/scripts/slurm/PTBPE_encode.%j.err # STDERR
+#SBATCH -o scripts/slurm/PTBPE_encode.%j.out # STDOUT
+#SBATCH -e scripts/slurm/PTBPE_encode.%j.err # STDERR
 
-# load your bash config and (re)activate the conda env
-# source ~/.bashrc
-# conda deactivate || true
-# conda activate /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff
-
-# change if needed
-cd "/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff"
-
-# module load ncf/1.0.0-fasrc01; module load miniconda3/4.12.0-ncf; module load python/3.10.12-fasrc01
-# conda env create --prefix /n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/foldingdiff --file environment.yml
-
-runner="/n/holylfs06/LABS/mzitnik_lab/Users/msun415/envs/esm_env/bin/python"
+CONDA_ENV=${CONDA_ENV:-GeoBPE}                 # name OR absolute path
+CONDA_BASE=$(conda info --base)
+PYTHON_BIN=${CONDA_PREFIX:-${CONDA_BASE}/envs/${CONDA_ENV}}/bin/python
+export PYTHONPATH="$PWD:$PYTHONPATH"
+runner="$PYTHON_BIN"
 
 if [ $1 -eq 1 ]; then
   echo "debug"
@@ -57,7 +49,6 @@ else
 fi
 export CUDA_VISIBLE_DEVICES=""
 export OMP_NUM_THREADS=1
-export PYTHONPATH=/n/holylfs06/LABS/mzitnik_lab/Users/msun415/foldingdiff
 cmd=(  
     $runner bin/encode.py \
     --bin-strategy $bin_strat \
@@ -69,7 +60,7 @@ cmd=(
     --data-dir $data_dir \
     --save-every $save_every \
     --plot-every $plot_every \
-    --log-dir /n/netscratch/mzitnik_lab/Lab/msun415/logs \
+    --log-dir logs \
     --pad $pad \
     --toy $toy \
     --p-min-size $p_size \
