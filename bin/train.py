@@ -23,7 +23,7 @@ from foldingdiff.metrics import *
 def parse_args():
     parser = argparse.ArgumentParser(description="Protein Motif LM Training")
     parser.add_argument(
-        "--wandb_team", type=str, default="msun415",
+        "--wandb_team", type=str, 
         help="Weights & Biases team name"
     )
     parser.add_argument(
@@ -844,8 +844,9 @@ def main(args):
             gen_pdb_files, n_devices=len(os.environ["CUDA_VISIBLE_DEVICES"]), tm_cutoff=0.5, n_designs=8
         )
         sctm_metrics = summarize_sctm(out)
+        table = wandb.Table(dataframe=pd.DataFrame(list(out.items()), columns=['pdb','sctm']))
         metrics.update(sctm_metrics)
-        wandb.log(metrics)
+        wandb.log({**metrics, "sctm_table": table})
 
         # b) Next-token on **test** split
         crit = nn.CrossEntropyLoss(ignore_index=0)       

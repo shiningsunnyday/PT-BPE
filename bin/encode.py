@@ -1,7 +1,6 @@
 from tqdm import tqdm
-import tempfile
 import imageio
-import os
+import os, pickletools
 from foldingdiff.datasets import FullCathCanonicalCoordsDataset
 from foldingdiff.bpe import *
 from foldingdiff.plotting import *
@@ -181,6 +180,25 @@ def amino_acid_sequence(fname):
     return seq
 
 
+def is_complete_pickle(path: str) -> bool:
+    """Return True iff the pickle bytecode parses to completion (STOP opcode found)."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        # Fast sanity checks
+        if not data:
+            return False
+        # Must end with STOP ('.' / 0x2E); trailing newlines are rare but tolerated by loads
+        # We'll still do a full parse below, which is the authoritative check.
+        # Parse without executing:
+        for _, _ in pickletools.genops(data):
+            pass
+        # If we get here, the stream parsed cleanly (including STOP)
+        return True
+    except (EOFError, pickle.UnpicklingError, ValueError):
+        return False
+
+
 def main():
     args = parse_args()  
     if args.save_dir:
@@ -224,7 +242,9 @@ def main():
     #         logger.info("Processing file: %s", f)
     #         all_coords.append(parse_pdb(os.path.join(cath_folder, f)))
     _iter, ckpt = -1, ""
-    for f in glob.glob(f"{args.save_dir}/bpe_iter=*.pkl"):
+    for f in glob.glob(f"{args.save_dir}/bpe_iter=*.pkl"):        
+        if not is_complete_pickle(f):
+            continue
         f = Path(f).name
         m = re.match("bpe_iter=(\d+).pkl", f)
         if m is None:

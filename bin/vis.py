@@ -2,13 +2,19 @@ import argparse
 import concurrent.futures
 import subprocess
 import pickle
+import os, sys, glob
+import pymol
+from pymol import cmd
 from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser(description="FoldingDiff Induction Script")
     # folder
     parser.add_argument("--pkl-path")
+    parser.add_argument("--pdb-dir")
     args = parser.parse_args()
+    if args.pdb_dir and args.pkl_path:
+        parser.error("only provide one of pkl-path or pdb-dir")
     return args
 
 def recurse(node):
@@ -49,30 +55,80 @@ def _run_batch(batch):
 # --------------------------------------------------------------------------
 def main():
     args = parse_args()
-    bpe = pickle.load(open(args.pkl_path, "rb"))
+    if args.pkl_path:
+        bpe = pickle.load(open(args.pkl_path, "rb"))
 
-    # pick the ten most interesting tokenizers (same logic as before)
-    selected = sorted(
-        [(i,
-          max(l for (_, _, l) in t.bond_to_token.values()),
-          -len(t.bond_to_token) / t.n)
-         for i, t in enumerate(bpe.tokenizers)],
-         key=lambda x: x[1:]
-    )[-10:]
+        # pick the ten most interesting tokenizers (same logic as before)
+        selected = sorted(
+            [(i,
+            max(l for (_, _, l) in t.bond_to_token.values()),
+            -len(t.bond_to_token) / t.n)
+            for i, t in enumerate(bpe.tokenizers)],
+            key=lambda x: x[1:]
+        )[-10:]
 
-    tasks = [(bpe.tokenizers[i], i) for i, *_ in selected]
+        tasks = [(bpe.tokenizers[i], i) for i, *_ in selected]
 
-    # split the 10 tasks across a handful of workers
-    n_workers   = min(4, len(tasks))                 # tweak as you like
-    chunk_size  = (len(tasks) + n_workers - 1) // n_workers
-    batches     = [tasks[k:k + chunk_size] for k in range(0, len(tasks), chunk_size)]
+        # split the 10 tasks across a handful of workers
+        n_workers   = min(4, len(tasks))                 # tweak as you like
+        chunk_size  = (len(tasks) + n_workers - 1) // n_workers
+        batches     = [tasks[k:k + chunk_size] for k in range(0, len(tasks), chunk_size)]
 
-    # run the batches in parallel
-    # with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
-        # pool.map(_run_batch, batches)
-    for batch in batches:
-        _run_batch(batch)
-    
-        
+        # run the batches in parallel
+        # with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+            # pool.map(_run_batch, batches)
+        for batch in batches:
+            _run_batch(batch)
+    else:
+        for f in glob.glob(f"{args.pdb_dir}/*.pdb"):
+            backbone_render_core(f, f.replace(".pdb", ".png"))
+
+def _save_png(path, width=2000, height=1500, force_no_ray=False):
+    path = os.path.abspath(os.path.expanduser(path))
+    d = os.path.dirname(path) or "."
+    if not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    try:
+        if force_no_ray:
+            raise RuntimeError("noray")
+        cmd.png(path, width=width, height=height, ray=1)
+        if not os.path.exists(path):
+            raise RuntimeError("ray PNG not created")
+        print(f"[OK] Ray-traced PNG saved: {path}")
+        return
+    except Exception as e:
+        print(f"[INFO] Ray render unavailable/failed ({e}); saving without ray…")
+        cmd.png(path, width=width, height=height, ray=0)
+        if not os.path.exists(path):
+            raise RuntimeError("non-ray PNG not created")
+        print(f"[OK] PNG saved (no ray): {path}")
+
+def backbone_render_core(input_pdb_or_id, output_png, force_no_ray=False):
+    obj = "mol"
+
+    # Load local file or fetch by 4-letter PDB ID
+    if os.path.exists(input_pdb_or_id):
+        cmd.load(input_pdb_or_id, obj)
+    else:
+        code = str(input_pdb_or_id).strip()
+        if len(code) == 4 and code.isalnum():
+            cmd.fetch(code, obj)
+        else:
+            print(f"[ERROR] '{input_pdb_or_id}' is not a file or 4-letter PDB ID.")
+            return
+
+    # Minimal style: plain cartoon on white
+    cmd.bg_color("white")
+    cmd.set("ray_opaque_background", 0)
+    cmd.hide("everything", obj)
+    cmd.show("cartoon", obj)
+    cmd.color("gray70", obj)
+
+    cmd.orient(obj)
+    cmd.zoom(obj, 1.0)
+
+    _save_png(output_png, force_no_ray=force_no_ray)
+
+
 if __name__ == "__main__":
     main()
