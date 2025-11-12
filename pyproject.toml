@@ -1,9 +1,30 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "foldingdiff"
-version = "0.0.1"
+version = "0.0.0"
+description = "Anonymous artifact for ICLR review"
 readme = "README.md"
 requires-python = ">=3.8"
+dependencies = [
+  "pandas",
+  "numpy",
+  "torch",
+  "scipy",
+  "transformers",
+  "pytorch-lightning",
+  "huggingface-hub",
+  "seaborn",
+  "mpl-scatter-density",
+  "astropy",
+  "biotite",
+  "requests"
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["foldingdiff*"]   # your package directory name(s)
