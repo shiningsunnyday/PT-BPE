@@ -2170,7 +2170,7 @@ def debug():
     from foldingdiff.datasets import FullCathCanonicalCoordsDataset
     d = "1755847933.8217926"
     i = 100
-    bpe = pickle.load(open(f"/n/netscratch/mzitnik_lab/Lab/msun415/{d}/bpe_iter={i}.pkl", "rb"))
+    bpe = pickle.load(open(f"{d}/bpe_iter={i}.pkl", "rb"))
     dataset = FullCathCanonicalCoordsDataset("pretrain", 
                                             use_cache=False,
                                             zero_center=False)    

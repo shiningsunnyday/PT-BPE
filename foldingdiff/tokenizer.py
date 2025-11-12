@@ -311,8 +311,7 @@ class Tokenizer:
     @property
     def angles_and_dists_orig(self):
         return self._angles_and_dists_orig
-    # plot_backbone([N_INIT,CA_INIT,C_INIT],'/n/home02/msun415/foldingdiff/test_before.png')
-    # plot_backbone(list(update_backbone_positions(N_INIT, CA_INIT, C_INIT, geo['CA:C'][0], geo['N:CA'][0], 0.0)),'/n/home02/msun415/foldingdiff/test_after_after.png')
+
 
     @staticmethod
     def geo_nerf(geo):

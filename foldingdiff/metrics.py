@@ -406,7 +406,9 @@ def parallel_sctm_designability(
                              mp_context=mp.get_context("spawn")) as ex:
         futures = [ex.submit(_worker_shard, t) for t in tasks]
         for fut in as_completed(futures):
-            results.update(fut.result())
+            result = fut.result()
+            print(result)
+            results.update(result)
             print(f"{len(results)}/{len(tasks)} done")
     return results
 
