@@ -6,7 +6,6 @@ import os
 import json
 import pandas as pd
 import numpy as np
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, adjusted_rand_score, mutual_info_score
 import random
 from collections import Counter
 from tqdm import tqdm
