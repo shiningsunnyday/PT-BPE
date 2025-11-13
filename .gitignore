@@ -4,7 +4,10 @@
 data/cath/*
 **/*.gz
 *.bz2
-data/struct_token_bench/*
+data/struct_token_bench/**/*.pdb
+data/struct_token_bench/**/*.fasta
+data/struct_token_bench/**/*.pkl
+data/struct_token_bench/*/**/*.jsonl
 data/alphafold/*.pdb.gz
 data/funfams/*
 data/interpro/*
