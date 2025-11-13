@@ -2,17 +2,20 @@
 #
 #SBATCH -c 16 # number of cores
 #SBATCH --mem 200g # memory pool for all cores
-#SBATCH --gres=gpu # gpu
+#SBATCH --gres=gpu:4 # gpu
 #SBATCH -t 3-0:00 # time (D-HH:MM)
 ##SBATCH -t 0-12:00
 #SBATCH -o scripts/slurm/PTBPE_train.%j.out # STDOUT
 #SBATCH -e scripts/slurm/PTBPE_train.%j.err # STDERR
 
-
-# if [ $# -ne 1 ]; then
-#   echo "Usage: $0 {1|2|3|4|5|6|7}"
-#   exit 1
-# fi
+# If CUDA_MOD or CUDNN_MOD are exported in the environment, load them;
+# otherwise do nothing.
+if [[ -n "$CUDA_MOD" ]]; then
+  module load "cuda/${CUDA_MOD}"
+fi
+if [[ -n "$CUDNN_MOD" ]]; then
+  module load "cudnn/${CUDNN_MOD}"
+fi
 
 CONDA_ENV=${CONDA_ENV:-GeoBPE}                 # name OR absolute path
 CONDA_BASE=$(conda info --base)
@@ -94,9 +97,9 @@ cmd=(
   --wandb_team $USER \
   --labels_path "$labels_path" \
   --batch_size 8 \
+  --d_model 512 --num_layers 20 --num_heads 16 --d_ff 2048 \
   --task $task \
-  --epochs 100 \
-  --d_ff 2048 \
+  --epochs 1000 \
   $extra $debug
   # --num_layers 32 \
 )

@@ -27,6 +27,7 @@ LOCAL_DATA_DIR = Path(
 
 CATH_DIR = LOCAL_DATA_DIR / "cath"
 ALPHAFOLD_DIR = LOCAL_DATA_DIR / "alphafold"
+SWISS_PROT_PDB = LOCAL_DATA_DIR / "swissprot_pdb_v6"
 HOMO_DIR = LOCAL_DATA_DIR / "struct_token_bench/homo"
 BINDINT_DIR = LOCAL_DATA_DIR / "struct_token_bench/interpro/binding"
 BINDBIO_DIR = LOCAL_DATA_DIR / "struct_token_bench/biolip2/binding"
@@ -329,8 +330,9 @@ class CathCanonicalAnglesDataset(Dataset):
         #     m, v = self.get_feature_mean_var(ft)
         #     logging.info(f"Feature {ft} mean, var: {m}, {v}")
 
+    @staticmethod
     def __get_pdb_fnames(
-        self, pdbs: Union[Literal["cath", "alphafold", "homo"], str, List[str], Tuple[str]]
+        pdbs: Union[Literal["cath", "alphafold", "homo"], str, List[str], Tuple[str]]
     ) -> List[str]:
         """Return a list of filenames for PDB structures making up this dataset"""
         if isinstance(pdbs, (list, tuple)):
@@ -398,6 +400,8 @@ class CathCanonicalAnglesDataset(Dataset):
                 fnames = glob.glob(os.path.join(CASP_DIR, "*.pdb"))
             elif pdbs == "cameo":
                 fnames = glob.glob(os.path.join(CAMEO_DIR, "*.pdb"))
+            elif pdbs == "swissprot":
+                fnames = glob.glob(os.path.join(SWISS_PROT_PDB, "*.pdb.gz"))
             else:
                 raise ValueError(f"Unknown pdb set: {pdbs}")
         # for debug

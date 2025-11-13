@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 
 from sklearn.model_selection import train_test_split
 from Bio import PDB

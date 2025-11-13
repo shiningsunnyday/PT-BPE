@@ -30,7 +30,7 @@ if [ -n "${6}" ]; then
 else
   extra=""
 fi
-if (( $3 == prevalid )); then
+if [[ "$3" == "prevalid" ]]; then
   extra="${extra} --append"
 fi
 export CUDA_VISIBLE_DEVICES=""

@@ -13,6 +13,7 @@ import subprocess
 import argparse
 import pickle
 import json
+import random
 from datetime import datetime
 import sys
 import lmdb
@@ -138,12 +139,14 @@ def parse_args():
     parser.add_argument("--cuda", default="cpu")
     parser.add_argument("--epochs", default=500, type=int, help="number of epochs")
     # hparams
-    parser.add_argument("--p_min_size", default=float("inf"), help="when to start using rmsd binning")
+    parser.add_argument("--train-frac", type=float, help="if provided, use this much of training set, for data-efficiency ablation")
     parser.add_argument("--level", default="protein", help="prediction at protein or residue level", choices=["protein", "residue"])
     parser.add_argument("--regression", type=str2bool, default=False)
     args = parser.parse_args()
     if args.dedup and args.pkl_data_file and "dedup" not in args.pkl_data_file:
         parser.error("specify pkl-data-file to path of dedup data")
+    if args.train_frac is not None and (args.train_frac > 1.0 or args.train_frac <= 0.0):
+        parser.error("train_frac should be in (0., 1.]")
     return args
 
 
@@ -605,7 +608,9 @@ def train_probe(args, train_dataset, valid_dataset, num_classes, prefix=''):
             if args.regression and val_spearman_rho > best_val:
                 best_val = val_spearman_rho
                 os.makedirs(args.save_dir, exist_ok=True)
-                checkpoint_path = os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_{epoch+1}.pt")
+                checkpoint_path = os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_{epoch+1}.pt")           
+                for old_ckpt in glob(os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_*.pt")):
+                    os.remove(old_ckpt)
                 torch.save({
                     'epoch': epoch + 1,
                     'encoder_state_dict': tree_encoder.state_dict(),
@@ -619,6 +624,8 @@ def train_probe(args, train_dataset, valid_dataset, num_classes, prefix=''):
                 best_val = val_auroc
                 os.makedirs(args.save_dir, exist_ok=True)
                 checkpoint_path = os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_{epoch+1}.pt")
+                for old_ckpt in glob(os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_*.pt")):
+                    os.remove(old_ckpt)                
                 torch.save({
                     'epoch': epoch + 1,
                     'encoder_state_dict': tree_encoder.state_dict(),
@@ -649,6 +656,8 @@ def train_probe(args, train_dataset, valid_dataset, num_classes, prefix=''):
                 best_val = val_macro_f1
                 os.makedirs(args.save_dir, exist_ok=True)
                 checkpoint_path = os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_{epoch+1}.pt")
+                for old_ckpt in glob(os.path.join(args.save_dir, f"{prefix}best_checkpoint_epoch_*.pt")):
+                    os.remove(old_ckpt)                
                 torch.save({
                     'epoch': epoch + 1,
                     'encoder_state_dict': tree_encoder.state_dict(),
@@ -835,9 +844,13 @@ def load_datasets(args):
         if os.path.exists(args.pkl_data_file):
             train_dataset, validation_dataset, test_datasets = pickle.load(open(args.pkl_data_file, 'rb'))            
             if isinstance(train_dataset, list):
+                if args.train_frac is not None:
+                    train_dataset = [Subset(d, random.sample(range(len(d)), max(1, int(len(d) * args.train_frac)))) for d in train_dataset]
                 for train, val, tests in zip(train_dataset, validation_dataset, test_datasets):
                     print(f"Train: {len(train)}, Valid: {len(val)}, Test: {[len(x[1]) for x in tests]}")
             else:
+                if args.train_frac is not None:
+                    train_dataset = Subset(train_dataset, random.sample(range(len(train_dataset)), max(1, int(len(train_dataset) * args.train_frac))))
                 print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
             return train_dataset, validation_dataset, test_datasets
         # train = LMDBDataset('data/remote_homology_raw/remote_homology_train.lmdb')
@@ -903,6 +916,8 @@ def load_datasets(args):
             print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
         if args.pkl_data_file:
             pickle.dump((train_datasets, validation_datasets, tests_datasets), open(args.pkl_data_file, 'wb+'))
+        if args.train_frac is not None:
+            train_datasets = [Subset(d, random.sample(range(len(d)), max(1, int(len(d) * args.train_frac)))) for d in train_datasets]
         return train_datasets, validation_datasets, tests_datasets            
     else:
         datasets = {}
@@ -914,6 +929,8 @@ def load_datasets(args):
         train_dataset, validation_dataset = datasets["train_dataset"], datasets["validation_dataset"]
         if args.pkl_data_file:
             pickle.dump((train_dataset, validation_dataset, test_datasets), open(args.pkl_data_file, 'wb+'))        
+        if args.train_frac is not None:
+            train_dataset = Subset(train_dataset, random.sample(range(len(train_dataset)), max(1, int(len(train_dataset) * args.train_frac))))
         print(f"Train: {len(train_dataset)}, Valid: {len(validation_dataset)}, Test: {[len(x[1]) for x in test_datasets]}")
         return train_dataset, validation_dataset, test_datasets
 
@@ -944,8 +961,8 @@ def main(args):
         test_probe(args, test_datasets, num_classes=45)
     else:
         if not args.test:
-            train_probe(args, train_dataset, valid_dataset, num_classes=train_dataset.num_classes)
-        test_probe(args, test_datasets, num_classes=train_dataset.num_classes)
+            train_probe(args, train_dataset, valid_dataset, num_classes=1)
+        test_probe(args, test_datasets, num_classes=1)
     
 
 if __name__ == "__main__":    

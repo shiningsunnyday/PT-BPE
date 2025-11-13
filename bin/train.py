@@ -13,6 +13,7 @@ import wandb
 from collections import Counter
 import random
 import logging
+import time
 from tqdm import tqdm
 from foldingdiff.datasets import extract_backbone_coords
 from foldingdiff.tokenizer import *
@@ -767,7 +768,7 @@ def main(args):
         else:
             train_ds, val_ds, test_ntp_ds = split_dataset(full_ds, args.seed)        
     else:
-        save_dir = Path(args.train_path).parent
+        save_dir = Path(args.train_path).parent / f"{time.time()}"
         train = json.load(open(args.train_path))
         valid = json.load(open(args.valid_path))
         vocab_size = max(sum(train+valid, []))+1
@@ -807,6 +808,11 @@ def main(args):
         vocab_size, args.d_model, args.num_layers,
         args.num_heads, args.d_ff, max_len
     ).to(device)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {total_params}")
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = nn.DataParallel(model)        
 
     # Inference mode?  Load weights and skip training
     if args.inference:
@@ -920,7 +926,8 @@ def main(args):
             # end‐of‐epoch checkpoint
             ckpt = f"{save_dir}/ckpt_epoch{epoch}.pt"
             best_path = ckpt
-            torch.save(model.state_dict(), ckpt)
+            to_save = model.module if isinstance(model, nn.DataParallel) else model
+            torch.save(to_save.state_dict(), ckpt)
             wandb.save(ckpt)
         else:
             epochs_no_improve += 1
@@ -934,7 +941,11 @@ def main(args):
 
     if args.checkpoint_path:   
         # repeats inference mode, can wrap this into a function             
-        model.load_state_dict(torch.load(best_path, map_location=device))
+        state = torch.load(best_path, map_location=device)
+        model.load_state_dict(state)
+        if torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
+        model = model.to(device)
         logging.info(f"loaded model from {best_path}")
         length_prior = [len(seq) for seq in full_ds.seqs]
         start_prior = [seq[0] for seq in full_ds.seqs]  

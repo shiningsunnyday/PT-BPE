@@ -22,8 +22,8 @@ fi
 
 # train
 
-if [ $# -ne 3 ]; then
-  echo "Usage: $0 {0|1} {1|2|..|10} {pkl_file}"
+if [[ $# -ne 3 && $# -ne 4 ]]; then
+  echo "Usage: $0 {0|1} {1|2|..|10} {pkl_file} [train-frac]"
   exit 1
 fi
 
@@ -64,12 +64,13 @@ case "$2" in
     ;;  
   *)
     echo "Invalid option: $2"
-    echo "Usage: $0 {1|2|...|10} {pkl_file}"
+    echo "Usage: $0 {1|2|...|10} {pkl_file} [train-frac]"
     exit 1
     ;;
 esac
 
 pkl_file=$3
+train_frac=${4:-}
 cmd=(
   $runner -m bin.predict \
   --cuda cuda:0 \
@@ -82,5 +83,8 @@ cmd=(
   # --test \
   # --save-dir ${ckpt_dir} \
 )
+if [[ -n "$train_frac" ]]; then
+  cmd+=( --train-frac "$train_frac" )
+fi
 echo "${cmd[@]}"
 "${cmd[@]}"
