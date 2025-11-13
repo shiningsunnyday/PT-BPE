@@ -8,24 +8,25 @@ import json
 import biotite.structure.io.pdb as pdbio
 import biotite.structure as struc
 
-args = argparse.ArgumentParser()
-args.add_argument(
+parser = argparse.ArgumentParser()
+parser.add_argument(
     "--data_file",
     type=str,
 )
-args.add_argument(
+parser.add_argument(
     "--output_dir",
     type=str,
     default="pdb_files",
     help="Directory to save the downloaded PDB files.",
 )
-args.add_argument(
+parser.add_argument(
     "--num_workers",
     type=int,
     default=8,
     help="Number of parallel workers for downloading.",
 )
-args = args.parse_args()
+args = parser.parse_args()
+
 
 with open(args.data_file, "r") as f:
     data = [json.loads(line) for line in f.readlines()]
@@ -41,6 +42,7 @@ for item in data:
         assert "pdb_path" in item
         p = Path(item["pdb_path"])
         pdb_id, chain_id = p.stem.split("_")
+        assert Path(item["pdb_path"]).parent == args.output_dir
 
 os.makedirs(args.output_dir, exist_ok=True)
 
