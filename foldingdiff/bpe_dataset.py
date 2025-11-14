@@ -1026,9 +1026,16 @@ class ResidueDataset(MyDataset):
                 prot, chain = sample['pdb_id'], sample['chain_id']                
             else:
                 # load up pdb_chain
-                pdb_path = sample['pdb_path']
-                pdb_chain = ProteinChain.from_pdb(pdb_path)
-                prot, chain = Path(pdb_path).stem.split('_')
+                pdb_path = Path("data/struct_token_bench") / sample['pdb_path']
+                if not pdb_path.exists():
+                    print(pdb_path, "was not downloaded, skipping")
+                    continue
+                try:
+                    pdb_chain = ProteinChain.from_pdb(str(pdb_path))
+                except:
+                    print(str(pdb_path), "failed to parse, skipping")
+                    continue
+                prot, chain = pdb_path.stem.split('_')
             key = f"{prot}_{chain}" if len(chain) else prot
             if key in mapping:
                 i = mapping[key]
@@ -1043,7 +1050,7 @@ class ResidueDataset(MyDataset):
                     breakpoint()
                 if tokenizers[i].n != len(sample[label_key]):
                     # check residue_index
-                    breakpoint()
+                    print(f"length mismatch between {pdb_path} and tokenizer, skipping")
                     continue
                 sample['residue_label'] = sample[label_key]                
                 my_data.append((prot, chain, tokenizers[i], sample))

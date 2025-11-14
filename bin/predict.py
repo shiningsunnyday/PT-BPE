@@ -928,6 +928,7 @@ def load_datasets(args):
         test_datasets = [(split, datasets[f"{split}_dataset"]) for split in test_splits]   
         train_dataset, validation_dataset = datasets["train_dataset"], datasets["validation_dataset"]
         if args.pkl_data_file:
+            os.makedirs(Path(args.pkl_data_file).parent, exist_ok=True)
             pickle.dump((train_dataset, validation_dataset, test_datasets), open(args.pkl_data_file, 'wb+'))        
         if args.train_frac is not None:
             train_dataset = Subset(train_dataset, random.sample(range(len(train_dataset)), max(1, int(len(train_dataset) * args.train_frac))))

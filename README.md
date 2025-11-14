@@ -19,20 +19,20 @@ cd data/struct_token_bench
 
 source=InterProFunctionDataset
 ds=(binding activesite conservedsite repeat)
-for $d in "${ds[@]}"; do for f in "${source}_{$d}*.jsonl"; do python download_pdbs.py --data_file $f --output_dir "interpro/$d$"; done; done
+for d in "${ds[@]}"; do for f in ${source}_${d}*.jsonl; do python download_pdbs.py --data_file "$f" --output_dir "interpro/$d"; done; done
 
 source=BioLIP2FunctionDataset
 ds=(binding catalytic)
-for $d in "${ds[@]}"; do for f in "${source}_{$d}*.jsonl"; do python download_pdbs.py --data_file $f --output_dir "biolip2/$d$"; done; done
+for d in "${ds[@]}"; do for f in ${source}_${d}*.jsonl; do python download_pdbs.py --data_file "$f" --output_dir "biolip2/$d"; done; done
 
 source=ProteinGLUEEpitopeRegionDataset
-for f in "${source}*.jsonl"; do python download_pdbs.py --data_file $f --output_dir "proteinglue"; done
+for f in ${source}*.jsonl; do python download_pdbs.py --data_file "$f" --output_dir "proteinglue"; done
 
 source=ProteinShakeBindingSiteDataset
-for f in "${source}*.jsonl"; do python download_pdbs.py --data_file $f --output_dir "proteinshake"; done
+for f in ${source}*.jsonl; do python download_pdbs.py --data_file "$f" --output_dir "proteinshake"; done
 
 source=TapeRemoteHomologyDataset
-for f in "${source}*.jsonl"; do python download_pdbs.py --data_file $f --output_dir "homo"; done
+for f in ${source}*.jsonl; do python download_pdbs.py --data_file "$f" --output_dir "homo"; done
 ```
 
 ## Run GeoBPE
@@ -40,8 +40,11 @@ for f in "${source}*.jsonl"; do python download_pdbs.py --data_file $f --output_
 ### Learn tokenizer with PDB pretrain train set
 
 ```bash
-# go to repo root
-./scripts/encode.sh 0 300 100 1 pretrain '1-500' histogram 5 5 false 0 2-100:3-500:5-20:6-100:8-5:9-20:11-1:12-5:14-1 5000 false 1.0 all true true 10 10000 # slurm ready; prepend sbatch settings if using
+# suggested setting for downstream transfer experiments
+./scripts/encode.sh 0 0 3 3 pretrain '1-50' histogram 5 5 false 0 2-2:3-5:5-1:6-2:8-1 500 true 0.0 all true true 10 1000 # slurm ready; prepend sbatch settings if using
+
+# suggested setting for pareto-optimal compression-reconstruction
+./scripts/encode.sh 0 0 3 3 pretrain '1-500' histogram 5 5 false 0 2:100,3:500,5:20,6:100,8:5,9:20,11:1,12:5,14:1 500 true 1.0 all true true 1 1000
 ```
 
 Each run creates a folder `ckpts/$d` (e.g. `ckpts/1763070917.6459317`) containing periodic tokenizer checkpoints (`bpe_iter=$iter.pkl`), visualizations, and metrics. You can monitor the running statistics (files matching `*=$iter*`) and stop when desired vocabulary size / token size / segmentation lengths is hit. A suggested stopping iteration (based on LLM scaling heuristic) is marked in `run_iter=$iter.png`.

@@ -42,7 +42,8 @@ for item in data:
         assert "pdb_path" in item
         p = Path(item["pdb_path"])
         pdb_id, chain_id = p.stem.split("_")
-        assert Path(item["pdb_path"]).parent == args.output_dir
+        assert p.parent == Path(args.output_dir), f"{p.parent} != {args.output_dir}"
+        pdb_ids.append((pdb_id, chain_id))
 
 os.makedirs(args.output_dir, exist_ok=True)
 
