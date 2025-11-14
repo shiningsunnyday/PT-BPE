@@ -97,11 +97,10 @@ cmd=(
   --wandb_team $USER \
   --labels_path "$labels_path" \
   --batch_size 8 \
-  --d_model 512 --num_layers 20 --num_heads 16 --d_ff 2048 \
+  # --d_model 512 --num_layers 20 --num_heads 16 --d_ff 2048 \
   --task $task \
   --epochs 1000 \
   $extra $debug
-  # --num_layers 32 \
 )
 echo "${cmd[@]}"
 "${cmd[@]}"
