@@ -34,6 +34,7 @@ for f in ${source}*.jsonl; do python download_pdbs.py --data_file "$f" --output_
 source=TapeRemoteHomologyDataset
 for f in ${source}*.jsonl; do python download_pdbs.py --data_file "$f" --output_dir "homo"; done
 ```
+For a quick smoke test, use `proteinglue` (ept).
 
 ## Run GeoBPE
 
@@ -44,7 +45,7 @@ for f in ${source}*.jsonl; do python download_pdbs.py --data_file "$f" --output_
 ./scripts/encode.sh 0 0 3 3 pretrain '1-50' histogram 5 5 false 0 2-2:3-5:5-1:6-2:8-1 500 true 0.0 all true true 10 1000 # slurm ready; prepend sbatch settings if using
 
 # suggested setting for pareto-optimal compression-reconstruction
-./scripts/encode.sh 0 0 3 3 pretrain '1-500' histogram 5 5 false 0 2:100,3:500,5:20,6:100,8:5,9:20,11:1,12:5,14:1 500 true 1.0 all true true 1 1000
+./scripts/encode.sh 0 0 3 3 pretrain '1-500' histogram 5 5 false 0 2-100:3-500:5-20:6-100:8-5:9-20:11-1:12-5:14-1 500 true 1.0 all true true 1 1000
 ```
 
 Each run creates a folder `ckpts/$d` (e.g. `ckpts/1763070917.6459317`) containing periodic tokenizer checkpoints (`bpe_iter=$iter.pkl`), visualizations, and metrics. You can monitor the running statistics (files matching `*=$iter*`) and stop when desired vocabulary size / token size / segmentation lengths is hit. A suggested stopping iteration (based on LLM scaling heuristic) is marked in `run_iter=$iter.png`.
@@ -60,6 +61,7 @@ Each run creates another folder `ckpts/$dval` and the tokenized structures are s
 
 ### Encode Task-Specific Dataset with Tokenizer at Iteration $iter.
 
+After downloading the structures, run:
 ```bash
 ./scripts/induce.sh 0 0 {bindint|bindbio|catint|catbio|conserved|repeat|ept|atlas|bindshake|homo} ckpts/$d/bpe_iter=$iter.pkl false
 ```
@@ -68,6 +70,7 @@ Each run creates another folder `ckpts/$dtask` and the tokenized structures are 
 
 ### Downstream Transfer Prediction Tasks
 
+Tasks 1, 2, ..., 10 correspond to the order above (1 for bindint, ..., 10 for homo). Make sure the dataset is encoded first.
 ```bash
 ./scripts/predict.sh 0 {1|2|..|10} ckpts/$dtask/bpe_iter=$iter.pkl
 ```
@@ -76,8 +79,14 @@ Each run creates another folder `ckpts/$dtask` and the tokenized structures are 
 
 Make sure prevalid is encoded first (command above).
 
+Train a small LM (adapt hyperparams as necessary):
 ```bash
-./scripts/train.sh 0 0 {bindint|bindbio|catint|catbio|conserved|repeat|ept|atlas|bindshake|homo} ckpts/$dval/bpe_iter=$iter.pkl false
+./scripts/train.sh 0 8 0 ckpts/$dval/bpe_post_init.pkl
+```
+
+Pick the latest best ckpt. Sample and compute generative metrics:
+```bash
+./scripts/train.sh 0 8 0 ckpts/$dval/bpe_post_init.pkl ckpts/$dval/ckpt_epoch${epoch}.pt 1 # this samples 1 backbone, change to as many as you like
 ```
 
 ### Run VQ-VAE baselines (with our SSLM eval loop)
