@@ -48,8 +48,6 @@ gpu_lock = threading.Lock()
 client = ESMC.from_pretrained("esmc_300m").to("cuda") # or "cpu"
 
 def pad_structures(items, constant_value=0, dtype=None, truncation_length=600, pad_length=None):
-    """Reference to TAPE https://github.com/songlab-cal/tape/blob/6d345c2b2bbf52cd32cf179325c222afd92aec7e/tape/datasets.py#L37
-    """
     batch_size = len(items)
     if isinstance(items[0], List):
         items = [torch.tensor(x) for x in items]
