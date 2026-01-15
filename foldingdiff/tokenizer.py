@@ -3,13 +3,9 @@ from foldingdiff.angles_and_coords import *
 from foldingdiff.data_structures import *
 from foldingdiff.algo import compute_rmsd, kabsch
 from foldingdiff.nerf import *
-from foldingdiff.plotting import plot_backbone
+# from foldingdiff.plotting import plot_backbone
 from types import SimpleNamespace
-from itertools import starmap
 from copy import deepcopy
-import tempfile
-import imageio
-import time
 import logging
 import pickle
 from pathlib import Path
