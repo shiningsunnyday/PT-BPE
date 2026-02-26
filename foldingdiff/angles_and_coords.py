@@ -66,6 +66,119 @@ MINIMAL_ANGLES = ["phi", "psi", "omega"]
 MINIMAL_DISTS = []
 
 
+## biotite 0.34 functions
+
+def filter_backbone(array):
+    """
+    Filter all peptide backbone atoms of one array.
+
+    This includes the "N", "CA" and "C" atoms of amino acids.
+
+    Parameters
+    ----------
+    array : AtomArray or AtomArrayStack
+        The array to be filtered.
+
+    Returns
+    -------
+    filter : ndarray, dtype=bool
+        This array is `True` for all indices in `array`, where the atom
+        as an backbone atom.
+    """
+    return ( ((array.atom_name == "N") |
+              (array.atom_name == "CA") |
+              (array.atom_name == "C")) &
+              filter_amino_acids(array) )
+
+
+
+def dihedral_backbone(atom_array):
+    """
+    Measure the characteristic backbone dihedral angles of a protein
+    structure.
+    
+    Parameters
+    ----------
+    atom_array: AtomArray or AtomArrayStack
+        The protein structure. A complete backbone, without gaps,
+        is required here.
+        Chain transitions are allowed, the angles at the transition are
+        `NaN`.
+        The order of the backbone atoms for each residue must be
+        (N, CA, C).
+    
+    Returns
+    -------
+    phi, psi, omega : ndarray
+        An array containing the 3 backbone dihedral angles for every
+        CA. 'phi' is not defined at the N-terminus, 'psi' and 'omega'
+        are not defined at the C-terminus. In these places the arrays
+        have *NaN* values. If an :class:`AtomArrayStack` is given, the
+        output angles are 2-dimensional, the first dimension corresponds
+        to the model number.
+    
+    Raises
+    ------
+    BadStructureError
+        If the amount of backbone atoms is not equal to amount of
+        residues times 3 (for N, CA and C).
+    
+    See Also
+    --------
+    dihedral
+    
+    Examples
+    --------
+    
+    >>> phi, psi, omega = dihedral_backbone(atom_array)
+    >>> print(np.stack([np.rad2deg(phi), np.rad2deg(psi)]).T)
+    [[     nan  -56.145]
+     [ -43.980  -51.309]
+     [ -66.466  -30.898]
+     [ -65.219  -45.945]
+     [ -64.747  -30.346]
+     [ -73.136  -43.425]
+     [ -64.882  -43.255]
+     [ -59.509  -25.698]
+     [ -77.989   -8.823]
+     [ 110.784    8.079]
+     [  55.244 -124.371]
+     [ -57.983  -28.766]
+     [ -81.834   19.125]
+     [-124.057   13.401]
+     [  67.931   25.218]
+     [-143.952  131.297]
+     [ -70.100  160.068]
+     [ -69.484  145.669]
+     [ -77.264  124.223]
+     [ -78.100      nan]]
+    """
+    bb_filter = filter_backbone(atom_array)
+    backbone = atom_array[..., bb_filter]
+    
+    if backbone.array_length() % 3 != 0 \
+        or (backbone.atom_name[0::3] != "N" ).any() \
+        or (backbone.atom_name[1::3] != "CA").any() \
+        or (backbone.atom_name[2::3] != "C" ).any():
+            raise BadStructureError(
+                "The backbone is invalid, must be repeats of (N, CA, C), "
+                "maybe a backbone atom is missing"
+            )
+    phis = []
+    psis = []
+    omegas = []
+    for chain_bb in chain_iter(backbone):
+        phi, psi, omega = _dihedral_backbone(chain_bb)
+        phis.append(phi)
+        psis.append(psi)
+        omegas.append(omega)
+    return np.concatenate(phis, axis=-1), np.concatenate(psis, axis=-1), \
+        np.concatenate(omegas, axis=-1)
+
+
+## biotite 0.34 functions end
+
+
 def canonical_distances_and_dihedrals(
     fname: str,
     distances: List[str] = MINIMAL_DISTS,
@@ -85,10 +198,10 @@ def canonical_distances_and_dihedrals(
     source_struct = source.get_structure(model=1)
     # First get the dihedrals
     try:        
-        phi, psi, omega = struc.dihedral_backbone(source_struct)
+        phi, psi, omega = dihedral_backbone(source_struct)
         calc_angles = {"phi": phi, "psi": psi, "omega": omega}
         if (psi==psi).sum() < len(psi)-1:
-            phi, psi, omega = struc.dihedral_backbone(source_struct)
+            phi, psi, omega = dihedral_backbone(source_struct)
     except struc.BadStructureError:
         logging.debug(f"{fname} contains a malformed structure - skipping")
         return None
@@ -97,7 +210,7 @@ def canonical_distances_and_dihedrals(
     non_dihedral_angles = [a for a in angles if a not in calc_angles]
     # Gets the N - CA - C for each residue
     # https://www.biotite-python.org/apidoc/biotite.structure.filter_backbone.html
-    backbone_atoms = source_struct[struc.filter_backbone(source_struct)]
+    backbone_atoms = source_struct[filter_backbone(source_struct)]
     for a in non_dihedral_angles:
         if a == "tau" or a == "N:CA:C":
             # tau = N - CA - C internal angles
@@ -395,7 +508,7 @@ def get_pdb_length(fname: str) -> int:
     if structure.get_model_count() > 1:
         return -1
     chain = structure.get_structure()[0]
-    backbone = chain[struc.filter_backbone(chain)]
+    backbone = chain[filter_backbone(chain)]
     l = int(len(backbone) / 3)
     return l
 
@@ -423,7 +536,7 @@ def extract_backbone_residue_idxes(
     # if structure.get_model_count() > 1:
     #     return None
     chain = structure.get_structure(1, extra_fields=["atom_id"])
-    backbone = chain[struc.filter_backbone(chain)]
+    backbone = chain[filter_backbone(chain)]
     ca = [c for c in backbone if c.atom_name in atoms]
     idxes = [c.res_id for c in backbone if c.atom_name in atoms]
     # has 3 atoms per residue and residue id is increasing
@@ -443,7 +556,7 @@ def extract_backbone_coords(
     # if structure.get_model_count() > 1:
     #     return None
     chain = structure.get_structure(1)
-    backbone = chain[struc.filter_backbone(chain)]
+    backbone = chain[filter_backbone(chain)]
     ca = [c for c in backbone if c.atom_name in atoms]
     coords = [c.coord for c in ca]
     if len(coords) == 0:
@@ -493,7 +606,7 @@ def extract_c_beta_coords(fname):
     atoms = atom_stack if isinstance(atom_stack, struc.AtomArray) else atom_stack[0]
 
     # 1) Replicate extract_aa_seq’s residue ordering
-    bb_mask = struc.filter_backbone(atoms)
+    bb_mask = filter_backbone(atoms)
     backbone = atoms[bb_mask]
     has_ic = "ins_code" in backbone.get_annotation_categories()
     ins_codes = backbone.ins_code if has_ic else [""] * backbone.array_length()
@@ -557,7 +670,7 @@ def extract_aa_seq(fname):
     # Pull out the atomarray from atomarraystack
     source_struct = source.get_structure(model=1)
     # keep caller’s line intact – grab first model as an AtomArray
-    backbone_atoms = source_struct[struc.filter_backbone(source_struct)]
+    backbone_atoms = source_struct[filter_backbone(source_struct)]
     return aa_seq_from_backbone(backbone_atoms)
 
 
@@ -581,6 +694,17 @@ def frame_from_triad(N, CA, C):
     R = np.stack([x, y, z], axis=1)
     t = CA.copy()
     return R, t
+
+
+def frame_from_triad_(N, CA, C):
+    v1 = N - CA
+    v2 = C - CA
+    e1 = v1 / np.linalg.norm(v1)
+    v2_orth = v2 - np.dot(v2, e1) * e1
+    e2 = v2_orth / np.linalg.norm(v2_orth)
+    e3 = np.cross(e1, e2)
+    F0 = np.stack([e1, e2, e3], axis=1)  # (3,3), columns are basis vectors    
+    return F0, CA
 
 
 def frame_from_triad_torch(N: torch.Tensor,
@@ -782,7 +906,7 @@ def collect_aa_sidechain_angles(
             continue
         if residue in retval:
             continue
-        backbone_mask = struc.filter_backbone(res_atoms)
+        backbone_mask = filter_backbone(res_atoms)
         a, b, c = res_atoms[backbone_mask].coord  # Backbone
         for sidechain_atom in res_atoms[~backbone_mask]:
             d = sidechain_atom.coord
