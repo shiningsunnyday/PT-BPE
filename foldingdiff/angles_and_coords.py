@@ -68,6 +68,23 @@ MINIMAL_DISTS = []
 
 ## biotite 0.34 functions
 
+def filter_amino_acids(array):
+    """
+    Filter all atoms of one array that belong to amino acid residues.
+
+    Parameters
+    ----------
+    array : AtomArray or AtomArrayStack
+        The array to be filtered.
+
+    Returns
+    -------
+    filter : ndarray, dtype=bool
+        This array is `True` for all indices in `array`, where the atom
+        belongs to an amino acid residue.
+    """
+    return ( np.in1d(array.res_name, _ext_aa_list) & (array.res_id != -1) )
+
 def filter_backbone(array):
     """
     Filter all peptide backbone atoms of one array.
