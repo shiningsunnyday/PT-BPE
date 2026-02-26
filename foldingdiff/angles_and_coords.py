@@ -68,6 +68,10 @@ MINIMAL_DISTS = []
 
 ## biotite 0.34 functions
 
+_ext_aa_list = ["ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE",
+                "LEU","LYS","MET","PHE","PRO","SER","THR","TRP","TYR","VAL",
+                "MSE", "ASX", "GLX", "SEC", "UNK"]
+                
 def filter_amino_acids(array):
     """
     Filter all atoms of one array that belong to amino acid residues.
