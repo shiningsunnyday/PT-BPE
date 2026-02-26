@@ -210,9 +210,9 @@ def _dihedral_backbone(chain_bb):
     # Dim 1: Angle index
     # Dim 2: X, Y, Z coordinates
     # Dim 3: Atoms involved in dihedral angle
-    if isinstance(chain_bb, AtomArray):
+    if isinstance(chain_bb, struc.AtomArray):
         angle_coord_shape = (len(bb_coord)//3, 3, 4)
-    elif isinstance(chain_bb, AtomArrayStack):
+    elif isinstance(chain_bb, struc.AtomArrayStack):
         angle_coord_shape = (bb_coord.shape[0], bb_coord.shape[1]//3, 3, 4)
     phi_coord   = np.full(angle_coord_shape, np.nan)
     psi_coord   = np.full(angle_coord_shape, np.nan)
