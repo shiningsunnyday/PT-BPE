@@ -71,7 +71,97 @@ MINIMAL_DISTS = []
 _ext_aa_list = ["ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE",
                 "LEU","LYS","MET","PHE","PRO","SER","THR","TRP","TYR","VAL",
                 "MSE", "ASX", "GLX", "SEC", "UNK"]
-                
+
+
+def get_chain_starts(array, add_exclusive_stop=False):
+    """
+    Get the indices in an atom array, which indicates the beginning of
+    a new chain.
+    
+    A new chain starts, when the chain ID changes or when the residue ID
+    decreases.
+    
+    Parameters
+    ----------
+    array : AtomArray or AtomArrayStack
+        The atom array (stack) to get the chain starts from.
+    add_exclusive_stop : bool, optional
+        If true, the exclusive stop of the input atom array, i.e.
+        ``array.array_length()``, is added to the returned array of
+        start indices as last element.
+        
+    Returns
+    -------
+    starts : ndarray, dtype=int
+        The start indices of new chains in `array`.
+    
+    Notes
+    -----
+    This method is internally used by all other chain-related
+    functions.
+    
+    See also
+    --------
+    get_residue_starts
+    """
+    diff = np.diff(array.res_id)
+    res_id_decrement = diff < 0
+    # This mask is 'true' at indices where the value changes
+    chain_id_changes = (array.chain_id[1:] != array.chain_id[:-1])
+    
+    # Convert mask to indices
+    # Add 1, to shift the indices from the end of a chain
+    # to the start of a new chain
+    chain_starts = np.where(res_id_decrement | chain_id_changes)[0] + 1
+    
+    # The first chain is not included yet -> Insert '[0]'
+    if add_exclusive_stop:
+        return np.concatenate(([0], chain_starts, [array.array_length()]))
+    else:
+        return np.concatenate(([0], chain_starts))
+
+
+
+def segment_iter(array, starts):
+    """
+    Generalized version of :func:`residue_iter()`
+    for residues and chains.
+
+    Parameters
+    ----------
+    starts : ndarray, dtype=int
+        The sorted start indices of segments.
+        Includes exclusive stop, i.e. the length of the corresponding
+        atom array.
+    """
+    for i in range(len(starts)-1):
+        yield array[..., starts[i] : starts[i+1]]
+
+
+
+def chain_iter(array):
+    """
+    Iterate over all chains in an atom array (stack).
+    
+    Parameters
+    ----------
+    array : AtomArray or AtomArrayStack
+        The atom array (stack) to iterate over.
+        
+    Yields
+    ------
+    chain : AtomArray or AtomArrayStack
+        A single chain of the input `array`.
+    
+    See also
+    --------
+    residue_iter
+    """
+    starts = get_chain_starts(array, add_exclusive_stop=True)
+    return segment_iter(array, starts)
+
+
+
 def filter_amino_acids(array):
     """
     Filter all atoms of one array that belong to amino acid residues.
