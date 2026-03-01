@@ -1,6 +1,7 @@
 # Protein Geometric Byte Pair Encoding
-[![Preprint](https://img.shields.io/badge/Arxiv-red)](https://arxiv.org/abs/2511.11758)
-[![OpenReview](https://img.shields.io/badge/OpenReview-blue)](https://openreview.net/forum?id=55e5f3GVFc)
+[![Pip](https://img.shields.io/badge/Pip-blue)](https://pypi.org/project/GeoBPE/0.1.0/)
+[![Preprint](https://img.shields.io/badge/Arxiv-green)](https://arxiv.org/abs/2511.11758)
+[![OpenReview](https://img.shields.io/badge/OpenReview-red)](https://openreview.net/forum?id=55e5f3GVFc)
 
 ![GeoBPE](./data/assets/fig1.png)
 
