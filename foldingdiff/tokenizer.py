@@ -139,7 +139,7 @@ class Tokenizer:
             self._init_ca_c = value
         else:
             # max is idx=3*n-2, which is .iloc[n-2], idx=3*n-1 would be n-1
-            self._angles_and_dists[Tokenizer.BOND_TYPES[idx%3]].iloc[(idx-2)//3] = value
+            self._angles_and_dists.loc[(idx-2)//3, Tokenizer.BOND_TYPES[idx%3]] = value
     
     def _bond_angle(self, idx, orig=False):
         if idx == 0:
@@ -152,7 +152,7 @@ class Tokenizer:
         if idx == 0:
             self._init_bond_angle = value
         else:
-            self._angles_and_dists[Tokenizer.BOND_ANGLES[idx%3]].iloc[(idx-1)//3] = value
+            self._angles_and_dists.loc[(idx-1)//3, Tokenizer.BOND_ANGLES[idx%3]] = value
         
     def _dihedral_angle(self, idx, orig=False):
         # max is idx=3*n-4, which is (3*n-3)//3=n-1
@@ -160,7 +160,7 @@ class Tokenizer:
 
     def _set_dihedral_angle(self, idx, value):
         # max is idx=3*n-4, which is (3*n-3)//3=n-1
-        self._angles_and_dists[Tokenizer.DIHEDRAL_ANGLES[idx%3]].iloc[(idx+1)//3] = value
+        self._angles_and_dists.loc[(idx+1)//3, Tokenizer.DIHEDRAL_ANGLES[idx%3]] = value
 
     def token_geo(self, idx, l, orig=False):
         """
